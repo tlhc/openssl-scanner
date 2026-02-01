@@ -38,15 +38,10 @@ class ExcelExporter:
             report_path: Path to JSON report file
             output_path: Output Excel file path
         """
-        try:
-            from openpyxl import Workbook
-            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-            from openpyxl.utils import get_column_letter
-        except ImportError:
-            raise ImportError(
-                "openpyxl is required for Excel export. "
-                "Install with: pip install openpyxl"
-            )
+        from . import _vendor  # noqa: F401 - adds vendored packages to sys.path
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
 
         with open(report_path, 'r', encoding='utf-8') as f:
             data = json.load(f)

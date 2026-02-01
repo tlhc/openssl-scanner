@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""
+OpenSSL Scanner - Zero-install runner script.
+
+Usage:
+    ./scan scan /path/to/binary -o report.json
+    ./scan aggregate /reports/ -o aggregated.json
+    ./scan export report.json -o report.xlsx
+"""
+import os
+import sys
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.join(script_dir, 'src')
+sys.path.insert(0, src_dir)
+
+from openssl_scanner.__main__ import main
+sys.exit(main())

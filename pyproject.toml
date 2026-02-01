@@ -30,19 +30,16 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 
-dependencies = [
-    "pyelftools>=0.29",
-]
+dependencies = []
 
 [project.optional-dependencies]
-export = [
-    "openpyxl>=3.1",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "mypy>=1.0",
     "ruff>=0.1",
+    "pyelftools>=0.29",
+    "openpyxl>=3.1",
 ]
 
 [project.scripts]

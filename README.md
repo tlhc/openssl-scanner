@@ -1,121 +1,104 @@
 # OpenSSL Symbol Dependency Scanner
 
-OpenHarmony 系统的 OpenSSL 符号依赖扫描工具。
+分析 ELF 二进制的 OpenSSL API 依赖关系。
 
 ## 功能
 
-- **扫描** - 分析 ELF 可执行文件和共享库的 OpenSSL 依赖
+- **扫描** - 分析 ELF 文件的 OpenSSL 符号依赖
 - **聚合** - 合并多个扫描报告，按组件统计
-- **导出** - 生成交互式 HTML 报告和 Excel 工作簿
+- **导出** - 生成 Excel（8 个工作表）和交互式 HTML 报告
 - **严格匹配** - 从 OpenSSL 库提取导出符号，100% 精确匹配
 
-## 安装
+## 快速开始（免安装）
+
+所有依赖已内置，仅需 Python 3.8+，克隆后直接运行：
 
 ```bash
-# 基础安装
-pip install -e .
+git clone https://github.com/anthropics/openssl-scanner.git
+cd openssl-scanner
 
-# 包含 Excel 导出支持
-pip install -e ".[export]"
+# 扫描单个二进制
+./scan scan /path/to/binary -o report.json
 
-# 包含开发依赖
-pip install -e ".[dev]"
-```
-
-## 快速开始
-
-```bash
-# 扫描单个二进制（自动检测 OpenSSL 库）
-openssl-scanner scan /system/bin/my_app -o report.json
-
-# 扫描整个目录
-openssl-scanner scan /system/lib64 --scan-dir -o scan.json
+# 扫描目录
+./scan scan /path/to/dir --scan-dir -o report.json
 
 # 聚合多个报告
-openssl-scanner aggregate /reports/ -o aggregated.json
+./scan aggregate /path/to/reports/ -o aggregated.json
 
-# 导出为 HTML（交互式报告）
-openssl-scanner export aggregated.json -o report.html
+# 导出 HTML
+./scan export report.json -o report.html
 
-# 导出为 Excel（多工作表）
-openssl-scanner export aggregated.json -o report.xlsx
+# 导出 Excel
+./scan export report.json -o report.xlsx
 ```
 
-## 命令概览
+### 在任意位置运行
 
-| 命令 | 说明 |
-|------|------|
-| `scan` | 扫描二进制或目录，生成 JSON 报告 |
-| `aggregate` | 合并多个扫描报告，按组件分组统计 |
-| `export` | 将 JSON 报告转换为 HTML 或 Excel |
+```bash
+# 使用绝对路径
+/path/to/openssl-scanner/scan scan /path/to/binary -o report.json
 
-> 直接运行 `openssl-scanner <target>` 等同于 `openssl-scanner scan <target>`
-
-## 工作原理
-
+# 或创建符号链接
+ln -s /path/to/openssl-scanner/scan /usr/local/bin/openssl-scanner
+openssl-scanner scan /path/to/binary -o report.json
 ```
-+-------------------+     +-------------------+     +------------------+
-| libcrypto.so      |     | Target Binary     |     | Match Result     |
-| (Reference)       |     | (Scan Target)     |     |                  |
-+--------+----------+     +--------+----------+     +--------+---------+
-         |                         |                         ^
-         v                         v                         |
-+--------+----------+     +--------+----------+              |
-| Extract defined   |     | Extract undefined |              |
-| symbols (exports) |     | symbols (imports) |              |
-+--------+----------+     +--------+----------+              |
-         |                         |                         |
-         +------------+------------+                         |
-                      |                                      |
-                      v                                      |
-              +-------+-------+                              |
-              | Set           |                              |
-              | Intersection  +------------------------------+
-              +---------------+
 
-              exports(libcrypto) ∩ imports(target) = OpenSSL dependencies
-```
+## 扫描模式
+
+| 模式 | 命令 | 特点 |
+|------|------|------|
+| **Tree Scan** | `./scan scan /path/to/binary` | 递归分析依赖树，生成完整依赖图 |
+| **Directory Scan** | `./scan scan /path/to/dir --scan-dir` | 扫描目录内所有 ELF，计算 import chains |
 
 ## 输出格式
 
-| 格式 | 用途 |
-|------|------|
-| **JSON** | 机器可读，CI/CD 集成，程序化分析 |
-| **HTML** | 交互式可视化，组件排名，分类图表，浏览器内 Excel 导出 |
-| **Excel** | 多工作表（Overview, Ranking, Category Pivot, Symbols, By File, By Component） |
+### Excel 工作表（8 个）
+
+| Sheet | 内容 |
+|-------|------|
+| Overview | 元数据、扫描摘要 |
+| Files | 所有扫描文件的详细信息 |
+| File-Symbol | 文件-符号关联表（透视分析用） |
+| Import Chains | 符号导入路径（含源文件、深度） |
+| By Category | 按 API 类别统计 |
+| By Depth | 按依赖深度统计（含文件分布） |
+| Dep Tree | 依赖树结构（仅 Tree Scan） |
+| Errors | 扫描错误和警告 |
+
+### HTML 报告
+
+- 完全自包含（离线可用）
+- 交互式组件排名表
+- API 类别分布图表
+- 组件详情弹窗（支持三级展开：组件→二进制→符号）
+- 浏览器内 Excel 导出
 
 ## 符号分类
 
 | 类别 | 前缀 | 说明 |
 |------|------|------|
 | ssl_core | SSL_ | SSL/TLS 核心功能 |
-| ssl_tls | TLS_, DTLS_ | TLS/DTLS 方法 |
 | crypto_evp | EVP_ | 高级加密接口 |
-| crypto_rsa | RSA_ | RSA 算法 |
-| crypto_ec | EC_, ECDSA_, ECDH_ | 椭圆曲线 |
+| crypto_x509 | X509_ | 证书处理 |
+| crypto_ec | EC_, ECDSA_ | 椭圆曲线 |
 | crypto_hash | SHA*, MD5_ | 哈希函数 |
-| crypto_x509 | X509_ | X.509 证书 |
 | crypto_sm | SM2_, SM3_, SM4_ | 国密算法 |
+
+完整分类见 [CLI 文档](docs/cli.md)。
+
+## 可选：pip 安装
+
+如需全局安装 `openssl-scanner` 命令：
+
+```bash
+pip install -e .
+openssl-scanner scan /path/to/binary -o report.json
+```
 
 ## 文档
 
-- [CLI 完整使用文档](docs/cli.md) - 命令行参数、输出格式、场景示例
-
-## 开发
-
-```bash
-# 安装开发依赖
-pip install -e ".[dev]"
-
-# 运行测试
-pytest -v
-
-# 类型检查
-mypy src/openssl_scanner
-
-# 代码检查
-ruff check src/openssl_scanner
-```
+- [CLI 完整文档](docs/cli.md) - 命令参数、输出格式、使用示例
 
 ## 许可证
 

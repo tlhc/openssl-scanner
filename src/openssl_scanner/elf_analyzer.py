@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Set
 
+from . import _vendor  # noqa: F401 - adds vendored packages to sys.path
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
 from elftools.elf.dynamic import DynamicSection
