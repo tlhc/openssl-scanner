@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openssl-scanner"
+version = "1.0.0"
+description = "OpenSSL Symbol Dependency Scanner for OpenHarmony"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.8"
+authors = [
+    {name = "OpenHarmony Security Team"}
+]
+keywords = ["openssl", "elf", "dependency", "scanner", "openharmony"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Build Tools",
+]
+
+dependencies = [
+    "pyelftools>=0.29",
+]
+
+[project.optional-dependencies]
+export = [
+    "openpyxl>=3.1",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+openssl-scanner = "openssl_scanner.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/openharmony/openssl_deps"
+Documentation = "https://github.com/openharmony/openssl_deps#readme"
+Repository = "https://github.com/openharmony/openssl_deps"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+strict = true
+
+[tool.ruff]
+target-version = "py38"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

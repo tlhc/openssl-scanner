@@ -1,0 +1,445 @@
+{
+  "meta": {
+    "tool_version": "1.0.0",
+    "scan_time": "2026-01-31T18:30:00+08:00",
+    "scan_root": "/system/bin/netstack_client",
+    "target_arch": "aarch64",
+    "openssl_version_detected": "3.0.12",
+    "search_paths": [
+      "/system/lib64",
+      "/system/lib64/ndk",
+      "/vendor/lib64"
+    ]
+  },
+
+  "summary": {
+    "total_files_scanned": 1,
+    "total_dependencies_resolved": 47,
+    "total_elf_files": 48,
+    "files_with_openssl_deps": 12,
+    "total_openssl_symbols": 234,
+    "unique_openssl_symbols": 89,
+    "openssl_libs_found": [
+      {
+        "path": "/system/lib64/libcrypto_openssl.so",
+        "type": "libcrypto",
+        "symbols_exported": 4521
+      },
+      {
+        "path": "/system/lib64/libssl_openssl.so",
+        "type": "libssl",
+        "symbols_exported": 512
+      }
+    ]
+  },
+
+  "dependency_tree": {
+    "root": {
+      "name": "netstack_client",
+      "path": "/system/bin/netstack_client",
+      "type": "executable",
+      "openssl_symbols_count": 0,
+      "has_openssl_dep": false
+    },
+    "children": [
+      {
+        "name": "libnetstack.z.so",
+        "path": "/system/lib64/libnetstack.z.so",
+        "type": "shared_library",
+        "openssl_symbols_count": 23,
+        "has_openssl_dep": true,
+        "children": [
+          {
+            "name": "libcurl.z.so",
+            "path": "/system/lib64/libcurl.z.so",
+            "type": "shared_library",
+            "openssl_symbols_count": 67,
+            "has_openssl_dep": true,
+            "children": [
+              {
+                "name": "libcrypto_openssl.so",
+                "path": "/system/lib64/libcrypto_openssl.so",
+                "type": "openssl_lib",
+                "is_openssl_lib": true,
+                "openssl_type": "libcrypto"
+              },
+              {
+                "name": "libssl_openssl.so",
+                "path": "/system/lib64/libssl_openssl.so",
+                "type": "openssl_lib",
+                "is_openssl_lib": true,
+                "openssl_type": "libssl"
+              },
+              {
+                "name": "libnghttp2.z.so",
+                "path": "/system/lib64/libnghttp2.z.so",
+                "type": "shared_library",
+                "openssl_symbols_count": 0,
+                "has_openssl_dep": false
+              },
+              {
+                "name": "libz.so",
+                "path": "/system/lib64/libz.so",
+                "type": "shared_library",
+                "openssl_symbols_count": 0,
+                "has_openssl_dep": false
+              }
+            ]
+          },
+          {
+            "name": "libssl_openssl.so",
+            "path": "/system/lib64/libssl_openssl.so",
+            "type": "openssl_lib",
+            "is_openssl_lib": true,
+            "openssl_type": "libssl"
+          }
+        ]
+      },
+      {
+        "name": "libhuks_ndk.z.so",
+        "path": "/system/lib64/libhuks_ndk.z.so",
+        "type": "shared_library",
+        "openssl_symbols_count": 34,
+        "has_openssl_dep": true,
+        "children": [
+          {
+            "name": "libcrypto_openssl.so",
+            "path": "/system/lib64/libcrypto_openssl.so",
+            "type": "openssl_lib",
+            "is_openssl_lib": true,
+            "openssl_type": "libcrypto"
+          }
+        ]
+      },
+      {
+        "name": "libc++.so",
+        "path": "/system/lib64/libc++.so",
+        "type": "shared_library",
+        "openssl_symbols_count": 0,
+        "has_openssl_dep": false
+      },
+      {
+        "name": "libc.so",
+        "path": "/system/lib64/libc.so",
+        "type": "shared_library",
+        "openssl_symbols_count": 0,
+        "has_openssl_dep": false
+      }
+    ]
+  },
+
+  "openssl_symbols": {
+    "by_file": {
+      "/system/lib64/libnetstack.z.so": {
+        "count": 23,
+        "symbols": [
+          {"name": "SSL_CTX_new", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_free", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_new", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_free", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_connect", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_read", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_write", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_shutdown", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_set_fd", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_get_error", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_set_verify", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_load_verify_locations", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "TLS_client_method", "category": "ssl_tls", "binding": "GLOBAL"},
+          {"name": "X509_STORE_CTX_get_error", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "X509_verify_cert_error_string", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "ERR_get_error", "category": "crypto_err", "binding": "GLOBAL"},
+          {"name": "ERR_error_string_n", "category": "crypto_err", "binding": "GLOBAL"},
+          {"name": "OPENSSL_init_ssl", "category": "openssl_util", "binding": "GLOBAL"},
+          {"name": "EVP_sha256", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_MD_CTX_new", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestInit_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestUpdate", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestFinal_ex", "category": "crypto_evp", "binding": "GLOBAL"}
+        ]
+      },
+      "/system/lib64/libcurl.z.so": {
+        "count": 67,
+        "symbols": [
+          {"name": "SSL_CTX_new", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_free", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_set_options", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_set_cipher_list", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_use_certificate_file", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "SSL_CTX_use_PrivateKey_file", "category": "ssl_core", "binding": "GLOBAL"},
+          {"name": "EVP_PKEY_new", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_PKEY_free", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_MD_CTX_new", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_MD_CTX_free", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestInit_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestUpdate", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DigestFinal_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_sha256", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_sha1", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_md5", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "RSA_new", "category": "crypto_rsa", "binding": "GLOBAL"},
+          {"name": "RSA_free", "category": "crypto_rsa", "binding": "GLOBAL"},
+          {"name": "RSA_public_encrypt", "category": "crypto_rsa", "binding": "GLOBAL"},
+          {"name": "RSA_private_decrypt", "category": "crypto_rsa", "binding": "GLOBAL"},
+          {"name": "BIO_new", "category": "crypto_bio", "binding": "GLOBAL"},
+          {"name": "BIO_free", "category": "crypto_bio", "binding": "GLOBAL"},
+          {"name": "BIO_read", "category": "crypto_bio", "binding": "GLOBAL"},
+          {"name": "BIO_write", "category": "crypto_bio", "binding": "GLOBAL"},
+          {"name": "BIO_s_mem", "category": "crypto_bio", "binding": "GLOBAL"},
+          {"name": "X509_new", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "X509_free", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "X509_verify_cert", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "X509_get_subject_name", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "X509_NAME_oneline", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "PEM_read_X509", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "PEM_read_PrivateKey", "category": "crypto_x509", "binding": "GLOBAL"},
+          {"name": "RAND_bytes", "category": "crypto_rand", "binding": "GLOBAL"},
+          {"name": "RAND_seed", "category": "crypto_rand", "binding": "GLOBAL"},
+          {"name": "ERR_get_error", "category": "crypto_err", "binding": "GLOBAL"},
+          {"name": "ERR_error_string_n", "category": "crypto_err", "binding": "GLOBAL"},
+          {"name": "ERR_clear_error", "category": "crypto_err", "binding": "GLOBAL"},
+          {"name": "OPENSSL_init_crypto", "category": "openssl_util", "binding": "GLOBAL"},
+          {"name": "CRYPTO_malloc", "category": "openssl_util", "binding": "GLOBAL"},
+          {"name": "CRYPTO_free", "category": "openssl_util", "binding": "GLOBAL"}
+        ]
+      },
+      "/system/lib64/libhuks_ndk.z.so": {
+        "count": 34,
+        "symbols": [
+          {"name": "EVP_CIPHER_CTX_new", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_CIPHER_CTX_free", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_EncryptInit_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_EncryptUpdate", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_EncryptFinal_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DecryptInit_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DecryptUpdate", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_DecryptFinal_ex", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_aes_256_gcm", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_aes_128_cbc", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_PKEY_CTX_new", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_PKEY_keygen_init", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EVP_PKEY_keygen", "category": "crypto_evp", "binding": "GLOBAL"},
+          {"name": "EC_KEY_new_by_curve_name", "category": "crypto_ec", "binding": "GLOBAL"},
+          {"name": "EC_KEY_free", "category": "crypto_ec", "binding": "GLOBAL"},
+          {"name": "EC_KEY_generate_key", "category": "crypto_ec", "binding": "GLOBAL"},
+          {"name": "ECDSA_sign", "category": "crypto_ec", "binding": "GLOBAL"},
+          {"name": "ECDSA_verify", "category": "crypto_ec", "binding": "GLOBAL"},
+          {"name": "BN_new", "category": "crypto_bn", "binding": "GLOBAL"},
+          {"name": "BN_free", "category": "crypto_bn", "binding": "GLOBAL"},
+          {"name": "BN_bin2bn", "category": "crypto_bn", "binding": "GLOBAL"},
+          {"name": "BN_bn2bin", "category": "crypto_bn", "binding": "GLOBAL"},
+          {"name": "HMAC", "category": "crypto_hmac", "binding": "GLOBAL"},
+          {"name": "HMAC_CTX_new", "category": "crypto_hmac", "binding": "GLOBAL"},
+          {"name": "HMAC_Init_ex", "category": "crypto_hmac", "binding": "GLOBAL"},
+          {"name": "HMAC_Update", "category": "crypto_hmac", "binding": "GLOBAL"},
+          {"name": "HMAC_Final", "category": "crypto_hmac", "binding": "GLOBAL"},
+          {"name": "RAND_bytes", "category": "crypto_rand", "binding": "GLOBAL"},
+          {"name": "OPENSSL_init_crypto", "category": "openssl_util", "binding": "GLOBAL"}
+        ]
+      }
+    },
+
+    "by_category": {
+      "ssl_core": {
+        "count": 18,
+        "files": ["/system/lib64/libnetstack.z.so", "/system/lib64/libcurl.z.so"],
+        "symbols": [
+          "SSL_CTX_new", "SSL_CTX_free", "SSL_CTX_set_options",
+          "SSL_CTX_set_cipher_list", "SSL_CTX_set_verify",
+          "SSL_CTX_load_verify_locations", "SSL_CTX_use_certificate_file",
+          "SSL_CTX_use_PrivateKey_file", "SSL_new", "SSL_free",
+          "SSL_connect", "SSL_read", "SSL_write", "SSL_shutdown",
+          "SSL_set_fd", "SSL_get_error"
+        ]
+      },
+      "ssl_tls": {
+        "count": 1,
+        "files": ["/system/lib64/libnetstack.z.so"],
+        "symbols": ["TLS_client_method"]
+      },
+      "crypto_evp": {
+        "count": 32,
+        "files": ["/system/lib64/libnetstack.z.so", "/system/lib64/libcurl.z.so", "/system/lib64/libhuks_ndk.z.so"],
+        "symbols": [
+          "EVP_MD_CTX_new", "EVP_MD_CTX_free", "EVP_DigestInit_ex",
+          "EVP_DigestUpdate", "EVP_DigestFinal_ex", "EVP_sha256",
+          "EVP_sha1", "EVP_md5", "EVP_PKEY_new", "EVP_PKEY_free",
+          "EVP_CIPHER_CTX_new", "EVP_CIPHER_CTX_free",
+          "EVP_EncryptInit_ex", "EVP_EncryptUpdate", "EVP_EncryptFinal_ex",
+          "EVP_DecryptInit_ex", "EVP_DecryptUpdate", "EVP_DecryptFinal_ex",
+          "EVP_aes_256_gcm", "EVP_aes_128_cbc"
+        ]
+      },
+      "crypto_rsa": {
+        "count": 4,
+        "files": ["/system/lib64/libcurl.z.so"],
+        "symbols": ["RSA_new", "RSA_free", "RSA_public_encrypt", "RSA_private_decrypt"]
+      },
+      "crypto_ec": {
+        "count": 6,
+        "files": ["/system/lib64/libhuks_ndk.z.so"],
+        "symbols": [
+          "EC_KEY_new_by_curve_name", "EC_KEY_free", "EC_KEY_generate_key",
+          "ECDSA_sign", "ECDSA_verify"
+        ]
+      },
+      "crypto_bio": {
+        "count": 5,
+        "files": ["/system/lib64/libcurl.z.so"],
+        "symbols": ["BIO_new", "BIO_free", "BIO_read", "BIO_write", "BIO_s_mem"]
+      },
+      "crypto_x509": {
+        "count": 10,
+        "files": ["/system/lib64/libnetstack.z.so", "/system/lib64/libcurl.z.so"],
+        "symbols": [
+          "X509_new", "X509_free", "X509_verify_cert",
+          "X509_get_subject_name", "X509_NAME_oneline",
+          "X509_STORE_CTX_get_error", "X509_verify_cert_error_string",
+          "PEM_read_X509", "PEM_read_PrivateKey"
+        ]
+      },
+      "crypto_bn": {
+        "count": 4,
+        "files": ["/system/lib64/libhuks_ndk.z.so"],
+        "symbols": ["BN_new", "BN_free", "BN_bin2bn", "BN_bn2bin"]
+      },
+      "crypto_hmac": {
+        "count": 5,
+        "files": ["/system/lib64/libhuks_ndk.z.so"],
+        "symbols": ["HMAC", "HMAC_CTX_new", "HMAC_Init_ex", "HMAC_Update", "HMAC_Final"]
+      },
+      "crypto_rand": {
+        "count": 3,
+        "files": ["/system/lib64/libcurl.z.so", "/system/lib64/libhuks_ndk.z.so"],
+        "symbols": ["RAND_bytes", "RAND_seed"]
+      },
+      "crypto_err": {
+        "count": 5,
+        "files": ["/system/lib64/libnetstack.z.so", "/system/lib64/libcurl.z.so"],
+        "symbols": ["ERR_get_error", "ERR_error_string_n", "ERR_clear_error"]
+      },
+      "openssl_util": {
+        "count": 6,
+        "files": ["/system/lib64/libnetstack.z.so", "/system/lib64/libcurl.z.so", "/system/lib64/libhuks_ndk.z.so"],
+        "symbols": ["OPENSSL_init_ssl", "OPENSSL_init_crypto", "CRYPTO_malloc", "CRYPTO_free"]
+      }
+    },
+
+    "all_unique_sorted": [
+      "BIO_free",
+      "BIO_new",
+      "BIO_read",
+      "BIO_s_mem",
+      "BIO_write",
+      "BN_bin2bn",
+      "BN_bn2bin",
+      "BN_free",
+      "BN_new",
+      "CRYPTO_free",
+      "CRYPTO_malloc",
+      "ECDSA_sign",
+      "ECDSA_verify",
+      "EC_KEY_free",
+      "EC_KEY_generate_key",
+      "EC_KEY_new_by_curve_name",
+      "ERR_clear_error",
+      "ERR_error_string_n",
+      "ERR_get_error",
+      "EVP_CIPHER_CTX_free",
+      "EVP_CIPHER_CTX_new",
+      "EVP_DecryptFinal_ex",
+      "EVP_DecryptInit_ex",
+      "EVP_DecryptUpdate",
+      "EVP_DigestFinal_ex",
+      "EVP_DigestInit_ex",
+      "EVP_DigestUpdate",
+      "EVP_EncryptFinal_ex",
+      "EVP_EncryptInit_ex",
+      "EVP_EncryptUpdate",
+      "EVP_MD_CTX_free",
+      "EVP_MD_CTX_new",
+      "EVP_PKEY_CTX_new",
+      "EVP_PKEY_free",
+      "EVP_PKEY_keygen",
+      "EVP_PKEY_keygen_init",
+      "EVP_PKEY_new",
+      "EVP_aes_128_cbc",
+      "EVP_aes_256_gcm",
+      "EVP_md5",
+      "EVP_sha1",
+      "EVP_sha256",
+      "HMAC",
+      "HMAC_CTX_new",
+      "HMAC_Final",
+      "HMAC_Init_ex",
+      "HMAC_Update",
+      "OPENSSL_init_crypto",
+      "OPENSSL_init_ssl",
+      "PEM_read_PrivateKey",
+      "PEM_read_X509",
+      "RAND_bytes",
+      "RAND_seed",
+      "RSA_free",
+      "RSA_new",
+      "RSA_private_decrypt",
+      "RSA_public_encrypt",
+      "SSL_CTX_free",
+      "SSL_CTX_load_verify_locations",
+      "SSL_CTX_new",
+      "SSL_CTX_set_cipher_list",
+      "SSL_CTX_set_options",
+      "SSL_CTX_set_verify",
+      "SSL_CTX_use_PrivateKey_file",
+      "SSL_CTX_use_certificate_file",
+      "SSL_connect",
+      "SSL_free",
+      "SSL_get_error",
+      "SSL_new",
+      "SSL_read",
+      "SSL_set_fd",
+      "SSL_shutdown",
+      "SSL_write",
+      "TLS_client_method",
+      "X509_NAME_oneline",
+      "X509_STORE_CTX_get_error",
+      "X509_free",
+      "X509_get_subject_name",
+      "X509_new",
+      "X509_verify_cert",
+      "X509_verify_cert_error_string"
+    ]
+  },
+
+  "dependency_chain": [
+    {
+      "from": "/system/bin/netstack_client",
+      "to": "/system/lib64/libcrypto_openssl.so",
+      "chain": [
+        "/system/bin/netstack_client",
+        "libnetstack.z.so",
+        "libcurl.z.so",
+        "libcrypto_openssl.so"
+      ],
+      "depth": 3
+    },
+    {
+      "from": "/system/bin/netstack_client",
+      "to": "/system/lib64/libssl_openssl.so",
+      "chain": [
+        "/system/bin/netstack_client",
+        "libnetstack.z.so",
+        "libssl_openssl.so"
+      ],
+      "depth": 2
+    }
+  ],
+
+  "statistics": {
+    "scan_duration_ms": 1247,
+    "files_processed_per_second": 38.5,
+    "memory_peak_mb": 45.2
+  },
+
+  "warnings": [],
+  "errors": []
+}
