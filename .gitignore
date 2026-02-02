@@ -16,6 +16,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!src/openssl_scanner/_vendor/**/lib/
 parts/
 sdist/
 var/
