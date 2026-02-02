@@ -70,6 +70,7 @@ Commands:
 | `--openssl-ssl PATH` | 指定 libssl.so 路径 |
 | `-o, --output FILE` | 输出文件（默认: openssl_deps_report.json） |
 | `-L, --lib-path PATH` | 额外库搜索路径（可多次使用） |
+| `--sysroot PATH` | 根文件系统路径（自动发现所有库目录） |
 | `-j, --jobs N` | 并行线程数（默认: CPU 核心数） |
 | `--scan-dir` | 目录扫描模式 |
 | `--no-recursive` | 不递归子目录 |
@@ -102,7 +103,35 @@ Commands:
     --openssl-ssl /new/openssl-3.2/lib/libssl.so.3 \
     -L /old/system/lib \
     -o upgrade_check.json
+
+# 分析 OpenHarmony 镜像（自动发现所有库目录）
+./scan scan /mnt/openharmony/system/bin/app \
+    --sysroot /mnt/openharmony \
+    -o report.json
 ```
+
+### 跨系统分析（--sysroot）
+
+分析来自其他系统的二进制时，使用 `--sysroot` 自动发现库目录：
+
+```bash
+# 挂载 OpenHarmony 镜像
+mount -o loop system.img /mnt/oh
+
+# 扫描镜像中的二进制（自动发现 /mnt/oh 下所有库目录）
+./scan scan /mnt/oh/system/bin/curl --sysroot /mnt/oh -o curl.json
+
+# 扫描整个 system 目录
+./scan scan /mnt/oh/system --scan-dir --sysroot /mnt/oh -o system.json
+```
+
+`--sysroot` 会递归扫描指定目录，自动将所有包含 `.so` 文件的目录加入库搜索路径。
+
+| 场景 | 命令 |
+|------|------|
+| 分析 rootfs 镜像 | `--sysroot /mnt/rootfs` |
+| 分析 SDK 环境 | `--sysroot /opt/sdk/sysroot` |
+| 分析容器导出 | `--sysroot /tmp/container-export` |
 
 ### 手动指定 OpenSSL 库
 

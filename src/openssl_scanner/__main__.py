@@ -21,6 +21,7 @@ from .openssl_matcher import OpenSSLMatcher
 from .openssl_discovery import OpenSSLDiscovery
 from .aggregator import Aggregator, AggregatedReporter
 from .exporter import Exporter
+from .dependency_resolver import discover_lib_dirs
 
 
 def setup_logging(verbose: bool, log_file: Optional[str] = None) -> None:
@@ -115,6 +116,11 @@ Examples:
         dest='lib_paths',
         default=[],
         help='Additional library search path (can be used multiple times)',
+    )
+
+    scan_parser.add_argument(
+        '--sysroot',
+        help='Root filesystem path for cross-analysis (auto-discovers lib directories)',
     )
 
     scan_parser.add_argument(
@@ -274,6 +280,13 @@ def cmd_scan(args) -> int:
 
     is_dir_mode = args.scan_dir or os.path.isdir(target)
 
+    search_paths = list(args.lib_paths)
+    if args.sysroot:
+        sysroot = os.path.abspath(args.sysroot)
+        logger.info(f"Scanning sysroot for library directories: {sysroot}")
+        sysroot_dirs = discover_lib_dirs(sysroot)
+        search_paths = sysroot_dirs + search_paths
+
     libcrypto = None
     libssl = None
 
@@ -286,7 +299,7 @@ def cmd_scan(args) -> int:
             libssl = os.path.abspath(args.openssl_ssl)
     else:
         logger.info("Auto-detecting OpenSSL libraries...")
-        discovery = OpenSSLDiscovery(additional_paths=args.lib_paths)
+        discovery = OpenSSLDiscovery(additional_paths=search_paths)
         libcrypto, libssl = discovery.discover(
             target,
             is_directory=is_dir_mode,
@@ -308,7 +321,7 @@ def cmd_scan(args) -> int:
         return 1
 
     scanner = Scanner(
-        search_paths=args.lib_paths,
+        search_paths=search_paths,
         workers=args.jobs,
         matcher=matcher,
     )

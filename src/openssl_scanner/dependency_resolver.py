@@ -16,6 +16,59 @@ from .constants import DEFAULT_SEARCH_PATHS
 logger = logging.getLogger(__name__)
 
 
+def discover_lib_dirs(sysroot: str, max_depth: int = 6) -> List[str]:
+    """
+    Discover directories containing shared libraries under sysroot.
+
+    Scans recursively (up to max_depth) for directories with .so files.
+    Skips non-library directories (python, share, locale, etc.) for speed.
+
+    Args:
+        sysroot: Root filesystem path to scan
+        max_depth: Maximum directory depth to scan (default: 6)
+
+    Returns:
+        List of directory paths containing .so files, sorted by depth
+    """
+    lib_dirs: Set[str] = set()
+    sysroot = os.path.abspath(sysroot)
+
+    if not os.path.isdir(sysroot):
+        logger.warning(f"Sysroot not found: {sysroot}")
+        return []
+
+    skip_dirs = {
+        'python', 'python2', 'python2.7', 'python3', 'python3.8', 'python3.9',
+        'python3.10', 'python3.11', 'python3.12', 'python3.13', 'python3.14',
+        'site-packages', 'dist-packages', '__pycache__',
+        'share', 'locale', 'man', 'doc', 'docs', 'info', 'help',
+        'include', 'headers', 'icons', 'themes', 'fonts',
+        'src', 'test', 'tests', 'examples', 'samples',
+        '.git', '.svn', 'node_modules', 'cargo', 'rustlib',
+    }
+
+    base_depth = sysroot.rstrip(os.sep).count(os.sep)
+
+    for root, dirs, files in os.walk(sysroot, followlinks=True):
+        current_depth = root.count(os.sep) - base_depth
+
+        if current_depth >= max_depth:
+            dirs[:] = []
+            continue
+
+        dirs[:] = [d for d in dirs
+                   if not d.startswith('.') and d not in skip_dirs]
+
+        for f in files:
+            if f.endswith('.so') or '.so.' in f:
+                lib_dirs.add(root)
+                break
+
+    result = sorted(lib_dirs, key=lambda p: p.count(os.sep))
+    logger.info(f"Discovered {len(result)} library directories under {sysroot}")
+    return result
+
+
 @dataclass
 class DependencyNode:
     """Node in the dependency tree."""
