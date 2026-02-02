@@ -16,7 +16,7 @@ from .constants import DEFAULT_SEARCH_PATHS
 logger = logging.getLogger(__name__)
 
 
-def discover_lib_dirs(sysroot: str, max_depth: int = 6) -> List[str]:
+def discover_lib_dirs(sysroot: str, max_depth: int = 50) -> List[str]:
     """
     Discover directories containing shared libraries under sysroot.
 
@@ -25,7 +25,7 @@ def discover_lib_dirs(sysroot: str, max_depth: int = 6) -> List[str]:
 
     Args:
         sysroot: Root filesystem path to scan
-        max_depth: Maximum directory depth to scan (default: 6)
+        max_depth: Maximum directory depth to scan (default: 50)
 
     Returns:
         List of directory paths containing .so files, sorted by depth
