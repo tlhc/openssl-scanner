@@ -79,17 +79,48 @@ Commands:
 ### 示例
 
 ```bash
-# 单二进制扫描（Tree Scan）
+# 单二进制扫描（Tree Scan，自动检测 OpenSSL）
 ./scan scan /usr/bin/curl -o curl.json
 
 # 目录扫描（Directory Scan）
 ./scan scan /usr/bin --scan-dir -j 8 -o usrbin.json
 
-# 指定 OpenSSL 库路径
+# 手动指定 OpenSSL 库路径（跳过自动检测）
 ./scan scan /path/to/app \
     --openssl-lib /lib/libcrypto.so.3 \
-    -L /custom/lib64 \
+    --openssl-ssl /lib/libssl.so.3 \
     -o report.json
+
+# 仅指定 libcrypto（不分析 SSL 符号）
+./scan scan /path/to/app \
+    --openssl-lib /opt/openssl-3.2/lib/libcrypto.so \
+    -o report.json
+
+# 交叉分析：用新版 OpenSSL 符号表分析旧二进制
+./scan scan /old/system/bin/app \
+    --openssl-lib /new/openssl-3.2/lib/libcrypto.so.3 \
+    --openssl-ssl /new/openssl-3.2/lib/libssl.so.3 \
+    -L /old/system/lib \
+    -o upgrade_check.json
+```
+
+### 手动指定 OpenSSL 库
+
+默认情况下，工具会自动从目标的依赖树中检测 OpenSSL 库。以下场景需要手动指定：
+
+| 场景 | 说明 |
+|------|------|
+| **交叉分析** | 用不同版本的 OpenSSL 符号表分析二进制 |
+| **自动检测失败** | 目标未直接依赖 OpenSSL（通过插件加载等） |
+| **版本升级评估** | 用新版 OpenSSL 检查兼容性 |
+| **离线分析** | 分析来自其他系统的二进制 |
+
+```bash
+# 示例：检查应用是否兼容 OpenSSL 3.2
+./scan scan /current/bin/myapp \
+    --openssl-lib /opt/openssl-3.2/lib/libcrypto.so.3 \
+    --openssl-ssl /opt/openssl-3.2/lib/libssl.so.3 \
+    -o openssl32_compat.json
 ```
 
 ### 两种扫描模式
@@ -367,6 +398,12 @@ fi
 - 交叉分析（不同环境的二进制和 OpenSSL）
 - 自动检测失败时
 - 测试特定 OpenSSL 版本的兼容性
+- 离线分析来自其他系统的二进制
+
+```bash
+# 示例：用 OpenSSL 3.2 符号表分析旧应用
+./scan scan /old/app --openssl-lib /opt/openssl-3.2/lib/libcrypto.so.3
+```
 
 **Q: by_depth 中的深度含义?**
 
