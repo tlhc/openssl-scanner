@@ -163,6 +163,10 @@ class OpenSSLMatcher:
         """Return all loaded OpenSSL symbols."""
         return self._openssl_exports.copy()
 
+    def get_openssl_exports(self) -> Set[str]:
+        """Return OpenSSL exports set (for parallel processing)."""
+        return self._openssl_exports
+
     def get_stats(self) -> Dict[str, any]:
         """Return matcher statistics."""
         return {

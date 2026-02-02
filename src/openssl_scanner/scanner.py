@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Set
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .elf_analyzer import ELFAnalyzer, ELFInfo
 from .dependency_resolver import DependencyResolver, DependencyNode
@@ -18,6 +18,62 @@ from .openssl_matcher import OpenSSLMatcher
 from . import __version__
 
 logger = logging.getLogger(__name__)
+
+
+def _analyze_file_worker(args: tuple) -> 'FileResult':
+    """
+    Worker function for parallel file analysis.
+
+    Must be at module level for ProcessPoolExecutor pickling.
+    """
+    path, openssl_exports = args
+    analyzer = ELFAnalyzer()
+
+    if not os.path.isfile(path):
+        return FileResult(
+            path=path,
+            file_type='unknown',
+            arch='unknown',
+            direct_deps=[],
+            openssl_direct=False,
+            openssl_transitive=False,
+            openssl_libs=[],
+            openssl_symbols=[],
+            error='File not found'
+        )
+
+    info = analyzer.analyze(path)
+    if not info:
+        return FileResult(
+            path=path,
+            file_type='unknown',
+            arch='unknown',
+            direct_deps=[],
+            openssl_direct=False,
+            openssl_transitive=False,
+            openssl_libs=[],
+            openssl_symbols=[],
+            error='Not a valid ELF file'
+        )
+
+    undefined_names = [s.name for s in info.undefined_symbols]
+    openssl_symbols = [s for s in undefined_names if s in openssl_exports]
+
+    openssl_lib_patterns = ('libcrypto', 'libssl', 'libopenssl')
+    openssl_libs = [lib for lib in info.needed_libs
+                    if any(p in lib.lower() for p in openssl_lib_patterns)]
+    openssl_direct = len(openssl_libs) > 0
+
+    return FileResult(
+        path=path,
+        file_type=info.elf_type,
+        arch=info.arch,
+        direct_deps=info.needed_libs,
+        openssl_direct=openssl_direct,
+        openssl_transitive=False,
+        openssl_libs=openssl_libs,
+        openssl_symbols=openssl_symbols,
+    )
 
 
 @dataclass
@@ -208,10 +264,13 @@ class Scanner:
         symbols_by_file: Dict[str, List[str]] = {}
         openssl_libs: Set[str] = set()
 
-        with ThreadPoolExecutor(max_workers=self._workers) as executor:
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in all_paths if p]
+
+        with ProcessPoolExecutor(max_workers=self._workers) as executor:
             future_to_path = {
-                executor.submit(self.scan_file, p): p
-                for p in all_paths if p
+                executor.submit(_analyze_file_worker, item): item[0]
+                for item in work_items
             }
 
             for future in as_completed(future_to_path):
@@ -292,10 +351,13 @@ class Scanner:
         symbols_by_file: Dict[str, List[str]] = {}
         openssl_libs: Set[str] = set()
 
-        with ThreadPoolExecutor(max_workers=self._workers) as executor:
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in elf_files]
+
+        with ProcessPoolExecutor(max_workers=self._workers) as executor:
             future_to_path = {
-                executor.submit(self.scan_file, p): p
-                for p in elf_files
+                executor.submit(_analyze_file_worker, item): item[0]
+                for item in work_items
             }
 
             for future in as_completed(future_to_path):
