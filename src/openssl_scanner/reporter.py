@@ -59,6 +59,16 @@ class Reporter:
         lines.append(f"Scan Target: {result.target}")
         lines.append(f"Scan Time:   {result.scan_time}")
         lines.append(f"Architecture: {result.arch}")
+        if result.process_info:
+            pi = result.process_info
+            lines.append(f"Process:     {pi['name']} (PID {pi['pid']})")
+            lines.append(f"Command:     {pi.get('cmdline', '')}")
+            libs_count = pi.get('mapped_libraries_count', 0)
+            runtime_count = pi.get('runtime_loaded_count', 0)
+            if runtime_count > 0:
+                lines.append(f"Libraries:   {libs_count} loaded ({runtime_count} via dlopen)")
+            else:
+                lines.append(f"Libraries:   {libs_count} loaded")
         lines.append('')
 
         lines.append('-' * width)
@@ -212,6 +222,9 @@ class Reporter:
 
         if result.dependency_tree:
             data['dependency_tree'] = self._tree_to_dict(result.dependency_tree)
+
+        if result.process_info:
+            data['meta']['process'] = result.process_info
 
         return data
 

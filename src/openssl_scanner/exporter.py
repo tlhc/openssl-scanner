@@ -611,15 +611,34 @@ class HTMLExporter:
 
         <div class="tabs">
             <button class="tab-btn active" onclick="showTab('ranking')">Ranking</button>
+            <button class="tab-btn" onclick="showTab('dependencies')">Dependencies</button>
             <button class="tab-btn" onclick="showTab('categories')">Categories</button>
             <button class="tab-btn" onclick="showTab('symbols')">Symbols</button>
         </div>
 
         <div id="ranking" class="tab-content active">
+            <div id="processInfoBar" class="process-info-bar" style="display:none"></div>
             <div class="chart-container">
                 <canvas id="rankingChart"></canvas>
             </div>
             <table id="rankingTable"></table>
+        </div>
+
+        <div id="dependencies" class="tab-content">
+            <div id="depSummaryBar" class="dep-summary-bar"></div>
+            <div id="depChains" class="dep-chains-section"></div>
+            <div class="dep-graph-section">
+                <div class="dep-graph-toolbar">
+                    <span class="dep-graph-title">Dependency Graph</span>
+                    <button class="dep-filter-btn active" onclick="setDepFilter('ossl',this)">OSSL Path</button>
+                    <button class="dep-filter-btn" onclick="setDepFilter('shared',this)">Shared</button>
+                    <button class="dep-filter-btn" onclick="setDepFilter('all',this)">All</button>
+                </div>
+                <div class="dep-graph-viewport" id="depGraphViewport">
+                    <canvas id="depGraphCanvas" width="1200" height="500"></canvas>
+                </div>
+            </div>
+            <table id="depStatsTable"></table>
         </div>
 
         <div id="categories" class="tab-content">
@@ -854,6 +873,223 @@ tr:hover {
     text-decoration: underline;
 }
 
+/* Hierarchical ranking table */
+.ranking-exe-row td {
+    background: #eaf2f8;
+    font-weight: 600;
+    border-top: 2px solid #3498db;
+}
+.ranking-exe-row td:first-child {
+    color: #2c3e50;
+}
+.ranking-lib-row td {
+    padding-left: 16px;
+    color: #555;
+    font-size: 0.93em;
+}
+.ranking-lib-row td:first-child {
+    border-left: 3px solid #dce6f0;
+}
+.sym-badge {
+    display: inline-block;
+    background: #3498db;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.82em;
+    margin-left: 6px;
+    font-weight: normal;
+}
+.sym-badge.zero {
+    background: #bdc3c7;
+}
+.openssl-marker {
+    display: inline-block;
+    background: #e74c3c;
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.78em;
+    margin-left: 6px;
+    font-weight: 600;
+}
+.circular-tag {
+    color: #95a5a6;
+    font-style: italic;
+    font-size: 0.85em;
+}
+.cat-dist {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    line-height: 1.4;
+}
+.cat-tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.8em;
+    white-space: nowrap;
+    color: #fff;
+}
+.cat-tag .cat-count {
+    font-weight: 600;
+}
+.dep-summary-bar {
+    display: flex;
+    gap: 24px;
+    padding: 12px 16px;
+    background: #f0f4f8;
+    border: 1px solid #d6e0eb;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 0.9em;
+}
+.dep-summary-bar .dep-stat {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+.dep-summary-bar .dep-stat-val {
+    font-weight: 700;
+    color: #2c3e50;
+    font-size: 1.2em;
+}
+.dep-summary-bar .dep-stat-label {
+    color: #7f8c8d;
+}
+.dep-chains-section {
+    margin-bottom: 20px;
+}
+.dep-chains-title {
+    font-weight: 600;
+    font-size: 1.05em;
+    margin-bottom: 10px;
+    color: #2c3e50;
+}
+.dep-chain-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    background: #fafbfc;
+    border: 1px solid #e8ecf0;
+    border-radius: 6px;
+}
+.dep-chain-node {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-weight: 500;
+    cursor: pointer;
+    transition: box-shadow 0.15s;
+}
+.dep-chain-node:hover {
+    box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.4);
+}
+.dep-chain-node.root {
+    background: #eaf2f8;
+    color: #2c3e50;
+    border: 1px solid #b8d4e8;
+}
+.dep-chain-node.middle {
+    background: #f5f5f5;
+    color: #555;
+    border: 1px solid #ddd;
+}
+.dep-chain-node.target {
+    background: #fdebd0;
+    color: #8a5a00;
+    border: 1px solid #f0c27a;
+    font-weight: 600;
+}
+.dep-chain-arrow {
+    color: #95a5a6;
+    font-size: 1.1em;
+    margin: 0 2px;
+}
+.dep-chain-sym {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    align-items: center;
+    flex-basis: 100%;
+    padding-left: 8px;
+    margin-top: 2px;
+}
+.dep-graph-section {
+    margin-bottom: 20px;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.dep-graph-viewport {
+    overflow: auto;
+    max-height: 600px;
+    cursor: grab;
+    position: relative;
+}
+.dep-graph-viewport.dragging {
+    cursor: grabbing;
+    user-select: none;
+}
+.dep-graph-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #f6f8fa;
+    border-bottom: 1px solid #e1e4e8;
+}
+.dep-graph-title {
+    font-weight: 600;
+    font-size: 0.95em;
+    color: #2c3e50;
+    margin-right: auto;
+}
+.dep-filter-btn {
+    padding: 4px 12px;
+    border: 1px solid #d1d5da;
+    border-radius: 4px;
+    background: #fff;
+    font-size: 0.82em;
+    cursor: pointer;
+    color: #555;
+}
+.dep-filter-btn.active {
+    background: #3498db;
+    color: #fff;
+    border-color: #3498db;
+}
+#depGraphCanvas {
+    width: 100%;
+    display: block;
+    background: #fff;
+}
+.process-info-bar {
+    display: flex;
+    gap: 20px;
+    padding: 10px 16px;
+    background: #fafbfc;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-size: 0.9em;
+    color: #555;
+    flex-wrap: wrap;
+}
+.process-info-bar .pi-item {
+    white-space: nowrap;
+}
+.process-info-bar .pi-label {
+    font-weight: 600;
+    color: #2c3e50;
+    margin-right: 4px;
+}
+
 /* Modal styles */
 .modal {
     display: none;
@@ -1047,11 +1283,709 @@ let currentData = null;
 let rankingChart = null;
 let categoryChart = null;
 
-function normalizeData(data) {
-    /* Normalize single and aggregated report formats to common structure */
-    const reportType = data.meta?.report_type || 'single';
+const CATEGORY_COLORS = {
+    'ssl_core': '#e74c3c', 'ssl_tls': '#c0392b',
+    'crypto_evp': '#3498db', 'crypto_rsa': '#2ecc71',
+    'crypto_ec': '#9b59b6', 'crypto_bn': '#f39c12',
+    'crypto_dsa': '#1abc9c', 'crypto_dh': '#e67e22',
+    'crypto_bio': '#34495e', 'crypto_rand': '#16a085',
+    'crypto_aes': '#d35400', 'crypto_sm': '#8e44ad',
+    'crypto_x509': '#27ae60', 'crypto_pem': '#2980b9',
+    'crypto_err': '#7f8c8d', 'crypto_engine': '#5dade2',
+    'crypto_hash': '#2c3e50', 'crypto_hmac': '#1a5276',
+    'crypto_des': '#a93226', 'crypto_chacha': '#6c3483',
+    'crypto_pkcs': '#117a65', 'crypto_cms': '#0e6655',
+    'crypto_ocsp': '#784212', 'crypto_ts': '#7d6608',
+    'crypto_obj': '#5b2c6f', 'crypto_kdf': '#154360',
+    'crypto_provider': '#0b5345', 'crypto_asn1': '#7b7d7d',
+    'openssl_util': '#95a5a6', 'other': '#bdc3c7'
+};
 
-    if (reportType === 'single') {
+function buildCategoryBreakdown(symbols, byCategory) {
+    const cats = {};
+    (symbols || []).forEach(sym => {
+        for (const [cat, catInfo] of Object.entries(byCategory)) {
+            if (catInfo.symbols && catInfo.symbols.includes(sym)) {
+                cats[cat] = (cats[cat] || 0) + 1;
+                break;
+            }
+        }
+    });
+    return cats;
+}
+
+function buildHierarchicalRanking(data) {
+    /*
+     * Returns array of groups: [{exe: {...}, libs: [{...}, ...]}, ...]
+     * Each group = one ELF executable + its direct dependency libraries.
+     * Libs that have OpenSSL symbols from deeper in the tree are surfaced.
+     * Supports: single dependency_tree or dependency_trees[] (multi-process).
+     * Groups are sorted by groupTotal (exe + lib syms) descending.
+     */
+    const trees = data.dependency_trees || (data.dependency_tree ? [data.dependency_tree] : []);
+    if (trees.length === 0) return null;
+
+    const byFile = data.openssl_symbols?.by_file || {};
+    const byCategory = data.openssl_symbols?.by_category || {};
+
+    /* Match by_file path to tree node path using basename prefix.
+     * Handles: /usr/lib/.../libssh.so.4.9.6 vs /lib/.../libssh.so.4 */
+    function matchByFile(nodePath) {
+        if (byFile[nodePath]) return byFile[nodePath];
+        const nodeBase = (nodePath || '').split('/').pop();
+        if (!nodeBase) return null;
+        for (const [filePath, info] of Object.entries(byFile)) {
+            const fileBase = filePath.split('/').pop();
+            if (fileBase.startsWith(nodeBase) || nodeBase.startsWith(fileBase.split('.so')[0] + '.so')) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    /* Walk tree recursively to find all nodes with OpenSSL symbols */
+    function collectSymLibs(node, depth, seen) {
+        const results = [];
+        for (const child of (node.children || [])) {
+            if (child.error === 'circular dependency') continue;
+            const childKey = child.path || child.name;
+            if (seen.has(childKey)) continue;
+            seen.add(childKey);
+            const fileInfo = matchByFile(child.path);
+            if (fileInfo && fileInfo.count > 0) {
+                results.push({ node: child, fileInfo, depth });
+            }
+            results.push(...collectSymLibs(child, depth + 1, seen));
+        }
+        return results;
+    }
+
+    function buildGroup(node) {
+        const exePath = node.path || '';
+        const exeName = node.name || exePath.split('/').pop();
+        const exeFileInfo = matchByFile(exePath) || {};
+        const exeSymCount = exeFileInfo.count || node.openssl_symbols_count || 0;
+        const exeSymbols = exeFileInfo.symbols || [];
+        const directChildren = (node.children || []);
+        const nonCircularCount = directChildren.filter(c => c.error !== 'circular dependency').length;
+
+        /* Build lib rows from direct children */
+        const seen = new Set();
+        seen.add(exePath || exeName);
+        let groupTotal = exeSymCount;
+
+        const libs = directChildren.map(child => {
+            const childKey = child.path || child.name;
+            seen.add(childKey);
+            const childFileInfo = matchByFile(child.path) || {};
+            const childSymCount = childFileInfo.count || child.openssl_symbols_count || 0;
+            const childSymbols = childFileInfo.symbols || [];
+            const childDeps = (child.children || []).filter(c => c.error !== 'circular dependency').length;
+            groupTotal += childSymCount;
+            return {
+                lib: child.name,
+                libPath: child.path || '',
+                syms: childSymCount,
+                categories: buildCategoryBreakdown(childSymbols, byCategory),
+                isOpenSSL: child.is_openssl_lib || false,
+                isCircular: child.error === 'circular dependency',
+                childCount: childDeps,
+                depth: 1
+            };
+        });
+
+        /* Surface transitive deps that have OpenSSL symbols */
+        const deepLibs = collectSymLibs(node, 1, new Set([exePath || exeName]));
+        for (const dl of deepLibs) {
+            const childKey = dl.node.path || dl.node.name;
+            if (seen.has(childKey)) continue;
+            seen.add(childKey);
+            const childSymbols = dl.fileInfo.symbols || [];
+            groupTotal += dl.fileInfo.count || 0;
+            libs.push({
+                lib: dl.node.name,
+                libPath: dl.node.path || '',
+                syms: dl.fileInfo.count || 0,
+                categories: buildCategoryBreakdown(childSymbols, byCategory),
+                isOpenSSL: dl.node.is_openssl_lib || false,
+                isCircular: false,
+                childCount: 0,
+                depth: dl.depth
+            });
+        }
+
+        const exe = {
+            elf: exeName,
+            elfPath: exePath,
+            libCount: nonCircularCount,
+            syms: exeSymCount,
+            groupTotal: groupTotal,
+            categories: buildCategoryBreakdown(exeSymbols, byCategory),
+            isOpenSSL: node.is_openssl_lib || false
+        };
+
+        return { exe, libs };
+    }
+
+    const groups = trees.map(t => buildGroup(t));
+    /* Default sort: groups by groupTotal (exe + lib syms) descending */
+    groups.sort((a, b) => b.exe.groupTotal - a.exe.groupTotal);
+    return groups;
+}
+
+function buildGlobalGraph(data) {
+    const trees = data.dependency_trees || (data.dependency_tree ? [data.dependency_tree] : []);
+    if (trees.length === 0) return null;
+
+    const byFile = data.openssl_symbols?.by_file || {};
+    const byCategory = data.openssl_symbols?.by_category || {};
+    const nodes = {};
+    const edgeMap = {};
+    const chains = [];
+
+    function baseName(p) { return (p || '').split('/').pop(); }
+
+    function matchByFile(nodePath) {
+        if (byFile[nodePath]) return byFile[nodePath];
+        const nb = baseName(nodePath);
+        if (!nb) return null;
+        for (const [fp, info] of Object.entries(byFile)) {
+            const fb = baseName(fp);
+            if (fb.startsWith(nb) || nb.startsWith(fb.split('.so')[0] + '.so'))
+                return info;
+        }
+        return null;
+    }
+
+    function getOrCreateNode(node) {
+        const b = baseName(node.path || node.name);
+        if (!nodes[b]) {
+            const fi = matchByFile(node.path || node.name);
+            nodes[b] = {
+                name: b,
+                paths: new Set(),
+                processes: new Set(),
+                osslSym: fi ? fi.count : 0,
+                isOsslLib: node.is_openssl_lib || false,
+                isRoot: false,
+                depths: new Set(),
+                fanIn: 0,
+                fanOut: 0,
+                tier: 'normal'
+            };
+        }
+        nodes[b].paths.add(node.path || node.name);
+        if (node.is_openssl_lib) nodes[b].isOsslLib = true;
+        return b;
+    }
+
+    function walk(node, parentBase, procName, depth) {
+        const b = getOrCreateNode(node);
+        nodes[b].processes.add(procName);
+        nodes[b].depths.add(depth);
+        if (parentBase) {
+            const ek = parentBase + '|' + b;
+            if (!edgeMap[ek]) edgeMap[ek] = { from: parentBase, to: b, processes: new Set() };
+            edgeMap[ek].processes.add(procName);
+        }
+        for (const ch of (node.children || [])) {
+            if (ch.error === 'circular dependency') continue;
+            walk(ch, b, procName, depth + 1);
+        }
+    }
+
+    trees.forEach(t => {
+        const rb = getOrCreateNode(t);
+        nodes[rb].isRoot = true;
+        walk(t, null, t.name, 0);
+    });
+
+    /* Compute fan-in / fan-out */
+    const edges = Object.values(edgeMap);
+    edges.forEach(e => {
+        if (nodes[e.from]) nodes[e.from].fanOut++;
+        if (nodes[e.to]) nodes[e.to].fanIn++;
+    });
+
+    /* Assign tiers */
+    const systemLibs = new Set(['libc.so.6', 'ld-linux-aarch64.so.1', 'libm.so.6',
+        'libpthread.so.0', 'libdl.so.2', 'librt.so.1']);
+    for (const [b, n] of Object.entries(nodes)) {
+        if (n.isRoot) n.tier = 'application';
+        else if (n.isOsslLib) n.tier = 'crypto';
+        else if (n.osslSym > 0) n.tier = 'middleware';
+        else if (systemLibs.has(b)) n.tier = 'system';
+    }
+
+    /* Trace OpenSSL import chains (DFS from each root) */
+    function traceChains(node, path, procName) {
+        const b = baseName(node.path || node.name);
+        const fi = matchByFile(node.path || node.name);
+        const curPath = [...path, b];
+        if (fi && fi.count > 0 && path.length > 0) {
+            const cats = buildCategoryBreakdown(fi.symbols || [], byCategory);
+            chains.push({ path: curPath, symbols: fi.count, categories: cats, process: procName });
+        }
+        for (const ch of (node.children || [])) {
+            if (ch.error === 'circular dependency') continue;
+            traceChains(ch, curPath, procName);
+        }
+    }
+    trees.forEach(t => {
+        const rb = baseName(t.path || t.name);
+        const fi = matchByFile(t.path || t.name);
+        if (fi && fi.count > 0) {
+            const cats = buildCategoryBreakdown(fi.symbols || [], byCategory);
+            chains.push({ path: [rb], symbols: fi.count, categories: cats, process: t.name });
+        }
+        for (const ch of (t.children || [])) {
+            if (ch.error === 'circular dependency') continue;
+            traceChains(ch, [rb], t.name);
+        }
+    });
+
+    /* Deduplicate chains with same path (from different processes) */
+    const chainMap = {};
+    chains.forEach(c => {
+        const key = c.path.join('|');
+        if (!chainMap[key]) {
+            chainMap[key] = { ...c, processes: [c.process] };
+        } else {
+            if (!chainMap[key].processes.includes(c.process))
+                chainMap[key].processes.push(c.process);
+        }
+    });
+
+    /* Convert sets to arrays for serialization */
+    const nodeList = Object.values(nodes).map(n => ({
+        ...n,
+        paths: [...n.paths],
+        processes: [...n.processes],
+        depths: [...n.depths].sort((a, b) => a - b)
+    }));
+
+    return {
+        nodes: nodeList,
+        nodeMap: Object.fromEntries(nodeList.map(n => [n.name, n])),
+        edges: edges.map(e => ({ ...e, processes: [...e.processes] })),
+        chains: Object.values(chainMap).sort((a, b) => b.symbols - a.symbols),
+        multiProc: trees.length > 1
+    };
+}
+
+function renderDependencies(data) {
+    const graph = data.globalGraph;
+    if (!graph) {
+        const depBtn = document.querySelector('button[onclick*="dependencies"]');
+        if (depBtn) depBtn.style.display = 'none';
+        return;
+    }
+    window.depGraph = graph;
+    window.depFilter = 'ossl';
+
+    /* Summary bar */
+    const bar = document.getElementById('depSummaryBar');
+    const shared = graph.nodes.filter(n => n.processes.length > 1).length;
+    bar.innerHTML =
+        '<div class="dep-stat"><span class="dep-stat-val">' + graph.nodes.length + '</span><span class="dep-stat-label">Libraries</span></div>' +
+        '<div class="dep-stat"><span class="dep-stat-val">' + graph.edges.length + '</span><span class="dep-stat-label">Edges</span></div>' +
+        (graph.multiProc ? '<div class="dep-stat"><span class="dep-stat-val">' + shared + '</span><span class="dep-stat-label">Shared</span></div>' : '') +
+        '<div class="dep-stat"><span class="dep-stat-val">' + graph.chains.length + '</span><span class="dep-stat-label">OSSL Chains</span></div>';
+
+    /* Import chains */
+    renderDepChains(graph);
+
+    /* Graph */
+    renderDepGraph(graph, 'ossl');
+    initDepGraphDrag();
+
+    /* Statistics table */
+    renderDepStatsTable(graph);
+}
+
+function renderDepChains(graph) {
+    const container = document.getElementById('depChains');
+    if (graph.chains.length === 0) {
+        container.innerHTML = '<p style="color:#95a5a6">No OpenSSL import chains found.</p>';
+        return;
+    }
+    let html = '<div class="dep-chains-title">OpenSSL Import Chains</div>';
+    graph.chains.forEach(chain => {
+        html += '<div class="dep-chain-row">';
+        chain.path.forEach((node, i) => {
+            if (i > 0) html += '<span class="dep-chain-arrow">&rarr;</span>';
+            const isLast = i === chain.path.length - 1;
+            const isFirst = i === 0;
+            const cls = isFirst ? 'root' : (isLast ? 'target' : 'middle');
+            const escaped = node.replace(/'/g, "\\\\'");
+            html += '<span class="dep-chain-node ' + cls + '" onclick="showComponentDetail(\\'' + escaped + '\\')">' + node + '</span>';
+        });
+        html += '<span class="dep-chain-sym">';
+        html += '<span class="sym-badge">' + chain.symbols + ' sym</span> ';
+        html += renderCategoryDist(chain.categories);
+        html += '</span>';
+        if (graph.multiProc && chain.processes) {
+            html += '<span style="color:#95a5a6;font-size:0.8em;margin-left:8px">(' + chain.processes.join(', ') + ')</span>';
+        }
+        html += '</div>';
+    });
+    container.innerHTML = html;
+}
+
+/* Layered DAG on Canvas */
+function renderDepGraph(graph, filter) {
+    const canvas = document.getElementById('depGraphCanvas');
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    /* Filter nodes */
+    let visibleNodes, visibleEdges;
+    if (filter === 'ossl') {
+        const onPath = new Set();
+        graph.chains.forEach(c => c.path.forEach(n => onPath.add(n)));
+        visibleNodes = graph.nodes.filter(n => onPath.has(n.name));
+        visibleEdges = graph.edges.filter(e => onPath.has(e.from) && onPath.has(e.to));
+    } else if (filter === 'shared') {
+        visibleNodes = graph.nodes.filter(n => n.processes.length > 1);
+        const vset = new Set(visibleNodes.map(n => n.name));
+        visibleEdges = graph.edges.filter(e => vset.has(e.from) && vset.has(e.to));
+    } else {
+        visibleNodes = [...graph.nodes];
+        visibleEdges = [...graph.edges];
+    }
+
+    if (visibleNodes.length === 0) {
+        const emptyW = canvas.offsetWidth || 800;
+        canvas.style.width = emptyW + 'px';
+        canvas.style.height = '60px';
+        canvas.width = emptyW * dpr;
+        canvas.height = 60 * dpr;
+        ctx.scale(dpr, dpr);
+        ctx.fillStyle = '#95a5a6';
+        ctx.font = '14px -apple-system, sans-serif';
+        ctx.fillText('No nodes to display for this filter.', 20, 35);
+        return;
+    }
+
+    /* Topological layering */
+    const nameMap = {};
+    visibleNodes.forEach(n => nameMap[n.name] = n);
+    const inDeg = {};
+    visibleNodes.forEach(n => inDeg[n.name] = 0);
+    visibleEdges.forEach(e => { if (inDeg[e.to] !== undefined) inDeg[e.to]++; });
+
+    const layers = [];
+    const assigned = {};
+    const queue = visibleNodes.filter(n => (inDeg[n.name] || 0) === 0).map(n => n.name);
+    if (queue.length === 0) queue.push(visibleNodes[0].name);
+    queue.forEach(n => assigned[n] = 0);
+
+    const adj = {};
+    visibleEdges.forEach(e => {
+        if (!adj[e.from]) adj[e.from] = [];
+        adj[e.from].push(e.to);
+    });
+
+    let qi = 0;
+    while (qi < queue.length) {
+        const cur = queue[qi++];
+        const layer = assigned[cur];
+        (adj[cur] || []).forEach(child => {
+            if (assigned[child] === undefined) {
+                assigned[child] = layer + 1;
+                queue.push(child);
+            } else {
+                assigned[child] = Math.max(assigned[child], layer + 1);
+            }
+        });
+    }
+    /* Assign unvisited */
+    visibleNodes.forEach(n => { if (assigned[n.name] === undefined) assigned[n.name] = 0; });
+
+    const maxLayer = Math.max(...Object.values(assigned), 0);
+    for (let i = 0; i <= maxLayer; i++) layers[i] = [];
+    visibleNodes.forEach(n => layers[assigned[n.name]].push(n));
+
+    /* Barycenter ordering within layers */
+    for (let i = 1; i <= maxLayer; i++) {
+        layers[i].forEach(n => {
+            const parents = visibleEdges.filter(e => e.to === n.name).map(e => e.from);
+            if (parents.length > 0) {
+                const prevLayer = layers[i - 1];
+                const positions = parents.map(p => prevLayer.findIndex(x => x.name === p)).filter(x => x >= 0);
+                n._bary = positions.length > 0 ? positions.reduce((a, b) => a + b, 0) / positions.length : 0;
+            } else {
+                n._bary = 0;
+            }
+        });
+        layers[i].sort((a, b) => a._bary - b._bary);
+    }
+
+    /* Compute positions */
+    const nodeW = 130;
+    const nodeH = 32;
+    const layerGap = 70;
+    const nodeGap = 16;
+    const padX = 30;
+    const padY = 40;
+
+    const maxNodesInLayer = Math.max(...layers.map(l => l.length), 1);
+    const vp = document.getElementById('depGraphViewport');
+    const containerW = (vp ? vp.clientWidth : canvas.parentElement.clientWidth) || 800;
+    const canvasW = Math.max(maxNodesInLayer * (nodeW + nodeGap) + padX * 2, containerW);
+    const canvasH = (maxLayer + 1) * (nodeH + layerGap) + padY * 2;
+
+    canvas.style.width = canvasW + 'px';
+    canvas.style.height = canvasH + 'px';
+    canvas.width = canvasW * dpr;
+    canvas.height = canvasH * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const pos = {};
+    layers.forEach((layer, li) => {
+        const totalW = layer.length * nodeW + (layer.length - 1) * nodeGap;
+        const startX = (canvasW - totalW) / 2;
+        layer.forEach((n, ni) => {
+            pos[n.name] = {
+                x: startX + ni * (nodeW + nodeGap) + nodeW / 2,
+                y: padY + li * (nodeH + layerGap) + nodeH / 2
+            };
+        });
+    });
+
+    /* Build OSSL path edge set for highlighting */
+    const osslPathEdges = new Set();
+    const osslPathNodes = new Set();
+    graph.chains.forEach(c => {
+        c.path.forEach(n => osslPathNodes.add(n));
+        for (let i = 0; i < c.path.length - 1; i++) {
+            osslPathEdges.add(c.path[i] + '>' + c.path[i + 1]);
+        }
+    });
+
+    /* Draw */
+    ctx.clearRect(0, 0, canvasW, canvasH);
+
+    /* Edges: normal first, then OSSL path on top */
+    function drawEdge(e, color, width) {
+        const from = pos[e.from];
+        const to = pos[e.to];
+        if (!from || !to) return;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y + nodeH / 2);
+        const midY = (from.y + to.y) / 2;
+        ctx.bezierCurveTo(from.x, midY, to.x, midY, to.x, to.y - nodeH / 2);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.stroke();
+        const ax = to.x;
+        const ay = to.y - nodeH / 2;
+        ctx.beginPath();
+        ctx.moveTo(ax - 4, ay - 6);
+        ctx.lineTo(ax, ay);
+        ctx.lineTo(ax + 4, ay - 6);
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+
+    const normalEdges = [];
+    const highlightEdges = [];
+    visibleEdges.forEach(e => {
+        if (osslPathEdges.has(e.from + '>' + e.to)) {
+            highlightEdges.push(e);
+        } else {
+            normalEdges.push(e);
+        }
+    });
+
+    normalEdges.forEach(e => {
+        const multi = e.processes && e.processes.length > 1;
+        drawEdge(e, multi ? '#c8dff0' : '#e0e4e8', multi ? 1.5 : 1);
+    });
+    highlightEdges.forEach(e => {
+        drawEdge(e, '#e67e22', 2.5);
+    });
+
+    /* Nodes */
+    const tierColors = {
+        application: { bg: '#eaf2f8', border: '#3498db', text: '#2c3e50' },
+        crypto: { bg: '#fdedec', border: '#e74c3c', text: '#922b21' },
+        middleware: { bg: '#fef9e7', border: '#f39c12', text: '#7d6608' },
+        system: { bg: '#f2f3f4', border: '#bdc3c7', text: '#7f8c8d' },
+        normal: { bg: '#fff', border: '#d5d8dc', text: '#555' }
+    };
+
+    visibleNodes.forEach(n => {
+        const p = pos[n.name];
+        if (!p) return;
+        const tc = tierColors[n.tier] || tierColors.normal;
+        const onPath = osslPathNodes.has(n.name);
+        const hw = nodeW / 2;
+        const hh = nodeH / 2;
+
+        /* Glow for OSSL path nodes */
+        if (onPath && filter !== 'ossl') {
+            ctx.save();
+            ctx.shadowColor = 'rgba(230, 126, 34, 0.5)';
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.roundRect(p.x - hw, p.y - hh, nodeW, nodeH, 5);
+            ctx.fillStyle = tc.bg;
+            ctx.fill();
+            ctx.restore();
+        }
+
+        ctx.beginPath();
+        ctx.roundRect(p.x - hw, p.y - hh, nodeW, nodeH, 5);
+        ctx.fillStyle = tc.bg;
+        ctx.fill();
+        ctx.strokeStyle = onPath && filter !== 'ossl' ? '#e67e22' : tc.border;
+        ctx.lineWidth = n.osslSym > 0 ? 2.5 : (onPath ? 2 : 1.5);
+        ctx.stroke();
+
+        /* Label */
+        ctx.fillStyle = tc.text;
+        ctx.font = (n.osslSym > 0 ? 'bold ' : '') + '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        let label = n.name;
+        if (label.length > 18) label = label.substring(0, 16) + '..';
+        ctx.fillText(label, p.x, p.y);
+
+        /* Symbol count badge */
+        if (n.osslSym > 0) {
+            const badgeX = p.x + hw - 4;
+            const badgeY = p.y - hh - 4;
+            const badgeText = String(n.osslSym);
+            ctx.font = 'bold 9px -apple-system, sans-serif';
+            const bw = ctx.measureText(badgeText).width + 8;
+            ctx.beginPath();
+            ctx.roundRect(badgeX - bw, badgeY - 6, bw, 13, 3);
+            ctx.fillStyle = '#e74c3c';
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'center';
+            ctx.fillText(badgeText, badgeX - bw / 2, badgeY + 1);
+        }
+
+        /* Multi-process indicator */
+        if (graph.multiProc && n.processes.length > 1) {
+            ctx.font = '9px -apple-system, sans-serif';
+            ctx.fillStyle = '#95a5a6';
+            ctx.textAlign = 'center';
+            ctx.fillText(n.processes.length + ' proc', p.x, p.y + hh + 12);
+        }
+    });
+
+    /* Center viewport on content */
+    if (vp && canvasW > vp.clientWidth) {
+        vp.scrollLeft = (canvasW - vp.clientWidth) / 2;
+    }
+    if (vp) vp.scrollTop = 0;
+}
+
+function initDepGraphDrag() {
+    const vp = document.getElementById('depGraphViewport');
+    if (!vp || vp._dragInit) return;
+    vp._dragInit = true;
+    let dragging = false, sx, sy, sl, st;
+    vp.addEventListener('mousedown', function(e) {
+        dragging = true;
+        vp.classList.add('dragging');
+        sx = e.clientX; sy = e.clientY;
+        sl = vp.scrollLeft; st = vp.scrollTop;
+    });
+    vp.addEventListener('mousemove', function(e) {
+        if (!dragging) return;
+        e.preventDefault();
+        vp.scrollLeft = sl - (e.clientX - sx);
+        vp.scrollTop = st - (e.clientY - sy);
+    });
+    vp.addEventListener('mouseup', function() {
+        dragging = false; vp.classList.remove('dragging');
+    });
+    vp.addEventListener('mouseleave', function() {
+        dragging = false; vp.classList.remove('dragging');
+    });
+}
+
+function setDepFilter(filter, btn) {
+    window.depFilter = filter;
+    document.querySelectorAll('.dep-filter-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    renderDepGraph(window.depGraph, filter);
+}
+
+let depSortCol = 'osslSym';
+let depSortAsc = false;
+
+function renderDepStatsTable(graph) {
+    const table = document.getElementById('depStatsTable');
+    const sortIcon = (col) => {
+        if (depSortCol !== col) return '<span class="sort-icon">&#x2195;</span>';
+        return depSortAsc ? '<span class="sort-icon active">&#x2191;</span>' : '<span class="sort-icon active">&#x2193;</span>';
+    };
+
+    const nodeList = [...graph.nodes];
+    nodeList.sort((a, b) => {
+        let cmp = 0;
+        if (depSortCol === 'name') cmp = a.name.localeCompare(b.name);
+        else if (depSortCol === 'procs') cmp = a.processes.length - b.processes.length;
+        else if (depSortCol === 'fanIn') cmp = a.fanIn - b.fanIn;
+        else if (depSortCol === 'fanOut') cmp = a.fanOut - b.fanOut;
+        else if (depSortCol === 'osslSym') cmp = a.osslSym - b.osslSym;
+        else if (depSortCol === 'tier') cmp = a.tier.localeCompare(b.tier);
+        return depSortAsc ? cmp : -cmp;
+    });
+
+    const tierBadge = (t) => {
+        const colors = { application: '#3498db', crypto: '#e74c3c', middleware: '#f39c12', system: '#bdc3c7', normal: '#ecf0f1' };
+        const fg = t === 'normal' ? '#7f8c8d' : '#fff';
+        return '<span style="display:inline-block;padding:1px 8px;border-radius:3px;font-size:0.8em;background:' + (colors[t] || '#ecf0f1') + ';color:' + fg + '">' + t + '</span>';
+    };
+
+    let tbody = '';
+    nodeList.forEach(n => {
+        const symStyle = n.osslSym > 0 ? 'font-weight:600;color:#c0392b' : 'color:#bdc3c7';
+        const escaped = n.name.replace(/'/g, "\\\\'");
+        const nameLink = n.osslSym > 0
+            ? '<span class="component-link" onclick="showComponentDetail(\\'' + escaped + '\\')">' + n.name + '</span>'
+            : n.name;
+        tbody += '<tr>';
+        tbody += '<td>' + nameLink + (n.isOsslLib ? ' <span class="openssl-marker">OpenSSL</span>' : '') + '</td>';
+        if (graph.multiProc) tbody += '<td>' + n.processes.join(', ') + '</td>';
+        tbody += '<td style="text-align:center">' + n.fanIn + '</td>';
+        tbody += '<td style="text-align:center">' + n.fanOut + '</td>';
+        tbody += '<td style="text-align:center;' + symStyle + '">' + n.osslSym + '</td>';
+        tbody += '<td>' + tierBadge(n.tier) + '</td>';
+        tbody += '</tr>';
+    });
+
+    const procsHeader = graph.multiProc
+        ? '<th class="sortable" onclick="sortDepStats(\\'procs\\')">Procs ' + sortIcon('procs') + '</th>' : '';
+
+    table.innerHTML = '<thead><tr>' +
+        '<th class="sortable" onclick="sortDepStats(\\'name\\')">Library ' + sortIcon('name') + '</th>' +
+        procsHeader +
+        '<th class="sortable" onclick="sortDepStats(\\'fanIn\\')">Fan-in ' + sortIcon('fanIn') + '</th>' +
+        '<th class="sortable" onclick="sortDepStats(\\'fanOut\\')">Fan-out ' + sortIcon('fanOut') + '</th>' +
+        '<th class="sortable" onclick="sortDepStats(\\'osslSym\\')">OSSL Sym ' + sortIcon('osslSym') + '</th>' +
+        '<th class="sortable" onclick="sortDepStats(\\'tier\\')">Tier ' + sortIcon('tier') + '</th>' +
+        '</tr></thead><tbody>' + tbody + '</tbody>';
+}
+
+function sortDepStats(col) {
+    if (depSortCol === col) depSortAsc = !depSortAsc;
+    else { depSortCol = col; depSortAsc = false; }
+    renderDepStatsTable(window.depGraph);
+}
+
+function normalizeData(data) {
+    /* Normalize single/process and aggregated report formats to common structure */
+    const reportType = data.meta?.report_type || 'single';
+    const isSingleLike = (reportType === 'single' || reportType === 'process');
+
+    if (isSingleLike) {
         /* Convert single report format to aggregated-like format */
         const byFile = data.openssl_symbols?.by_file || {};
         const byCategory = data.openssl_symbols?.by_category || {};
@@ -1094,6 +2028,12 @@ function normalizeData(data) {
         data.ranking = ranking;
         data.components = components;
         data._normalized = true;
+
+        /* Build hierarchical ranking if dependency tree exists */
+        data.hierarchicalRanking = buildHierarchicalRanking(data);
+
+        /* Build global dependency graph */
+        data.globalGraph = buildGlobalGraph(data);
     }
 
     return data;
@@ -1112,6 +2052,9 @@ function renderReport(data) {
 
         renderRanking(currentData);
         console.log('Ranking rendered');
+
+        renderDependencies(currentData);
+        console.log('Dependencies rendered');
 
         renderCategories(currentData);
         console.log('Categories rendered');
@@ -1143,46 +2086,264 @@ function renderSummary(data) {
             <div class="label">${c.label}</div>
         </div>
     `).join('');
+
+    /* Show process info bar if available */
+    const proc = data.meta?.process;
+    const piBar = document.getElementById('processInfoBar');
+    if (proc && piBar) {
+        const items = [
+            { label: 'PID', value: proc.pid },
+            { label: 'Process', value: proc.name },
+            { label: 'Arch', value: data.meta?.target_arch || '' },
+            { label: 'Libraries', value: proc.mapped_libraries_count || 0 },
+            { label: 'RSS', value: proc.vm_rss_kb ? (proc.vm_rss_kb / 1024).toFixed(1) + ' MB' : '' }
+        ];
+        if (proc.runtime_loaded_count > 0) {
+            items.push({ label: 'dlopen', value: proc.runtime_loaded_count });
+        }
+        piBar.innerHTML = items
+            .filter(i => i.value !== '' && i.value !== undefined)
+            .map(i => `<span class="pi-item"><span class="pi-label">${i.label}:</span>${i.value}</span>`)
+            .join('');
+        piBar.style.display = 'flex';
+    }
 }
 
-/* Ranking sort state */
+/* Short display name for categories */
+const CATEGORY_SHORT = {
+    'ssl_core': 'SSL', 'ssl_tls': 'TLS',
+    'crypto_evp': 'EVP', 'crypto_rsa': 'RSA',
+    'crypto_ec': 'EC', 'crypto_bn': 'BN',
+    'crypto_dsa': 'DSA', 'crypto_dh': 'DH',
+    'crypto_bio': 'BIO', 'crypto_rand': 'RAND',
+    'crypto_aes': 'AES', 'crypto_sm': 'SM',
+    'crypto_x509': 'X509', 'crypto_pem': 'PEM',
+    'crypto_err': 'ERR', 'crypto_engine': 'ENGINE',
+    'crypto_hash': 'HASH', 'crypto_hmac': 'HMAC',
+    'crypto_des': 'DES', 'crypto_chacha': 'CHACHA',
+    'crypto_pkcs': 'PKCS', 'crypto_cms': 'CMS',
+    'crypto_ocsp': 'OCSP', 'crypto_ts': 'TS',
+    'crypto_obj': 'OBJ', 'crypto_kdf': 'KDF',
+    'crypto_provider': 'PROV', 'crypto_asn1': 'ASN1',
+    'openssl_util': 'UTIL', 'other': 'OTHER'
+};
+
+function renderCategoryDist(categories) {
+    if (!categories || Object.keys(categories).length === 0) return '';
+    const sorted = Object.entries(categories).sort((a, b) => b[1] - a[1]);
+    const tags = sorted.map(([cat, count]) => {
+        const color = CATEGORY_COLORS[cat] || CATEGORY_COLORS['other'];
+        const label = CATEGORY_SHORT[cat] || cat;
+        return '<span class="cat-tag" style="background:' + color + '">' + label + ':<span class="cat-count">' + count + '</span></span>';
+    }).join('');
+    return '<div class="cat-dist">' + tags + '</div>';
+}
+
+/*
+ * Sort state:
+ * - hierSort: for hierarchical table (process/single with dep tree)
+ *   .col  = 'syms' | 'lib'  (library-level sort key)
+ *   .asc  = bool
+ *   .cycle = 0(desc) -> 1(asc) -> 2(original tree order)
+ * - rankingSortCol/Asc: for flat table (aggregated/no-tree)
+ */
+let hierSort = { col: 'syms', asc: false, cycle: 0 };
 let rankingSortCol = 'symbols';
 let rankingSortAsc = false;
 
 function renderRanking(data) {
     window.rankingData = data.ranking || [];
+    window.hierGroups = data.hierarchicalRanking || null;
+    /* Keep a deep copy of original lib order per group (tree order) */
+    if (window.hierGroups) {
+        window.hierGroupsOriginal = window.hierGroups.map(g => ({
+            exe: g.exe,
+            libs: [...g.libs]
+        }));
+    }
     renderRankingTable();
 
-    if (window.rankingData.length === 0) {
-        return;
-    }
+    /* Chart */
+    const groups = window.hierGroups;
+    if (groups && groups.length > 0) {
+        /* Collect all files with symbols for stacked chart */
+        const items = [];
+        groups.forEach(g => {
+            if (g.exe.syms > 0) items.push({ name: g.exe.elf, cats: g.exe.categories });
+            g.libs.forEach(l => {
+                if (l.syms > 0) items.push({ name: l.lib, cats: l.categories });
+            });
+        });
+        if (items.length === 0) return;
 
-    const ctx = document.getElementById('rankingChart').getContext('2d');
-    if (rankingChart) rankingChart.destroy();
-    const ranking = window.rankingData;
-    rankingChart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: ranking.slice(0, 15).map(r => r.component),
-            datasets: [{
-                label: 'Symbols Used',
-                data: ranking.slice(0, 15).map(r => r.unique_symbols_count),
-                backgroundColor: '#3498db'
-            }]
-        },
-        options: {
-            indexAxis: 'y',
-            responsive: true,
-            maintainAspectRatio: false
-        }
-    });
+        const labels = items.map(i => i.name);
+        const allCats = new Set();
+        items.forEach(i => Object.keys(i.cats).forEach(c => allCats.add(c)));
+
+        const datasets = [...allCats].map(cat => ({
+            label: cat,
+            data: items.map(i => i.cats[cat] || 0),
+            backgroundColor: CATEGORY_COLORS[cat] || CATEGORY_COLORS['other']
+        }));
+
+        const ctx = document.getElementById('rankingChart').getContext('2d');
+        if (rankingChart) rankingChart.destroy();
+        rankingChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels, datasets },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { x: { stacked: true }, y: { stacked: true } },
+                plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } }
+            }
+        });
+    } else if (window.rankingData.length > 0) {
+        const ctx = document.getElementById('rankingChart').getContext('2d');
+        if (rankingChart) rankingChart.destroy();
+        const ranking = window.rankingData;
+        rankingChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ranking.slice(0, 15).map(r => r.component),
+                datasets: [{
+                    label: 'Symbols Used',
+                    data: ranking.slice(0, 15).map(r => r.unique_symbols_count),
+                    backgroundColor: '#3498db'
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false
+            }
+        });
+    }
+}
+
+function sortHierarchical(col) {
+    if (hierSort.col === col) {
+        /* Same column: cycle desc(0) -> asc(1) -> original(2) -> desc(0) */
+        hierSort.cycle = (hierSort.cycle + 1) % 3;
+        hierSort.asc = hierSort.cycle === 1;
+    } else {
+        hierSort.col = col;
+        hierSort.cycle = 0;
+        hierSort.asc = false;
+    }
+    renderRankingTable();
 }
 
 function renderRankingTable() {
+    const table = document.getElementById('rankingTable');
+    const groups = window.hierGroups;
+
+    if (groups && groups.length > 0) {
+        /* --- Hierarchical table with two-level sort --- */
+        const isOriginal = hierSort.cycle === 2;
+
+        /* Level 1: sort EXE groups by groupTotal (exe + lib syms) */
+        let sortedGroups = groups.map((g, i) => ({ group: g, origLibs: window.hierGroupsOriginal[i].libs }));
+        if (!isOriginal) {
+            sortedGroups.sort((a, b) => {
+                const cmp = a.group.exe.groupTotal - b.group.exe.groupTotal;
+                return hierSort.asc ? cmp : -cmp;
+            });
+        }
+
+        /* Sort icon with 3 states */
+        const hierIcon = (col) => {
+            if (hierSort.col !== col) return '<span class="sort-icon">&#x2195;</span>';
+            if (hierSort.cycle === 0) return '<span class="sort-icon active">&#x2193;</span>';
+            if (hierSort.cycle === 1) return '<span class="sort-icon active">&#x2191;</span>';
+            return '<span class="sort-icon active">&#x2261;</span>';
+        };
+
+        let tbody = '';
+        sortedGroups.forEach(({ group, origLibs }) => {
+            const exe = group.exe;
+
+            /* Level 2: sort libs within group */
+            let libs;
+            if (isOriginal) {
+                libs = [...origLibs];
+            } else {
+                libs = [...group.libs];
+                libs.sort((a, b) => {
+                    let cmp = 0;
+                    if (hierSort.col === 'syms') {
+                        cmp = a.syms - b.syms;
+                    } else if (hierSort.col === 'lib') {
+                        cmp = a.lib.localeCompare(b.lib);
+                    }
+                    return hierSort.asc ? cmp : -cmp;
+                });
+            }
+
+            const rowSpan = libs.length + 1;
+            const exeCats = renderCategoryDist(exe.categories);
+
+            /* EXE row */
+            const badgeText = exe.groupTotal !== exe.syms
+                ? exe.groupTotal + ' sym (self: ' + exe.syms + ')'
+                : exe.syms + ' sym';
+            tbody += '<tr class="ranking-exe-row">';
+            tbody += '<td rowspan="' + rowSpan + '" style="vertical-align:top">';
+            tbody += '<span class="component-link" onclick="showComponentDetail(\\'';
+            tbody += exe.elf.replace(/'/g, "\\\\'") + '\\')">';
+            tbody += exe.elf + '</span>';
+            tbody += '<span class="sym-badge">' + badgeText + '</span>';
+            tbody += '</td>';
+            tbody += '<td rowspan="' + rowSpan + '" style="vertical-align:top;text-align:center">';
+            tbody += exe.libCount;
+            tbody += '</td>';
+            tbody += '<td style="color:#7f8c8d;font-style:italic">(executable)</td>';
+            tbody += '<td>' + exe.syms + '</td>';
+            tbody += '<td>' + exeCats + '</td>';
+            tbody += '</tr>';
+
+            /* Library rows */
+            libs.forEach(r => {
+                const libCats = renderCategoryDist(r.categories);
+                let libDisplay = r.lib;
+                if (r.syms > 0) {
+                    const escaped = r.lib.replace(/'/g, "\\\\'");
+                    libDisplay = '<span class="component-link" onclick="showComponentDetail(\\'' + escaped + '\\')">' + r.lib + '</span>';
+                }
+                if (r.isOpenSSL) libDisplay += '<span class="openssl-marker">OpenSSL</span>';
+                if (r.isCircular) libDisplay += ' <span class="circular-tag">(circular)</span>';
+                if (r.depth > 1) libDisplay += ' <span style="color:#e67e22;font-size:0.8em">(depth ' + r.depth + ')</span>';
+                else if (r.childCount > 0) libDisplay += ' <span style="color:#95a5a6;font-size:0.85em">(' + r.childCount + ' deps)</span>';
+
+                const symStyle = r.syms > 0 ? 'font-weight:600' : 'color:#bdc3c7';
+                tbody += '<tr class="ranking-lib-row">';
+                tbody += '<td>' + libDisplay + '</td>';
+                tbody += '<td style="' + symStyle + '">' + r.syms + '</td>';
+                tbody += '<td>' + (r.syms > 0 ? libCats : '') + '</td>';
+                tbody += '</tr>';
+            });
+        });
+
+        table.innerHTML = `
+            <thead>
+                <tr>
+                    <th class="sortable" onclick="sortHierarchical('syms')">Process / ELF ${hierIcon('syms')}</th>
+                    <th>Libs</th>
+                    <th class="sortable" onclick="sortHierarchical('lib')">Library ${hierIcon('lib')}</th>
+                    <th class="sortable" onclick="sortHierarchical('syms')">Symbols ${hierIcon('syms')}</th>
+                    <th>Distribution</th>
+                </tr>
+            </thead>
+            <tbody>${tbody}</tbody>
+        `;
+        return;
+    }
+
+    /* Fallback: flat ranking table for aggregated/directory scans */
     const ranking = [...window.rankingData];
     const total = currentData?.summary?.global_unique_symbols || currentData?.summary?.unique_openssl_symbols || 1;
 
-    /* Sort ranking */
     ranking.sort((a, b) => {
         let cmp = 0;
         if (rankingSortCol === 'component') {
@@ -1193,7 +2354,6 @@ function renderRankingTable() {
         return rankingSortAsc ? cmp : -cmp;
     });
 
-    const table = document.getElementById('rankingTable');
     const sortIcon = (col) => {
         if (rankingSortCol !== col) return '<span class="sort-icon">&#x2195;</span>';
         return rankingSortAsc ? '<span class="sort-icon active">&#x2191;</span>' : '<span class="sort-icon active">&#x2193;</span>';
@@ -1306,7 +2466,7 @@ function renderCategories(data) {
 function renderSymbols(data) {
     const components = data.components || {};
     const symbolMap = {};
-    const isSingle = data.meta?.report_type === 'single';
+    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process');
 
     /* For single reports, use openssl_symbols.by_category directly */
     if (isSingle && data.openssl_symbols?.by_category) {
@@ -1390,7 +2550,7 @@ function renderSymbolTable(symbols) {
 function populateFilters(data) {
     const components = data.components || {};
     const categories = new Set();
-    const isSingle = data.meta?.report_type === 'single';
+    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process');
 
     /* Get categories from openssl_symbols for single reports */
     if (isSingle && data.openssl_symbols?.by_category) {
@@ -1762,55 +2922,109 @@ function showComponentDetail(componentName) {
 
     /* Get component data */
     const compData = currentData.components?.[componentName];
-    const isSingle = currentData.meta?.report_type === 'single';
+    const isSingle = (currentData.meta?.report_type === 'single' || currentData.meta?.report_type === 'process');
 
     if (!compData && isSingle) {
-        /* For single reports, build from openssl_symbols */
+        /* For single/process reports, build from openssl_symbols */
         const byFile = currentData.openssl_symbols?.by_file || {};
         const byCategory = currentData.openssl_symbols?.by_category || {};
 
-        /* Find matching file */
+        /* Find matching file: exact path, endsWith, or basename prefix */
         let fileData = null;
         let filePath = '';
+        const nameBase = (componentName || '').split('/').pop();
         for (const [path, info] of Object.entries(byFile)) {
-            if (path.endsWith('/' + componentName) || path === componentName) {
+            if (path === componentName || path.endsWith('/' + componentName)) {
+                fileData = info;
+                filePath = path;
+                break;
+            }
+            const pathBase = path.split('/').pop();
+            if (nameBase && (pathBase.startsWith(nameBase) ||
+                nameBase.startsWith(pathBase.split('.so')[0] + '.so'))) {
                 fileData = info;
                 filePath = path;
                 break;
             }
         }
 
-        if (!fileData) {
-            body.innerHTML = '<p>No data found for this component.</p>';
-            modal.classList.add('active');
-            return;
-        }
-
-        /* Build category-grouped symbols */
-        const symbolsByCategory = {};
-        (fileData.symbols || []).forEach(sym => {
-            let found = false;
-            for (const [cat, catInfo] of Object.entries(byCategory)) {
-                if (catInfo.symbols && catInfo.symbols.includes(sym)) {
-                    if (!symbolsByCategory[cat]) symbolsByCategory[cat] = [];
-                    symbolsByCategory[cat].push(sym);
-                    found = true;
-                    break;
+        if (fileData) {
+            /* Direct match: show this file's symbols */
+            const symbolsByCategory = {};
+            (fileData.symbols || []).forEach(sym => {
+                let found = false;
+                for (const [cat, catInfo] of Object.entries(byCategory)) {
+                    if (catInfo.symbols && catInfo.symbols.includes(sym)) {
+                        if (!symbolsByCategory[cat]) symbolsByCategory[cat] = [];
+                        symbolsByCategory[cat].push(sym);
+                        found = true;
+                        break;
+                    }
                 }
-            }
-            if (!found) {
-                if (!symbolsByCategory['other']) symbolsByCategory['other'] = [];
-                symbolsByCategory['other'].push(sym);
-            }
-        });
+                if (!found) {
+                    if (!symbolsByCategory['other']) symbolsByCategory['other'] = [];
+                    symbolsByCategory['other'].push(sym);
+                }
+            });
 
-        renderComponentModal(summary, body, {
-            totalSymbols: fileData.count || fileData.symbols?.length || 0,
-            categoryCount: Object.keys(symbolsByCategory).length,
-            binaryCount: 1,
-            symbolsByCategory: symbolsByCategory,
-            executables: null
-        });
+            renderComponentModal(summary, body, {
+                totalSymbols: fileData.count || fileData.symbols?.length || 0,
+                categoryCount: Object.keys(symbolsByCategory).length,
+                binaryCount: 1,
+                symbolsByCategory: symbolsByCategory,
+                executables: null
+            });
+        } else if (window.hierGroups) {
+            /* No direct match: look for EXE group and aggregate all lib symbols */
+            const group = window.hierGroups.find(g => g.exe.elf === componentName);
+            if (group) {
+                const allSymbols = [];
+                const binaryNames = [];
+                group.libs.forEach(lib => {
+                    if (lib.syms > 0) {
+                        const libInfo = Object.entries(byFile).find(([p]) => {
+                            const pb = p.split('/').pop();
+                            return pb.startsWith(lib.lib) || lib.lib.startsWith(pb.split('.so')[0] + '.so');
+                        });
+                        if (libInfo) {
+                            allSymbols.push(...(libInfo[1].symbols || []));
+                            binaryNames.push(lib.lib + ' (' + lib.syms + ')');
+                        }
+                    }
+                });
+                const symbolsByCategory = {};
+                allSymbols.forEach(sym => {
+                    let found = false;
+                    for (const [cat, catInfo] of Object.entries(byCategory)) {
+                        if (catInfo.symbols && catInfo.symbols.includes(sym)) {
+                            if (!symbolsByCategory[cat]) symbolsByCategory[cat] = [];
+                            symbolsByCategory[cat].push(sym);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (!symbolsByCategory['other']) symbolsByCategory['other'] = [];
+                        symbolsByCategory['other'].push(sym);
+                    }
+                });
+                const unique = new Set(allSymbols);
+                title.textContent = componentName + ' (via ' + binaryNames.length + ' libraries)';
+                renderComponentModal(summary, body, {
+                    totalSymbols: unique.size,
+                    categoryCount: Object.keys(symbolsByCategory).length,
+                    binaryCount: binaryNames.length,
+                    symbolsByCategory: symbolsByCategory,
+                    executables: binaryNames
+                });
+            } else {
+                body.innerHTML = '<p>No OpenSSL symbol data for this component.</p>';
+            }
+        } else {
+            body.innerHTML = '<p>No data found for this component.</p>';
+        }
+        modal.classList.add('active');
+        return;
     } else if (compData) {
         /* Aggregated report format - check for executables_detail */
         const execDetail = compData.executables_detail || {};

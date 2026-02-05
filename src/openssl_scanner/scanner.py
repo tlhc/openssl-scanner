@@ -122,6 +122,9 @@ class ScanResult:
 
     errors: List[Dict[str, str]] = field(default_factory=list)
 
+    # Process scan mode
+    process_info: Optional[Dict] = None
+
 
 class Scanner:
     """
@@ -401,6 +404,136 @@ class Scanner:
         )
 
         self._compute_dependency_graph(result, file_results, openssl_libs)
+
+        return result
+
+    def scan_process(self, process_info, dependency_tree=None) -> ScanResult:
+        """
+        Scan a running process's loaded libraries for OpenSSL dependencies.
+
+        Uses library paths from /proc/<pid>/maps (populated in process_info).
+        Optionally cross-references with a DT_NEEDED dependency tree to
+        identify dlopen-loaded libraries (runtime_only).
+
+        Args:
+            process_info: ProcessInfo from proc_analyzer with mapped_libraries
+            dependency_tree: Optional DependencyNode tree for hierarchy enrichment
+
+        Returns:
+            Complete ScanResult with report_type="process"
+        """
+        result = self._create_result(process_info.exe_path)
+        result.report_type = "process"
+
+        scan_paths = []
+        deleted_libs = []
+
+        if process_info.exe_path and os.path.isfile(process_info.exe_path):
+            scan_paths.append(process_info.exe_path)
+
+        for lib in process_info.mapped_libraries:
+            if lib.deleted:
+                deleted_libs.append(lib.path)
+                logger.warning("Skipping deleted library: %s", lib.path)
+                continue
+            if os.path.isfile(lib.path):
+                scan_paths.append(lib.path)
+            else:
+                logger.warning("Library not accessible: %s", lib.path)
+
+        if dependency_tree:
+            tree_paths = set()
+            self._collect_paths_recursive(dependency_tree, tree_paths)
+            tree_realpaths = set()
+            for tp in tree_paths:
+                try:
+                    tree_realpaths.add(os.path.realpath(tp))
+                except OSError:
+                    tree_realpaths.add(tp)
+            for lib in process_info.mapped_libraries:
+                try:
+                    real = os.path.realpath(lib.path)
+                except OSError:
+                    real = lib.path
+                if real not in tree_realpaths and lib.path not in tree_paths:
+                    lib.runtime_only = True
+
+        result.dependency_tree = dependency_tree
+        result.total_files_scanned = len(scan_paths)
+
+        arch = None
+        files: List[FileResult] = []
+        all_symbols: Set[str] = set()
+        symbols_by_file: Dict[str, List[str]] = {}
+        openssl_libs: Set[str] = set()
+
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in scan_paths]
+
+        with ProcessPoolExecutor(max_workers=self._workers) as executor:
+            future_to_path = {
+                executor.submit(_analyze_file_worker, item): item[0]
+                for item in work_items
+            }
+
+            for future in as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    file_result = future.result()
+                    files.append(file_result)
+
+                    if file_result.arch != 'unknown' and not arch:
+                        arch = file_result.arch
+
+                    if file_result.openssl_symbols:
+                        symbols_by_file[file_result.path] = file_result.openssl_symbols
+                        all_symbols.update(file_result.openssl_symbols)
+
+                    for lib in file_result.openssl_libs:
+                        resolved = self._resolver.resolve_library(lib)
+                        if resolved:
+                            openssl_libs.add(resolved)
+
+                except Exception as e:
+                    logger.error("Error scanning %s: %s", path, e)
+                    result.errors.append({
+                        'file': path,
+                        'error': str(e),
+                        'severity': 'error'
+                    })
+
+        result.total_elf_files = len([f for f in files if f.file_type != 'unknown'])
+        result.files_with_openssl = len([f for f in files if f.openssl_symbols])
+        result.files_detail = files
+        result.symbols_by_file = symbols_by_file
+        result.all_unique_symbols = sorted(all_symbols)
+        result.openssl_libs_found = sorted(openssl_libs)
+        result.arch = arch or 'unknown'
+
+        result.symbols_by_category = self._matcher.categorize_symbols(
+            list(all_symbols)
+        )
+
+        if dependency_tree:
+            self._mark_transitive_deps(result)
+            self._compute_symbols_by_depth(result)
+            self._compute_import_chains(result)
+
+        runtime_libs = [lib.basename for lib in process_info.mapped_libraries
+                        if lib.runtime_only]
+        result.process_info = {
+            'pid': process_info.pid,
+            'name': process_info.name,
+            'exe_path': process_info.exe_path,
+            'cmdline': process_info.cmdline,
+            'uid': process_info.uid,
+            'threads': process_info.threads,
+            'vm_rss_kb': process_info.vm_rss_kb,
+            'mapped_libraries_count': len(process_info.mapped_libraries),
+            'runtime_loaded_count': len(runtime_libs),
+            'runtime_loaded_libs': runtime_libs,
+            'deleted_libraries': deleted_libs,
+        }
 
         return result
 

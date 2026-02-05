@@ -62,6 +62,7 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
     create_scan_parser(subparsers)
+    create_proc_parser(subparsers)
     create_aggregate_parser(subparsers)
     create_export_parser(subparsers)
 
@@ -155,6 +156,94 @@ Examples:
     )
 
     scan_parser.add_argument(
+        '--log-file',
+        help='Write logs to file',
+    )
+
+
+def create_proc_parser(subparsers) -> None:
+    """Create parser for proc command."""
+    proc_parser = subparsers.add_parser(
+        'proc',
+        help='Scan a running process for OpenSSL dependencies (Linux only)',
+        epilog='''
+Examples:
+  # Scan by PID
+  openssl-scanner proc --pid 1234
+
+  # Scan by process name
+  openssl-scanner proc --name nginx
+
+  # With explicit OpenSSL library
+  openssl-scanner proc --pid 1234 --openssl-lib /usr/lib/libcrypto.so.3
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    target_group = proc_parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        '--pid',
+        type=int,
+        help='Process ID to scan',
+    )
+    target_group.add_argument(
+        '--name',
+        dest='process_name',
+        help='Process name to scan (exact match)',
+    )
+
+    proc_parser.add_argument(
+        '--openssl-lib',
+        dest='openssl_lib',
+        help='Path to libcrypto.so (auto-detected from mapped libraries if not specified)',
+    )
+
+    proc_parser.add_argument(
+        '--openssl-ssl',
+        dest='openssl_ssl',
+        help='Path to libssl.so (optional)',
+    )
+
+    proc_parser.add_argument(
+        '-o', '--output',
+        default='openssl_deps_report.json',
+        help='Output JSON report file (default: openssl_deps_report.json)',
+    )
+
+    proc_parser.add_argument(
+        '-L', '--lib-path',
+        action='append',
+        dest='lib_paths',
+        default=[],
+        help='Additional library search path (can be used multiple times)',
+    )
+
+    proc_parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose logging',
+    )
+
+    proc_parser.add_argument(
+        '-j', '--jobs',
+        type=int,
+        default=os.cpu_count() or 4,
+        help=f'Number of parallel workers (default: {os.cpu_count() or 4})',
+    )
+
+    proc_parser.add_argument(
+        '--json-only',
+        action='store_true',
+        help='Output JSON only, suppress console summary',
+    )
+
+    proc_parser.add_argument(
+        '--include-deleted',
+        action='store_true',
+        help='Include deleted (unlinked) libraries in analysis',
+    )
+
+    proc_parser.add_argument(
         '--log-file',
         help='Write logs to file',
     )
@@ -372,6 +461,146 @@ def cmd_scan(args) -> int:
         return 1
 
 
+def cmd_proc(args) -> int:
+    """Execute proc command."""
+    logger = logging.getLogger(__name__)
+
+    from .proc_analyzer import ProcAnalyzer
+
+    if not ProcAnalyzer.is_available():
+        logger.error("Process scan requires Linux (/proc filesystem)")
+        return 1
+
+    analyzer = ProcAnalyzer()
+
+    if args.pid:
+        try:
+            process_info = analyzer.from_pid(args.pid)
+        except FileNotFoundError:
+            logger.error("Process %d not found", args.pid)
+            return 1
+        except PermissionError:
+            logger.error("Permission denied reading /proc/%d. Try with sudo.", args.pid)
+            return 1
+    else:
+        try:
+            matches = analyzer.resolve_by_name(args.process_name)
+        except PermissionError:
+            logger.error("Permission denied reading /proc. Try with sudo.")
+            return 1
+
+        if not matches:
+            logger.error("No process found matching '%s'", args.process_name)
+            return 1
+        elif len(matches) > 1:
+            print(f"Multiple processes match '{args.process_name}':")
+            print(f"  {'PID':>8s}  {'NAME':16s}  CMDLINE")
+            print(f"  {'---':>8s}  {'---':16s}  ---")
+            for pid, name, cmdline in matches:
+                cmd_display = cmdline[:60] if cmdline else ''
+                print(f"  {pid:>8d}  {name:16s}  {cmd_display}")
+            print(f"\nUse --pid to specify which process to scan.")
+            return 1
+        else:
+            pid = matches[0][0]
+            try:
+                process_info = analyzer.from_pid(pid)
+            except (FileNotFoundError, PermissionError) as e:
+                logger.error("Cannot access process %d: %s", pid, e)
+                return 1
+
+    if not args.include_deleted:
+        process_info.mapped_libraries = [
+            lib for lib in process_info.mapped_libraries
+            if not lib.deleted
+        ]
+
+    logger.info("Process: %s (PID %d)", process_info.name, process_info.pid)
+    logger.info("Executable: %s", process_info.exe_path)
+    logger.info("Mapped libraries: %d", len(process_info.mapped_libraries))
+
+    search_paths = list(args.lib_paths)
+    libcrypto = None
+    libssl = None
+
+    if args.openssl_lib:
+        libcrypto = os.path.abspath(args.openssl_lib)
+        if not os.path.isfile(libcrypto):
+            logger.error("OpenSSL library not found: %s", libcrypto)
+            return 1
+        if args.openssl_ssl:
+            libssl = os.path.abspath(args.openssl_ssl)
+    else:
+        logger.info("Auto-detecting OpenSSL from mapped libraries...")
+        lib_paths = [lib.path for lib in process_info.mapped_libraries]
+        discovery = OpenSSLDiscovery(additional_paths=search_paths)
+        libcrypto, libssl = discovery.discover_from_libraries(lib_paths)
+        if not libcrypto:
+            logger.error(
+                "No OpenSSL library found in mapped libraries. "
+                "Use --openssl-lib to specify manually."
+            )
+            return 1
+        logger.info("Auto-detected libcrypto: %s", libcrypto)
+        if libssl:
+            logger.info("Auto-detected libssl: %s", libssl)
+
+    matcher = OpenSSLMatcher()
+    try:
+        count = matcher.load_openssl_symbols(libcrypto, libssl)
+        logger.info("Loaded %d OpenSSL symbols", count)
+    except (FileNotFoundError, ValueError) as e:
+        logger.error("Failed to load OpenSSL symbols: %s", e)
+        return 1
+
+    scanner = Scanner(
+        search_paths=search_paths,
+        workers=args.jobs,
+        matcher=matcher,
+    )
+
+    dep_tree = None
+    if process_info.exe_path and os.path.isfile(process_info.exe_path):
+        exe_dir = os.path.dirname(process_info.exe_path)
+        scanner.add_search_path(exe_dir)
+        logger.info("Building dependency tree from executable for hierarchy enrichment...")
+        try:
+            dep_tree = scanner._resolver.build_dependency_tree(process_info.exe_path)
+        except Exception as e:
+            logger.warning("Could not build dependency tree: %s", e)
+
+    reporter = Reporter()
+
+    start_time = time.time()
+
+    try:
+        result = scanner.scan_process(process_info, dependency_tree=dep_tree)
+
+        elapsed = time.time() - start_time
+
+        json_report = reporter.generate_json(result)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(json_report)
+
+        if not args.json_only:
+            summary = reporter.generate_summary(result)
+            print(summary)
+            stats = matcher.get_stats()
+            print(f"OpenSSL symbols loaded: {stats['symbols_loaded']}")
+            print(f"Report saved to: {args.output}")
+            print(f"Scan completed in {elapsed:.2f} seconds.")
+
+        return 0
+
+    except KeyboardInterrupt:
+        logger.info("Scan interrupted by user")
+        return 130
+
+    except Exception as e:
+        logger.exception("Scan failed: %s", e)
+        return 1
+
+
 def cmd_aggregate(args) -> int:
     """Execute aggregate command."""
     logger = logging.getLogger(__name__)
@@ -466,7 +695,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if argv and argv[0] not in ['scan', 'aggregate', 'export', '-h', '--help', '--version']:
+    if argv and argv[0] not in ['scan', 'proc', 'aggregate', 'export', '-h', '--help', '--version']:
         argv = ['scan'] + argv
 
     args = parser.parse_args(argv)
@@ -477,6 +706,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command == 'scan':
         return cmd_scan(args)
+    elif args.command == 'proc':
+        return cmd_proc(args)
     elif args.command == 'aggregate':
         return cmd_aggregate(args)
     elif args.command == 'export':

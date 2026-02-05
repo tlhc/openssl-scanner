@@ -147,6 +147,31 @@ class OpenSSLDiscovery:
 
         return libcrypto, libssl
 
+    def discover_from_libraries(self, lib_paths: List[str]) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Discover OpenSSL libraries from a list of library paths.
+
+        Used in process scan mode where we have the exact list of
+        loaded libraries from /proc/pid/maps.
+
+        Args:
+            lib_paths: List of absolute paths to shared libraries
+
+        Returns:
+            Tuple of (libcrypto_path, libssl_path)
+        """
+        libcrypto = None
+        libssl = None
+        for path in lib_paths:
+            basename = os.path.basename(path).lower()
+            if not self._is_openssl_lib_name(basename):
+                continue
+            if 'crypto' in basename and not libcrypto:
+                libcrypto = path
+            elif 'ssl' in basename and not libssl:
+                libssl = path
+        return libcrypto, libssl
+
     def _is_openssl_lib_name(self, name: str) -> bool:
         """Check if filename matches OpenSSL library pattern."""
         if '.so' not in name:
