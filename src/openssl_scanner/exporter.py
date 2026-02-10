@@ -1983,7 +1983,7 @@ function sortDepStats(col) {
 function normalizeData(data) {
     /* Normalize single/process and aggregated report formats to common structure */
     const reportType = data.meta?.report_type || 'single';
-    const isSingleLike = (reportType === 'single' || reportType === 'process');
+    const isSingleLike = (reportType === 'single' || reportType === 'process' || reportType === 'package');
 
     if (isSingleLike) {
         /* Convert single report format to aggregated-like format */
@@ -2466,7 +2466,7 @@ function renderCategories(data) {
 function renderSymbols(data) {
     const components = data.components || {};
     const symbolMap = {};
-    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process');
+    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process' || data.meta?.report_type === 'package');
 
     /* For single reports, use openssl_symbols.by_category directly */
     if (isSingle && data.openssl_symbols?.by_category) {
@@ -2550,7 +2550,7 @@ function renderSymbolTable(symbols) {
 function populateFilters(data) {
     const components = data.components || {};
     const categories = new Set();
-    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process');
+    const isSingle = (data.meta?.report_type === 'single' || data.meta?.report_type === 'process' || data.meta?.report_type === 'package');
 
     /* Get categories from openssl_symbols for single reports */
     if (isSingle && data.openssl_symbols?.by_category) {
@@ -2922,7 +2922,7 @@ function showComponentDetail(componentName) {
 
     /* Get component data */
     const compData = currentData.components?.[componentName];
-    const isSingle = (currentData.meta?.report_type === 'single' || currentData.meta?.report_type === 'process');
+    const isSingle = (currentData.meta?.report_type === 'single' || currentData.meta?.report_type === 'process' || currentData.meta?.report_type === 'package');
 
     if (!compData && isSingle) {
         /* For single/process reports, build from openssl_symbols */

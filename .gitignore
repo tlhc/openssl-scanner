@@ -5,6 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
+!src/openssl_scanner/_vendor/**/*.so
 
 # Distribution / packaging
 .Python
@@ -74,5 +75,6 @@ Thumbs.db
 # Project specific
 *.json
 !design/sample_output.json
+!src/openssl_scanner/data/*.json
 *.xlsx
 *.html

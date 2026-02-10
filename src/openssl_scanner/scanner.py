@@ -125,6 +125,9 @@ class ScanResult:
     # Process scan mode
     process_info: Optional[Dict] = None
 
+    # Package scan mode
+    package_info: Optional[Dict] = None
+
 
 class Scanner:
     """

@@ -1,0 +1,10 @@
+# Vendored binaries - mark as binary to prevent text diff and line-ending conversion
+src/openssl_scanner/_vendor/rg/_plat/*/rg binary
+src/openssl_scanner/_vendor/tree_sitter/_plat/*/*.so binary
+src/openssl_scanner/_vendor/tree_sitter/_plat/*/*.dylib binary
+src/openssl_scanner/_vendor/tree_sitter_c/_plat/*/*.so binary
+src/openssl_scanner/_vendor/tree_sitter_c/_plat/*/*.dylib binary
+src/openssl_scanner/_vendor/tree_sitter_cpp/_plat/*/*.so binary
+src/openssl_scanner/_vendor/tree_sitter_cpp/_plat/*/*.dylib binary
+src/openssl_scanner/_vendor/tree_sitter_rust/_plat/*/*.so binary
+src/openssl_scanner/_vendor/tree_sitter_rust/_plat/*/*.dylib binary

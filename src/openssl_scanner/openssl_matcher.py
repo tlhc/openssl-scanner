@@ -4,6 +4,7 @@ OpenSSL symbol matcher - Strict mode only.
 Matches symbols against actual OpenSSL library exports for 100% accuracy.
 """
 
+import json
 import os
 import logging
 from typing import List, Set, Dict, Optional
@@ -24,6 +25,7 @@ class OpenSSLMatcher:
 
     def __init__(self) -> None:
         self._openssl_exports: Set[str] = set()
+        self._openssl_macros: Set[str] = set()
         self._libcrypto_path: Optional[str] = None
         self._libssl_path: Optional[str] = None
         self._lib_patterns = OPENSSL_LIBRARY_PATTERNS
@@ -72,6 +74,65 @@ class OpenSSLMatcher:
         self._libssl_path = libssl_path
 
         return len(exports)
+
+    def load_builtin_symbols(self) -> int:
+        """
+        Load OpenSSL symbols from built-in JSON data file.
+
+        Returns:
+            Number of symbols loaded
+
+        Raises:
+            FileNotFoundError: If built-in symbol file is missing
+        """
+        data_path = os.path.join(
+            os.path.dirname(__file__), 'data', 'openssl_symbols.json'
+        )
+        if not os.path.isfile(data_path):
+            raise FileNotFoundError(
+                f"Built-in symbol list not found: {data_path}"
+            )
+
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        symbols = data.get('symbols', [])
+        self._openssl_exports = set(symbols)
+        logger.info(
+            "Loaded %d built-in OpenSSL symbols (version: %s)",
+            len(symbols), data.get('openssl_version', 'unknown')
+        )
+        return len(symbols)
+
+    def load_builtin_macros(self) -> int:
+        data_path = os.path.join(
+            os.path.dirname(__file__), 'data', 'openssl_macros.json'
+        )
+        if not os.path.isfile(data_path):
+            raise FileNotFoundError(
+                f"Built-in macro list not found: {data_path}"
+            )
+
+        with open(data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        macros = data.get('macros', [])
+        self._openssl_macros = set(macros)
+        logger.info(
+            "Loaded %d built-in OpenSSL macros (version: %s)",
+            len(macros), data.get('openssl_version', 'unknown')
+        )
+        return len(macros)
+
+    def load_combined_symbols(self) -> int:
+        self.load_builtin_symbols()
+        self.load_builtin_macros()
+        total = len(self._openssl_exports | self._openssl_macros)
+        logger.info("Combined symbol set: %d unique identifiers", total)
+        return total
+
+    def get_combined_set(self) -> Set[str]:
+        return self._openssl_exports | self._openssl_macros
 
     def is_loaded(self) -> bool:
         """Check if OpenSSL symbols have been loaded."""

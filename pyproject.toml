@@ -33,6 +33,12 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+source = [
+    "tree-sitter>=0.23",
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-rust>=0.23",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -40,6 +46,10 @@ dev = [
     "ruff>=0.1",
     "pyelftools>=0.29",
     "openpyxl>=3.1",
+    "tree-sitter>=0.23",
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-rust>=0.23",
 ]
 
 [project.scripts]
@@ -70,3 +80,4 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["src"]

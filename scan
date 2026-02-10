@@ -14,5 +14,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.join(script_dir, 'src')
 sys.path.insert(0, src_dir)
 
-from openssl_scanner.__main__ import main
-sys.exit(main())
+if __name__ == '__main__':
+    from openssl_scanner.__main__ import main
+    sys.exit(main())

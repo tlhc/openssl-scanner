@@ -69,6 +69,14 @@ class Reporter:
                 lines.append(f"Libraries:   {libs_count} loaded ({runtime_count} via dlopen)")
             else:
                 lines.append(f"Libraries:   {libs_count} loaded")
+        if result.package_info:
+            pi = result.package_info
+            lines.append(f"Package:     {pi.get('package_type', '').upper()} - {pi.get('bundle_name', 'unknown')}")
+            lines.append(f"Module:      {pi.get('module_name', '')} ({pi.get('module_type', '')})")
+            lines.append(f"Version:     {pi.get('version_name', '')} (code: {pi.get('version_code', '')})")
+            lines.append(f"ABI:         {pi.get('scanned_abi', '')}")
+            native_count = pi.get('native_libs_count', 0)
+            lines.append(f"Native Libs: {native_count}")
         lines.append('')
 
         lines.append('-' * width)
@@ -225,6 +233,9 @@ class Reporter:
 
         if result.process_info:
             data['meta']['process'] = result.process_info
+
+        if result.package_info:
+            data['meta']['package'] = result.package_info
 
         return data
 

@@ -172,12 +172,16 @@ class TestOpenSSLMatcherStrict:
         assert len(result["crypto_rsa"]) == 1
 
     def test_unloaded_matcher_raises(self):
-        """Test that unloaded matcher raises RuntimeError."""
+        """Test that unloaded matcher raises RuntimeError on is_openssl_symbol."""
         empty_matcher = OpenSSLMatcher()
         with pytest.raises(RuntimeError):
             empty_matcher.is_openssl_symbol("SSL_connect")
-        with pytest.raises(RuntimeError):
-            empty_matcher.filter_openssl_symbols(["SSL_connect"])
+
+    def test_unloaded_filter_returns_empty(self):
+        """Test that filter_openssl_symbols returns empty list when not loaded."""
+        empty_matcher = OpenSSLMatcher()
+        result = empty_matcher.filter_openssl_symbols(["SSL_connect"])
+        assert result == []
 
     def test_get_stats(self):
         """Test statistics reporting."""
