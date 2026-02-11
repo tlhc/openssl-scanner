@@ -61,6 +61,14 @@ class HapExtractor:
     ELF_MAGIC = b'\x7fELF'
     MAX_EXTRACT_SIZE = 2 * 1024 * 1024 * 1024
 
+    ABI_ELF_MACHINE = {
+        'arm64-v8a':   0xB7,   # EM_AARCH64
+        'armeabi-v7a': 0x28,   # EM_ARM
+        'armeabi':     0x28,   # EM_ARM
+        'x86_64':      0x3E,   # EM_X86_64
+        'x86':         0x03,   # EM_386
+    }
+
     def extract(self, package_path: str, abi: Optional[str] = None,
                 extract_dir: Optional[str] = None) -> HapExtractResult:
         """
@@ -282,11 +290,28 @@ class HapExtractor:
             logger.warning("Malformed module.json: %s", e)
             return {}
 
-    def _is_elf_entry(self, zf: zipfile.ZipFile, entry: str) -> bool:
-        """Check if a ZIP entry contains an ELF binary by reading magic bytes."""
+    def _is_elf_entry(self, zf: zipfile.ZipFile, entry: str,
+                      expected_machine: Optional[int] = None) -> bool:
+        """Check if a ZIP entry contains an ELF binary.
+
+        Args:
+            zf: Open ZipFile
+            entry: ZIP entry name
+            expected_machine: If set, also verify e_machine matches this value
+        """
         try:
             with zf.open(entry) as f:
-                return f.read(4) == self.ELF_MAGIC
+                header = f.read(20)
+                if len(header) < 4 or header[:4] != self.ELF_MAGIC:
+                    return False
+                if expected_machine is not None and len(header) >= 20:
+                    ei_data = header[5]
+                    if ei_data == 2:
+                        machine = (header[18] << 8) | header[19]
+                    else:
+                        machine = header[18] | (header[19] << 8)
+                    return machine == expected_machine
+                return True
         except (KeyError, zipfile.BadZipFile):
             return False
 
@@ -312,8 +337,15 @@ class HapExtractor:
             filename = parts[-1]
             if not filename:
                 continue
-            if self._is_elf_entry(zf, entry):
-                native_libs.setdefault(abi, []).append(filename)
+            if not self._is_elf_entry(zf, entry):
+                continue
+            native_libs.setdefault(abi, []).append(filename)
+            expected = self.ABI_ELF_MACHINE.get(abi)
+            if expected and not self._is_elf_entry(zf, entry, expected_machine=expected):
+                logger.warning(
+                    "Architecture mismatch: %s is ELF but wrong arch for %s",
+                    entry, abi
+                )
 
         abis = [a for a in self.ABI_PRIORITY if a in native_libs]
         for a in sorted(native_libs.keys()):
@@ -347,8 +379,12 @@ class HapExtractor:
 
     def _extract_abi_libs(self, zf: zipfile.ZipFile, abi: str,
                           extract_dir: str) -> List[str]:
-        """Extract ELF binaries for a specific ABI to extract_dir."""
+        """Extract ELF binaries for a specific ABI to extract_dir.
+
+        Extracts all ELF files; warns on architecture mismatch.
+        """
         prefix = f'libs/{abi}/'
+        expected = self.ABI_ELF_MACHINE.get(abi)
         so_files = []
 
         for entry in zf.namelist():
@@ -359,6 +395,11 @@ class HapExtractor:
                 continue
             if not self._is_elf_entry(zf, entry):
                 continue
+            if expected and not self._is_elf_entry(zf, entry, expected_machine=expected):
+                logger.warning(
+                    "Architecture mismatch: %s is ELF but wrong arch for %s",
+                    entry, abi
+                )
 
             dest_path = os.path.join(extract_dir, filename)
             self._safe_extract_member(zf, entry, dest_path)

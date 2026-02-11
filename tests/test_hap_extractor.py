@@ -15,24 +15,50 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from openssl_scanner.hap_extractor import HapExtractor, HapMetadata, HapExtractResult
 
 
-def _minimal_elf64():
-    """Minimal valid ELF64 shared library header (aarch64)."""
+def _make_elf(elfclass, e_machine):
+    """Build a minimal ELF header with the given class (32/64) and e_machine."""
     e_ident = b'\x7fELF'
-    e_ident += b'\x02'          # ELFCLASS64
-    e_ident += b'\x01'          # little-endian
-    e_ident += b'\x01'          # EV_CURRENT
+    e_ident += bytes([elfclass])     # 1=ELFCLASS32, 2=ELFCLASS64
+    e_ident += b'\x01'              # little-endian
+    e_ident += b'\x01'              # EV_CURRENT
     e_ident += b'\x00' * 9
     header = e_ident
-    header += struct.pack('<H', 3)    # ET_DYN
-    header += struct.pack('<H', 183)  # EM_AARCH64
-    header += struct.pack('<I', 1)
-    header += struct.pack('<Q', 0)    # e_entry
-    header += struct.pack('<Q', 0)    # e_phoff
-    header += struct.pack('<Q', 0)    # e_shoff
-    header += struct.pack('<I', 0)
-    header += struct.pack('<H', 64)
-    header += struct.pack('<H', 0) * 5
+    header += struct.pack('<H', 3)          # ET_DYN
+    header += struct.pack('<H', e_machine)
+    header += struct.pack('<I', 1)          # e_version
+    if elfclass == 2:
+        header += struct.pack('<Q', 0)      # e_entry
+        header += struct.pack('<Q', 0)      # e_phoff
+        header += struct.pack('<Q', 0)      # e_shoff
+        header += struct.pack('<I', 0)
+        header += struct.pack('<H', 64)
+        header += struct.pack('<H', 0) * 5
+    else:
+        header += struct.pack('<I', 0)      # e_entry
+        header += struct.pack('<I', 0)      # e_phoff
+        header += struct.pack('<I', 0)      # e_shoff
+        header += struct.pack('<I', 0)
+        header += struct.pack('<H', 52)
+        header += struct.pack('<H', 0) * 5
     return header
+
+
+def _minimal_elf64():
+    """Minimal valid ELF64 shared library header (aarch64)."""
+    return _make_elf(2, 0xB7)
+
+
+def _elf_for_abi(abi):
+    """Return an ELF stub with the correct architecture for the given ABI."""
+    abi_map = {
+        'arm64-v8a':   (2, 0xB7),   # ELFCLASS64, EM_AARCH64
+        'armeabi-v7a': (1, 0x28),   # ELFCLASS32, EM_ARM
+        'armeabi':     (1, 0x28),   # ELFCLASS32, EM_ARM
+        'x86_64':      (2, 0x3E),   # ELFCLASS64, EM_X86_64
+        'x86':         (1, 0x03),   # ELFCLASS32, EM_386
+    }
+    elfclass, machine = abi_map.get(abi, (2, 0xB7))
+    return _make_elf(elfclass, machine)
 
 
 def _create_module_json(bundle_name="com.test.app", module_name="entry",
@@ -229,9 +255,9 @@ class TestAbiDetection:
         hap_path = os.path.join(self.tmpdir, "multi_abi.hap")
         with zipfile.ZipFile(hap_path, 'w') as zf:
             zf.writestr("module.json", _create_module_json())
-            zf.writestr("libs/arm64-v8a/libentry.so", _minimal_elf64())
-            zf.writestr("libs/armeabi-v7a/libentry.so", _minimal_elf64())
-            zf.writestr("libs/x86_64/libentry.so", _minimal_elf64())
+            zf.writestr("libs/arm64-v8a/libentry.so", _elf_for_abi('arm64-v8a'))
+            zf.writestr("libs/armeabi-v7a/libentry.so", _elf_for_abi('armeabi-v7a'))
+            zf.writestr("libs/x86_64/libentry.so", _elf_for_abi('x86_64'))
 
         meta = self.extractor.parse_metadata(hap_path)
         assert len(meta.abis_found) == 3
@@ -240,24 +266,26 @@ class TestAbiDetection:
         assert "x86_64" in meta.abis_found
 
     def test_abi_priority_arm64_preferred(self):
-        """When no ABI specified, arm64-v8a should be preferred."""
+        """When no ABI specified, all ABIs extracted; arm64-v8a listed first."""
         hap_path = os.path.join(self.tmpdir, "multi_abi.hap")
         with zipfile.ZipFile(hap_path, 'w') as zf:
             zf.writestr("module.json", _create_module_json())
-            zf.writestr("libs/armeabi-v7a/libentry.so", _minimal_elf64())
-            zf.writestr("libs/arm64-v8a/libentry.so", _minimal_elf64())
+            zf.writestr("libs/armeabi-v7a/libentry.so", _elf_for_abi('armeabi-v7a'))
+            zf.writestr("libs/arm64-v8a/libentry.so", _elf_for_abi('arm64-v8a'))
 
         result = self.extractor.extract(hap_path)
-        so_paths = [os.path.basename(os.path.dirname(f)) for f in result.so_files]
-        assert "arm64-v8a" in so_paths or len(result.so_files) > 0
+        abi_dirs = {os.path.basename(os.path.dirname(f)) for f in result.so_files}
+        assert "arm64-v8a" in abi_dirs
+        assert "armeabi-v7a" in abi_dirs
+        assert result.metadata.abis_found[0] == "arm64-v8a"
 
     def test_explicit_abi_selection(self):
         """Passing abi parameter should select that specific ABI."""
         hap_path = os.path.join(self.tmpdir, "multi_abi.hap")
         with zipfile.ZipFile(hap_path, 'w') as zf:
             zf.writestr("module.json", _create_module_json())
-            zf.writestr("libs/armeabi-v7a/libv7.so", _minimal_elf64())
-            zf.writestr("libs/arm64-v8a/libv8.so", _minimal_elf64())
+            zf.writestr("libs/armeabi-v7a/libv7.so", _elf_for_abi('armeabi-v7a'))
+            zf.writestr("libs/arm64-v8a/libv8.so", _elf_for_abi('arm64-v8a'))
 
         result = self.extractor.extract(hap_path, abi="armeabi-v7a")
         basenames = [os.path.basename(f) for f in result.so_files]
@@ -316,8 +344,8 @@ class TestExtraction:
         hap_path = os.path.join(self.tmpdir, "multi_abi.hap")
         with zipfile.ZipFile(hap_path, 'w') as zf:
             zf.writestr("module.json", _create_module_json())
-            zf.writestr("libs/arm64-v8a/lib_arm64.so", _minimal_elf64())
-            zf.writestr("libs/armeabi-v7a/lib_arm32.so", _minimal_elf64())
+            zf.writestr("libs/arm64-v8a/lib_arm64.so", _elf_for_abi('arm64-v8a'))
+            zf.writestr("libs/armeabi-v7a/lib_arm32.so", _elf_for_abi('armeabi-v7a'))
 
         result = self.extractor.extract(hap_path, abi="arm64-v8a")
 
