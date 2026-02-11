@@ -999,14 +999,19 @@ def cmd_hap(args) -> int:
 
             ossl_basenames = set()
             for ossl_path in [libcrypto, libssl]:
-                if ossl_path and os.path.dirname(ossl_path) == extract_result.extract_dir:
+                if ossl_path:
                     ossl_basenames.add(os.path.basename(ossl_path))
-                    os.remove(ossl_path)
-                    logger.debug("Excluded OpenSSL lib from scan targets: %s",
-                                 os.path.basename(ossl_path))
             if ossl_basenames:
-                logger.info("Excluded %d OpenSSL lib(s) from scan: %s",
-                            len(ossl_basenames), ', '.join(sorted(ossl_basenames)))
+                removed = 0
+                for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
+                    for fname in filenames:
+                        if fname in ossl_basenames:
+                            fpath = os.path.join(dirpath, fname)
+                            os.remove(fpath)
+                            removed += 1
+                            logger.debug("Excluded OpenSSL lib: %s", fpath)
+                logger.info("Excluded %d OpenSSL lib file(s) (%s) from scan",
+                            removed, ', '.join(sorted(ossl_basenames)))
 
             scanner = Scanner(
                 search_paths=[extract_result.extract_dir],
@@ -1018,7 +1023,6 @@ def cmd_hap(args) -> int:
             result.report_type = 'package'
 
             meta = extract_result.metadata
-            selected_abi = meta.abis_found[0] if meta.abis_found else ''
             result.package_info = {
                 'package_path': meta.package_path,
                 'package_type': meta.package_type,
@@ -1029,7 +1033,7 @@ def cmd_hap(args) -> int:
                 'version_code': meta.version_code,
                 'min_api_version': meta.min_api_version,
                 'device_types': meta.device_types,
-                'scanned_abi': selected_abi,
+                'scanned_abi': meta.abis_found,
                 'abis_available': meta.abis_found,
                 'native_libs_count': len(extract_result.so_files),
                 'bundled_openssl': extract_result.openssl_lib is not None,

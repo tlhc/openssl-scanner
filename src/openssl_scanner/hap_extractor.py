@@ -58,6 +58,7 @@ class HapExtractor:
 
     SUPPORTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.app'}
     ABI_PRIORITY = ['arm64-v8a', 'armeabi-v7a', 'armeabi', 'x86_64', 'x86']
+    ELF_MAGIC = b'\x7fELF'
     MAX_EXTRACT_SIZE = 2 * 1024 * 1024 * 1024
 
     def extract(self, package_path: str, abi: Optional[str] = None,
@@ -155,7 +156,11 @@ class HapExtractor:
 
     def _extract_single(self, package_path: str, abi: Optional[str],
                         extract_dir: Optional[str]) -> HapExtractResult:
-        """Extract a single HAP/HAR/HSP package."""
+        """Extract a single HAP/HAR/HSP package.
+
+        When abi is None, extracts ALL ABIs into per-ABI subdirectories.
+        When abi is specified, extracts only that ABI.
+        """
         ext = os.path.splitext(package_path)[1].lower()
 
         with zipfile.ZipFile(package_path, 'r') as zf:
@@ -165,8 +170,8 @@ class HapExtractor:
                 package_path, ext[1:], module_config, abis, native_libs
             )
 
-            selected_abi = self._select_abi(abis, abi, package_path)
-            if not selected_abi:
+            if not abis:
+                logger.info("No native libraries found in %s", package_path)
                 if extract_dir is None:
                     extract_dir = tempfile.mkdtemp(prefix='hap_scan_')
                 return HapExtractResult(
@@ -178,7 +183,23 @@ class HapExtractor:
             if extract_dir is None:
                 extract_dir = tempfile.mkdtemp(prefix='hap_scan_')
 
-            so_files = self._extract_abi_libs(zf, selected_abi, extract_dir)
+            if abi:
+                if abi not in abis:
+                    raise ValueError(
+                        f"ABI '{abi}' not found in package. "
+                        f"Available: {', '.join(abis)}"
+                    )
+                target_abis = [abi]
+            else:
+                target_abis = abis
+
+            so_files = []
+            for abi_name in target_abis:
+                abi_dir = os.path.join(extract_dir, abi_name)
+                os.makedirs(abi_dir, exist_ok=True)
+                extracted = self._extract_abi_libs(zf, abi_name, abi_dir)
+                so_files.extend(extracted)
+                logger.debug("ABI %s: extracted %d files", abi_name, len(extracted))
 
         openssl_lib, openssl_ssl = self._detect_openssl(so_files)
 
@@ -261,11 +282,21 @@ class HapExtractor:
             logger.warning("Malformed module.json: %s", e)
             return {}
 
+    def _is_elf_entry(self, zf: zipfile.ZipFile, entry: str) -> bool:
+        """Check if a ZIP entry contains an ELF binary by reading magic bytes."""
+        try:
+            with zf.open(entry) as f:
+                return f.read(4) == self.ELF_MAGIC
+        except (KeyError, zipfile.BadZipFile):
+            return False
+
     def _discover_native_libs(
         self, zf: zipfile.ZipFile
     ) -> tuple:
         """
         Discover ABI directories and native libraries in the archive.
+
+        Uses ELF magic bytes to identify binaries, not file extension.
 
         Returns:
             (abis_found, native_libs_by_abi)
@@ -279,7 +310,9 @@ class HapExtractor:
                 continue
             abi = parts[1]
             filename = parts[-1]
-            if '.so' in filename:
+            if not filename:
+                continue
+            if self._is_elf_entry(zf, entry):
                 native_libs.setdefault(abi, []).append(filename)
 
         abis = [a for a in self.ABI_PRIORITY if a in native_libs]
@@ -312,38 +345,21 @@ class HapExtractor:
             native_libs=native_libs,
         )
 
-    def _select_abi(self, abis: List[str], requested_abi: Optional[str],
-                    package_path: str) -> Optional[str]:
-        """Select target ABI for extraction."""
-        if not abis:
-            logger.info("No native libraries found in %s", package_path)
-            return None
-
-        if requested_abi:
-            if requested_abi not in abis:
-                raise ValueError(
-                    f"ABI '{requested_abi}' not found in package. "
-                    f"Available: {', '.join(abis)}"
-                )
-            return requested_abi
-
-        selected = abis[0]
-        logger.debug("Auto-selected ABI: %s (from %s)", selected, abis)
-        return selected
-
     def _extract_abi_libs(self, zf: zipfile.ZipFile, abi: str,
                           extract_dir: str) -> List[str]:
-        """Extract .so files for a specific ABI to extract_dir."""
+        """Extract ELF binaries for a specific ABI to extract_dir."""
         prefix = f'libs/{abi}/'
         so_files = []
 
         for entry in zf.namelist():
             if not entry.startswith(prefix):
                 continue
-            if '.so' not in entry:
+            filename = os.path.basename(entry)
+            if not filename:
+                continue
+            if not self._is_elf_entry(zf, entry):
                 continue
 
-            filename = os.path.basename(entry)
             dest_path = os.path.join(extract_dir, filename)
             self._safe_extract_member(zf, entry, dest_path)
             so_files.append(dest_path)
@@ -369,11 +385,22 @@ class HapExtractor:
                     )
                 dst.write(chunk)
 
+    @staticmethod
+    def _is_elf_file(path: str) -> bool:
+        """Check if file on disk is an ELF binary."""
+        try:
+            with open(path, 'rb') as f:
+                return f.read(4) == HapExtractor.ELF_MAGIC
+        except (IOError, OSError):
+            return False
+
     def _detect_openssl(
         self, so_files: List[str]
     ) -> tuple:
         """
-        Detect OpenSSL libraries among extracted .so files.
+        Detect OpenSSL libraries among extracted files.
+
+        Uses ELF magic verification before pattern matching.
 
         Returns:
             (libcrypto_path, libssl_path)
@@ -382,9 +409,9 @@ class HapExtractor:
         libssl = None
 
         for path in so_files:
-            basename = os.path.basename(path).lower()
-            if '.so' not in basename:
+            if not self._is_elf_file(path):
                 continue
+            basename = os.path.basename(path).lower()
             for pattern in OPENSSL_LIBRARY_PATTERNS:
                 if not basename.startswith(pattern):
                     continue

@@ -74,7 +74,10 @@ class Reporter:
             lines.append(f"Package:     {pi.get('package_type', '').upper()} - {pi.get('bundle_name', 'unknown')}")
             lines.append(f"Module:      {pi.get('module_name', '')} ({pi.get('module_type', '')})")
             lines.append(f"Version:     {pi.get('version_name', '')} (code: {pi.get('version_code', '')})")
-            lines.append(f"ABI:         {pi.get('scanned_abi', '')}")
+            scanned_abi = pi.get('scanned_abi', '')
+            if isinstance(scanned_abi, list):
+                scanned_abi = ', '.join(scanned_abi)
+            lines.append(f"ABI:         {scanned_abi}")
             native_count = pi.get('native_libs_count', 0)
             lines.append(f"Native Libs: {native_count}")
         lines.append('')
