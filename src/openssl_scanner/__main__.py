@@ -278,20 +278,26 @@ def create_hap_parser(subparsers) -> None:
         help='Scan HAP/HAR/HSP/APP packages for OpenSSL dependencies',
         epilog='''
 Examples:
-  # Scan single HAP
-  openssl-scanner hap MyApp.hap -o report.json
+  # Scan single HAP (XLSX output, default)
+  openssl-scanner hap MyApp.hap -o report.xlsx
 
   # Scan APP pack (all HAPs inside)
-  openssl-scanner hap MyApp.app -o report.json
+  openssl-scanner hap MyApp.app -o report.xlsx
+
+  # HTML interactive report
+  openssl-scanner hap MyApp.hap -o report.html
+
+  # JSON output
+  openssl-scanner hap MyApp.hap -o report.json
 
   # Scan HAR third-party library
-  openssl-scanner hap thirdparty.har -o report.json
+  openssl-scanner hap thirdparty.har -o report.xlsx
 
   # Specify ABI to scan
-  openssl-scanner hap MyApp.hap --abi armeabi-v7a -o report.json
+  openssl-scanner hap MyApp.hap --abi armeabi-v7a -o report.xlsx
 
   # Batch scan directory of packages
-  openssl-scanner hap /path/to/packages/ -o report.json
+  openssl-scanner hap /path/to/packages/ -o report.xlsx
 
   # With external OpenSSL reference library
   openssl-scanner hap MyApp.hap --openssl-lib /system/lib64/libcrypto.so.3
@@ -323,8 +329,8 @@ Examples:
 
     hap_parser.add_argument(
         '-o', '--output',
-        default='openssl_deps_report.json',
-        help='Output JSON report file (default: openssl_deps_report.json)',
+        default='openssl_deps_report.xlsx',
+        help='Output report file (.xlsx, .html, or .json) (default: openssl_deps_report.xlsx)',
     )
 
     hap_parser.add_argument(
@@ -1050,13 +1056,29 @@ def cmd_hap(args) -> int:
             ]
 
         json_report = reporter.generate_json(final_result)
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(json_report)
+        output_path = os.path.abspath(args.output)
+        output_ext = os.path.splitext(output_path)[1].lower()
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+
+        if output_ext == '.json':
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(json_report)
+        else:
+            json_path = os.path.splitext(output_path)[0] + '.json'
+            with open(json_path, 'w', encoding='utf-8') as f:
+                f.write(json_report)
+            from .exporter import Exporter
+            Exporter().export(json_path, output_path)
 
         if not args.json_only:
             summary = reporter.generate_summary(final_result)
             print(summary)
-            print(f"Report saved to: {args.output}")
+            print(f"Report saved to: {output_path}")
+            if output_ext != '.json':
+                json_path = os.path.splitext(output_path)[0] + '.json'
+                print(f"JSON data:  {json_path}")
             print(f"Scan completed in {elapsed:.2f} seconds.")
 
         return 0
