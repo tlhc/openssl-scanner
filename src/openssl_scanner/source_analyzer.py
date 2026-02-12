@@ -40,6 +40,7 @@ class CallSite:
     category: str
     call_args: str
     language: str
+    detection_method: str = "direct"
 
 
 @dataclass
@@ -247,6 +248,36 @@ def _scan_file_ast(file_path: str, lang: str,
                 category=category,
                 call_args=args_text,
                 language=lang,
+            ))
+
+        q_dlsym = Query(
+            language,
+            '(call_expression '
+            '  function: (identifier) @fn_name '
+            '  arguments: (argument_list (string_literal) @sym_str))'
+        )
+        c_dlsym = QueryCursor(q_dlsym)
+        for _, captured in c_dlsym.matches(tree.root_node):
+            fn_node = captured['fn_name'][0]
+            if fn_node.text.decode() != 'dlsym':
+                continue
+            str_node = captured['sym_str'][0]
+            sym_text = str_node.text.decode().strip('"').strip("'")
+            if sym_text not in openssl_symbols:
+                continue
+            caller = _find_enclosing_function_c(fn_node)
+            category = _categorize_symbol(sym_text, categories, macro_symbols)
+            call_sites.append(CallSite(
+                file_path=file_path,
+                file_name=file_name,
+                caller_function=caller,
+                line_number=str_node.start_point[0] + 1,
+                column=str_node.start_point[1],
+                ossl_symbol=sym_text,
+                category=category,
+                call_args='dlsym(_, "%s")' % sym_text,
+                language=lang,
+                detection_method="dlsym",
             ))
 
     elif lang == 'rust':

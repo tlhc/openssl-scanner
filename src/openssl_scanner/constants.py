@@ -11,6 +11,9 @@ OPENSSL_LIBRARY_PATTERNS: List[str] = [
     "libssl_openssl",
 ]
 
+DLOPEN_FUNCTION_NAMES = frozenset({'dlopen', '__libc_dlopen_mode'})
+DLSYM_FUNCTION_NAMES = frozenset({'dlsym', '__libc_dlsym'})
+
 SYMBOL_CATEGORIES: Dict[str, List[str]] = {
     "ssl_core": ["SSL_"],
     "ssl_tls": ["TLS_", "DTLS_", "TLSv1_", "DTLSv1_"],

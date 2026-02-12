@@ -9,7 +9,9 @@ import pytest
 tree_sitter = pytest.importorskip("tree_sitter")
 
 from openssl_scanner.source_analyzer import CallSite, SourceScanResult
-from openssl_scanner.source_exporter import SourceExcelExporter, SourceJsonExporter
+from openssl_scanner.source_exporter import (
+    SourceExcelExporter, SourceJsonExporter, COLUMNS,
+)
 
 
 def _make_result(call_sites=None):
@@ -64,7 +66,7 @@ class TestExcelExporter:
             ws = wb.active
             assert ws.title == "OpenSSL Call Sites"
             assert ws.max_row == 6
-            assert ws.max_column == 7
+            assert ws.max_column == len(COLUMNS)
 
             headers = [ws.cell(row=1, column=c).value for c in range(1, 8)]
             assert headers == [

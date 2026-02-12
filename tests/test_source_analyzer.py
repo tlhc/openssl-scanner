@@ -259,6 +259,119 @@ class TestDirectoryScan:
             assert result.total_call_sites == 1
 
 
+class TestDlsymSourceDetection:
+
+    def test_dlsym_openssl_symbol(self):
+        """dlsym(handle, "SSL_CTX_new") should be detected."""
+        code = '''
+void load_ssl(void *handle) {
+    void *fn = dlsym(handle, "SSL_CTX_new");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            assert err is None
+            assert len(sites) == 1
+            assert sites[0].ossl_symbol == 'SSL_CTX_new'
+            assert sites[0].detection_method == 'dlsym'
+            assert 'dlsym' in sites[0].call_args
+        finally:
+            os.unlink(path)
+
+    def test_dlsym_non_openssl_filtered(self):
+        """dlsym(handle, "printf") should not be reported."""
+        code = '''
+void load_lib(void *handle) {
+    void *fn = dlsym(handle, "printf");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            assert err is None
+            assert len(sites) == 0
+        finally:
+            os.unlink(path)
+
+    def test_dlsym_detection_method_field(self):
+        """detection_method should be "dlsym" for dlsym calls."""
+        code = '''
+void init(void *h) {
+    void *f1 = dlsym(h, "EVP_sha256");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            assert len(sites) == 1
+            assert sites[0].detection_method == 'dlsym'
+        finally:
+            os.unlink(path)
+
+    def test_dlsym_category_assigned(self):
+        """Correct category should be assigned for dlsym-detected symbols."""
+        code = '''
+void init(void *h) {
+    dlsym(h, "EVP_DigestInit_ex");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            assert len(sites) == 1
+            assert sites[0].category == 'crypto_evp'
+        finally:
+            os.unlink(path)
+
+    def test_mixed_direct_and_dlsym(self):
+        """Both direct calls and dlsym calls in one file."""
+        code = '''
+void setup(void *h) {
+    SSL_CTX_new(TLS_method());
+    void *fn = dlsym(h, "EVP_sha256");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            assert len(sites) == 2
+            direct = [s for s in sites if s.detection_method == 'direct']
+            dlsym = [s for s in sites if s.detection_method == 'dlsym']
+            assert len(direct) == 1
+            assert len(dlsym) == 1
+            assert direct[0].ossl_symbol == 'SSL_CTX_new'
+            assert dlsym[0].ossl_symbol == 'EVP_sha256'
+        finally:
+            os.unlink(path)
+
+    def test_multiple_dlsym_calls(self):
+        """Multiple dlsym calls should all be detected."""
+        code = '''
+void init(void *h) {
+    dlsym(h, "SSL_connect");
+    dlsym(h, "SSL_read");
+    dlsym(h, "SSL_write");
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                         SYMBOL_CATEGORIES)
+            syms = {s.ossl_symbol for s in sites}
+            assert 'SSL_connect' in syms
+            assert 'SSL_read' in syms
+            assert 'SSL_write' in syms
+            assert all(s.detection_method == 'dlsym' for s in sites)
+        finally:
+            os.unlink(path)
+
+
 class TestCategorizeSymbol:
     def test_ssl_core(self):
         assert _categorize_symbol("SSL_connect", SYMBOL_CATEGORIES) == "ssl_core"

@@ -89,6 +89,12 @@ class Reporter:
         lines.append(f"Total Files Scanned:       {result.total_files_scanned}")
         lines.append(f"ELF Files Found:           {result.total_elf_files}")
         lines.append(f"Files with OpenSSL Deps:   {result.files_with_openssl}")
+        if result.files_with_dlopen > 0:
+            lines.append(f"Files using dlopen:        {result.files_with_dlopen}")
+            lines.append(f"dlsym OpenSSL Symbols:     {len(result.all_dlsym_symbols)} unique")
+            if result.dlopen_libs_detected:
+                libs_str = ', '.join(result.dlopen_libs_detected)
+                lines.append(f"dlopen Libraries:          {libs_str}")
         lines.append('')
 
         if result.openssl_libs_found:
@@ -205,6 +211,9 @@ class Reporter:
                 ),
                 'unique_openssl_symbols': len(result.all_unique_symbols),
                 'openssl_libs_found': result.openssl_libs_found,
+                'files_with_dlopen': result.files_with_dlopen,
+                'dlsym_unique_symbols': len(result.all_dlsym_symbols),
+                'dlopen_libs_detected': result.dlopen_libs_detected,
             },
             'openssl_symbols': {
                 'by_file': {
@@ -231,6 +240,17 @@ class Reporter:
             'errors': result.errors,
         }
 
+        if result.files_with_dlopen > 0:
+            data['dlopen_analysis'] = {
+                'files_with_dlopen': result.files_with_dlopen,
+                'dlsym_symbols_by_file': {
+                    path: {'count': len(syms), 'symbols': syms}
+                    for path, syms in result.dlsym_symbols_by_file.items()
+                },
+                'all_dlsym_symbols': result.all_dlsym_symbols,
+                'dlopen_libs_detected': result.dlopen_libs_detected,
+            }
+
         if result.dependency_tree:
             data['dependency_tree'] = self._tree_to_dict(result.dependency_tree)
 
@@ -244,7 +264,7 @@ class Reporter:
 
     def _file_result_to_dict(self, file_result: FileResult) -> dict:
         """Convert FileResult to dictionary."""
-        return {
+        d = {
             'path': file_result.path,
             'type': file_result.file_type,
             'arch': file_result.arch,
@@ -257,6 +277,13 @@ class Reporter:
             'openssl_symbols_used': file_result.openssl_symbols,
             'error': file_result.error,
         }
+        if file_result.uses_dlopen:
+            d['dlopen_detection'] = {
+                'uses_dlopen': True,
+                'dlsym_symbols': file_result.dlsym_symbols,
+                'dlopen_libs': file_result.dlopen_libs,
+            }
+        return d
 
     def _format_by_depth(self, result) -> dict:
         """

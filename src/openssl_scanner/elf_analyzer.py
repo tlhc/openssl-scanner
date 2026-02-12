@@ -15,6 +15,8 @@ from elftools.elf.sections import SymbolTableSection
 from elftools.elf.dynamic import DynamicSection
 from elftools.common.exceptions import ELFError
 
+from .constants import DLOPEN_FUNCTION_NAMES, DLSYM_FUNCTION_NAMES
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,8 @@ class ELFInfo:
     undefined_symbols: List[Symbol]
     defined_symbols: List[Symbol]
     soname: Optional[str]
+    has_dlopen: bool = False
+    has_dlsym: bool = False
 
 
 class ELFAnalyzer:
@@ -83,7 +87,7 @@ class ELFAnalyzer:
                 arch = self._get_architecture(elf)
                 elf_type = self._get_elf_type(elf)
                 needed, rpath, runpath, soname = self._parse_dynamic(elf)
-                undefined, defined = self._parse_symbols(elf)
+                undefined, defined, has_dlopen, has_dlsym = self._parse_symbols(elf)
 
                 return ELFInfo(
                     path=path,
@@ -95,6 +99,8 @@ class ELFAnalyzer:
                     undefined_symbols=undefined,
                     defined_symbols=defined,
                     soname=soname,
+                    has_dlopen=has_dlopen,
+                    has_dlsym=has_dlsym,
                 )
         except (ELFError, IOError, OSError) as e:
             logger.warning(f"Failed to analyze {path}: {e}")
@@ -150,16 +156,19 @@ class ELFAnalyzer:
 
         return needed, rpath, runpath, soname
 
-    def _parse_symbols(self, elf: ELFFile) -> Tuple[List[Symbol], List[Symbol]]:
+    def _parse_symbols(self, elf: ELFFile) -> Tuple[List[Symbol], List[Symbol],
+                                                      bool, bool]:
         """
         Parse dynamic symbol table (.dynsym).
 
         Returns:
-            Tuple of (undefined_symbols, defined_symbols)
+            Tuple of (undefined_symbols, defined_symbols, has_dlopen, has_dlsym)
         """
         undefined = []
         defined = []
         seen: Set[str] = set()
+        has_dlopen = False
+        has_dlsym = False
 
         for section in elf.iter_sections():
             if not isinstance(section, SymbolTableSection):
@@ -186,10 +195,14 @@ class ELFAnalyzer:
 
                 if shndx == 'SHN_UNDEF':
                     undefined.append(sym)
+                    if name in DLOPEN_FUNCTION_NAMES:
+                        has_dlopen = True
+                    if name in DLSYM_FUNCTION_NAMES:
+                        has_dlsym = True
                 else:
                     defined.append(sym)
 
-        return undefined, defined
+        return undefined, defined, has_dlopen, has_dlsym
 
     def get_undefined_symbols(self, path: str) -> List[str]:
         """Get list of undefined symbol names from ELF file."""

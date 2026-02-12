@@ -15,14 +15,17 @@ from .source_analyzer import SourceScanResult
 logger = logging.getLogger(__name__)
 
 COLUMNS = [
-    ('file_path',        60, 'File Path'),
-    ('file_name',        25, 'File Name'),
-    ('caller_function',  30, 'Caller Function'),
-    ('line_number',      12, 'Line'),
-    ('ossl_symbol',      35, 'OpenSSL Symbol'),
-    ('category',         20, 'Category'),
-    ('call_args',        60, 'Call Arguments'),
+    ('file_path',         60, 'File Path'),
+    ('file_name',         25, 'File Name'),
+    ('caller_function',   30, 'Caller Function'),
+    ('line_number',       12, 'Line'),
+    ('ossl_symbol',       35, 'OpenSSL Symbol'),
+    ('category',          20, 'Category'),
+    ('call_args',         60, 'Call Arguments'),
+    ('detection_method',  12, 'Detection'),
 ]
+
+LAST_COL_LETTER = chr(64 + len(COLUMNS))
 
 
 SUMMARY_SHEET_COLUMNS = [
@@ -78,10 +81,12 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=5, value=cs.ossl_symbol)
             ws.cell(row=row_idx, column=6, value=cs.category)
             ws.cell(row=row_idx, column=7, value=cs.call_args)
+            ws.cell(row=row_idx, column=8,
+                    value=getattr(cs, 'detection_method', 'direct'))
 
         if result.call_sites:
             last_row = len(result.call_sites) + 1
-            ws.auto_filter.ref = f"A1:G{last_row}"
+            ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last_row}"
 
         self._write_symbol_summary(wb, result, header_font, header_fill)
 
@@ -159,6 +164,7 @@ class SourceJsonExporter:
                     'category': cs.category,
                     'call_args': cs.call_args,
                     'language': cs.language,
+                    'detection_method': getattr(cs, 'detection_method', 'direct'),
                 }
                 for cs in result.call_sites
             ],
@@ -243,7 +249,7 @@ class SourceMergeExporter:
                     ws.cell(row=row_idx, column=col_idx, value=value)
 
             if rows:
-                ws.auto_filter.ref = f"A1:G{len(rows) + 1}"
+                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
 
             cat_counts = self._count_categories(rows)
             top_cat, top_count = '', 0
@@ -345,6 +351,7 @@ class SourceMergeExporter:
                 cs.get('ossl_symbol', ''),
                 cs.get('category', ''),
                 cs.get('call_args', ''),
+                cs.get('detection_method', 'direct'),
             ])
 
         name = os.path.splitext(os.path.basename(path))[0]
@@ -408,7 +415,7 @@ class SourceMergeExporter:
                     ws.cell(row=row_idx, column=col_idx, value=value)
 
             if rows:
-                ws.auto_filter.ref = f"A1:G{len(rows) + 1}"
+                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
 
             cat_counts = self._count_categories(rows)
             top_cat, top_count = '', 0
@@ -496,7 +503,7 @@ class SourceMergeExporter:
         """Write Symbol Summary sheet from tagged call site rows.
 
         Each row is expected to have a project name appended as the last
-        element (index 7) by the merge() caller.
+        element by the merge() caller.
         """
         ws = wb.create_sheet(title=sheet_name)
 
@@ -517,7 +524,7 @@ class SourceMergeExporter:
             sym = row[4]
             cat = row[5]
             fname = row[0] if len(row) > 0 else ''
-            project = row[7] if len(row) > 7 else ''
+            project = row[-1] if len(row) > len(COLUMNS) else ''
             if sym not in sym_data:
                 sym_data[sym] = {
                     'category': cat, 'calls': 0,
@@ -566,7 +573,8 @@ class SourceMergeExporter:
         """Convert SourceScanResult.call_sites to row lists."""
         return [
             [cs.file_path, cs.file_name, cs.caller_function,
-             cs.line_number, cs.ossl_symbol, cs.category, cs.call_args]
+             cs.line_number, cs.ossl_symbol, cs.category, cs.call_args,
+             getattr(cs, 'detection_method', 'direct')]
             for cs in result.call_sites
         ]
 
@@ -619,7 +627,7 @@ class SourceMergeExporter:
                     ws.cell(row=row_idx, column=col_idx, value=value)
 
             if rows:
-                ws.auto_filter.ref = f"A1:G{len(rows) + 1}"
+                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
 
             cat_counts = self._count_categories(rows)
             top_cat, top_count = '', 0
@@ -705,6 +713,8 @@ class SourceMergeExporter:
                         'ossl_symbol': cs.ossl_symbol,
                         'category': cs.category,
                         'call_args': cs.call_args,
+                        'detection_method': getattr(cs, 'detection_method',
+                                                    'direct'),
                     }
                     for cs in result.call_sites
                 ],

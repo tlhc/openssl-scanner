@@ -132,7 +132,8 @@ class ExcelExporter:
         headers = [
             "File Path", "File Name", "Type", "Arch",
             "OpenSSL Direct", "OpenSSL Transitive", "OpenSSL Libs",
-            "Symbol Count", "Direct Dependencies"
+            "Symbol Count", "Direct Dependencies",
+            "dlopen", "dlsym Symbols", "dlsym Count",
         ]
         for col, header in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=header)
@@ -187,12 +188,18 @@ class ExcelExporter:
             ws.cell(row=row_idx, column=7, value=', '.join(openssl_deps.get('libs', [])))
             ws.cell(row=row_idx, column=8, value=len(symbols))
             ws.cell(row=row_idx, column=9, value=', '.join(direct_deps) if direct_deps else '')
+
+            dlopen_det = f.get('dlopen_detection', {})
+            ws.cell(row=row_idx, column=10, value='Yes' if dlopen_det.get('uses_dlopen') else '')
+            dlsym_syms = dlopen_det.get('dlsym_symbols', [])
+            ws.cell(row=row_idx, column=11, value=', '.join(dlsym_syms) if dlsym_syms else '')
+            ws.cell(row=row_idx, column=12, value=len(dlsym_syms) if dlsym_syms else '')
             row_idx += 1
 
         if row_idx == 2:
             ws.cell(row=2, column=1, value="No file data available")
 
-        col_widths = [60, 25, 15, 10, 15, 18, 40, 12, 60]
+        col_widths = [60, 25, 15, 10, 15, 18, 40, 12, 60, 12, 50, 12]
         for col, width in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(col)].width = width
 

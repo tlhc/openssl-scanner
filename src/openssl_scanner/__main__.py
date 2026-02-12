@@ -702,19 +702,27 @@ def cmd_scan(args) -> int:
             recursive=not args.no_recursive
         )
         if not libcrypto:
-            logger.error("No OpenSSL library found. Use --openssl-lib to specify manually.")
-            return 1
-        logger.info(f"Auto-detected libcrypto: {libcrypto}")
-        if libssl:
-            logger.info(f"Auto-detected libssl: {libssl}")
+            logger.warning(
+                "No OpenSSL library found via auto-detection. "
+                "Falling back to built-in symbol data."
+            )
+        else:
+            logger.info(f"Auto-detected libcrypto: {libcrypto}")
+            if libssl:
+                logger.info(f"Auto-detected libssl: {libssl}")
 
     matcher = OpenSSLMatcher()
-    try:
-        count = matcher.load_openssl_symbols(libcrypto, libssl)
-        logger.info(f"Loaded {count} OpenSSL symbols")
-    except (FileNotFoundError, ValueError) as e:
-        logger.error(f"Failed to load OpenSSL symbols: {e}")
-        return 1
+    if libcrypto:
+        try:
+            count = matcher.load_openssl_symbols(libcrypto, libssl)
+            logger.info(f"Loaded {count} OpenSSL symbols from live library")
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"Failed to load live OpenSSL symbols: {e}")
+            libcrypto = None
+
+    if not matcher.is_loaded():
+        count = matcher.load_builtin_symbols()
+        logger.info(f"Loaded {count} built-in OpenSSL symbols")
 
     scanner = Scanner(
         search_paths=search_paths,
@@ -843,22 +851,27 @@ def cmd_proc(args) -> int:
         discovery = OpenSSLDiscovery(additional_paths=search_paths)
         libcrypto, libssl = discovery.discover_from_libraries(lib_paths)
         if not libcrypto:
-            logger.error(
+            logger.warning(
                 "No OpenSSL library found in mapped libraries. "
-                "Use --openssl-lib to specify manually."
+                "Falling back to built-in symbol data."
             )
-            return 1
-        logger.info("Auto-detected libcrypto: %s", libcrypto)
-        if libssl:
-            logger.info("Auto-detected libssl: %s", libssl)
+        else:
+            logger.info("Auto-detected libcrypto: %s", libcrypto)
+            if libssl:
+                logger.info("Auto-detected libssl: %s", libssl)
 
     matcher = OpenSSLMatcher()
-    try:
-        count = matcher.load_openssl_symbols(libcrypto, libssl)
-        logger.info("Loaded %d OpenSSL symbols", count)
-    except (FileNotFoundError, ValueError) as e:
-        logger.error("Failed to load OpenSSL symbols: %s", e)
-        return 1
+    if libcrypto:
+        try:
+            count = matcher.load_openssl_symbols(libcrypto, libssl)
+            logger.info("Loaded %d OpenSSL symbols from live library", count)
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning("Failed to load live OpenSSL symbols: %s", e)
+            libcrypto = None
+
+    if not matcher.is_loaded():
+        count = matcher.load_builtin_symbols()
+        logger.info("Loaded %d built-in OpenSSL symbols", count)
 
     scanner = Scanner(
         search_paths=search_paths,
@@ -956,62 +969,20 @@ def cmd_hap(args) -> int:
                 len(extract_result.so_files)
             )
 
-            libcrypto = extract_result.openssl_lib
-            libssl = extract_result.openssl_ssl
-
-            if not libcrypto and args.openssl_lib:
-                libcrypto = os.path.abspath(args.openssl_lib)
-                if not os.path.isfile(libcrypto):
-                    logger.error("OpenSSL library not found: %s", libcrypto)
-                    if not args.keep_extracted:
-                        extractor.cleanup(extract_result)
-                    return 1
-                if args.openssl_ssl:
-                    libssl = os.path.abspath(args.openssl_ssl)
-
-            if not libcrypto:
-                discovery = OpenSSLDiscovery()
-                libcrypto, libssl = discovery.discover_from_libraries(
-                    extract_result.so_files
-                )
-
-            if not libcrypto:
-                logger.warning(
-                    "No OpenSSL library found for %s. "
-                    "Use --openssl-lib to specify. Skipping.",
-                    os.path.basename(pkg_path)
-                )
-                if not args.keep_extracted:
-                    extractor.cleanup(extract_result)
-                continue
-
-            logger.info("Using libcrypto: %s", libcrypto)
-
             matcher = OpenSSLMatcher()
-            try:
-                count = matcher.load_openssl_symbols(libcrypto, libssl)
-                logger.info("Loaded %d OpenSSL symbols", count)
-            except (FileNotFoundError, ValueError) as e:
-                logger.error("Failed to load OpenSSL symbols: %s", e)
-                if not args.keep_extracted:
-                    extractor.cleanup(extract_result)
-                continue
+            count = matcher.load_builtin_symbols()
+            logger.info("Loaded %d built-in OpenSSL symbols", count)
 
-            ossl_basenames = set()
-            for ossl_path in [libcrypto, libssl]:
-                if ossl_path:
-                    ossl_basenames.add(os.path.basename(ossl_path))
-            if ossl_basenames:
-                removed = 0
-                for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
-                    for fname in filenames:
-                        if fname in ossl_basenames:
-                            fpath = os.path.join(dirpath, fname)
-                            os.remove(fpath)
-                            removed += 1
-                            logger.debug("Excluded OpenSSL lib: %s", fpath)
-                logger.info("Excluded %d OpenSSL lib file(s) (%s) from scan",
-                            removed, ', '.join(sorted(ossl_basenames)))
+            removed = 0
+            for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
+                for fname in filenames:
+                    if matcher.is_openssl_library(fname):
+                        fpath = os.path.join(dirpath, fname)
+                        os.remove(fpath)
+                        removed += 1
+                        logger.debug("Excluded OpenSSL lib: %s", fpath)
+            if removed:
+                logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
 
             scanner = Scanner(
                 search_paths=[extract_result.extract_dir],
@@ -1036,7 +1007,7 @@ def cmd_hap(args) -> int:
                 'scanned_abi': meta.abis_found,
                 'abis_available': meta.abis_found,
                 'native_libs_count': len(extract_result.so_files),
-                'bundled_openssl': extract_result.openssl_lib is not None,
+                'bundled_openssl': removed > 0 or extract_result.openssl_lib is not None,
             }
 
             all_results.append(result)

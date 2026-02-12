@@ -122,14 +122,15 @@ class TestHapSubcommandCLI:
         ret = main(['hap', hap_path, '-o', output, '--json-only'])
         assert ret == 1
 
-    def test_hap_no_openssl_skips(self):
-        """HAP with native libs but no OpenSSL should skip gracefully."""
+    def test_hap_no_openssl_scans_with_builtin(self):
+        """HAP with native libs but no bundled OpenSSL should scan using built-in symbols."""
         hap_path = os.path.join(self.tmpdir, "no_ssl.hap")
         _create_test_hap(hap_path, include_openssl=False)
 
         output = os.path.join(self.tmpdir, "report.json")
         ret = main(['hap', hap_path, '-o', output, '--json-only'])
-        assert ret == 1
+        assert ret == 0
+        assert os.path.isfile(output)
 
     def test_hap_directory_no_packages(self):
         """Directory with no packages should return 1."""
@@ -141,7 +142,7 @@ class TestHapSubcommandCLI:
         assert ret == 1
 
     def test_hap_directory_finds_packages(self):
-        """Directory scan should find packages but may fail on OpenSSL detection."""
+        """Directory scan should find and scan packages using built-in symbols."""
         pkg_dir = os.path.join(self.tmpdir, "packages")
         os.makedirs(pkg_dir)
         _create_test_hap(os.path.join(pkg_dir, "a.hap"))
@@ -149,7 +150,8 @@ class TestHapSubcommandCLI:
 
         output = os.path.join(self.tmpdir, "report.json")
         ret = main(['hap', pkg_dir, '-o', output, '--json-only'])
-        assert ret == 1
+        assert ret == 0
+        assert os.path.isfile(output)
 
 
 class TestHapExtractPipeline:
@@ -169,7 +171,8 @@ class TestHapExtractPipeline:
         output = os.path.join(self.tmpdir, "report.json")
         ret = main(['hap', hap_path, '-o', output, '--json-only',
                      '--keep-extracted'])
-        assert ret == 1
+        assert ret == 0
+        assert os.path.isfile(output)
 
     def test_hap_recognized_in_command_list(self):
         """'hap' should be recognized as a valid subcommand (not falling through to scan)."""

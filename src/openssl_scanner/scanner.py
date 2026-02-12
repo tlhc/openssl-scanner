@@ -15,6 +15,7 @@ from .elf_analyzer import ELFAnalyzer, ELFInfo
 from .dependency_resolver import DependencyResolver, DependencyNode
 from .dependency_graph import DependencyGraph, ImportChain, DepthInfo
 from .openssl_matcher import OpenSSLMatcher
+from .constants import OPENSSL_LIBRARY_PATTERNS
 from . import __version__
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,23 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
                     if any(p in lib.lower() for p in openssl_lib_patterns)]
     openssl_direct = len(openssl_libs) > 0
 
+    uses_dlopen = False
+    dlsym_symbols = []
+    dlopen_libs = []
+
+    if info.has_dlopen or info.has_dlsym:
+        from .dlopen_analyzer import detect_dlopen_openssl
+        dlopen_result = detect_dlopen_openssl(path, openssl_exports,
+                                               OPENSSL_LIBRARY_PATTERNS)
+        if dlopen_result:
+            uses_dlopen = True
+            dlsym_symbols = dlopen_result.dlsym_symbols
+            dlopen_libs = dlopen_result.dlopen_libs
+            existing = set(openssl_symbols)
+            for s in dlsym_symbols:
+                if s not in existing:
+                    openssl_symbols.append(s)
+
     return FileResult(
         path=path,
         file_type=info.elf_type,
@@ -73,6 +91,9 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
         openssl_transitive=False,
         openssl_libs=openssl_libs,
         openssl_symbols=openssl_symbols,
+        uses_dlopen=uses_dlopen,
+        dlsym_symbols=dlsym_symbols,
+        dlopen_libs=dlopen_libs,
     )
 
 
@@ -88,6 +109,9 @@ class FileResult:
     openssl_libs: List[str]
     openssl_symbols: List[str]
     error: Optional[str] = None
+    uses_dlopen: bool = False
+    dlsym_symbols: List[str] = field(default_factory=list)
+    dlopen_libs: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +151,12 @@ class ScanResult:
 
     # Package scan mode
     package_info: Optional[Dict] = None
+
+    # dlopen/dlsym detection
+    files_with_dlopen: int = 0
+    dlsym_symbols_by_file: Dict[str, List[str]] = field(default_factory=dict)
+    all_dlsym_symbols: List[str] = field(default_factory=list)
+    dlopen_libs_detected: List[str] = field(default_factory=list)
 
 
 class Scanner:
@@ -235,15 +265,36 @@ class Scanner:
                         if self._matcher.is_openssl_library(lib)]
         openssl_direct = len(openssl_libs) > 0
 
+        uses_dlopen = False
+        dlsym_symbols = []
+        dlopen_libs = []
+
+        if info.has_dlopen or info.has_dlsym:
+            from .dlopen_analyzer import detect_dlopen_openssl
+            openssl_exports = self._matcher.get_openssl_exports()
+            dlopen_result = detect_dlopen_openssl(path, openssl_exports,
+                                                   OPENSSL_LIBRARY_PATTERNS)
+            if dlopen_result:
+                uses_dlopen = True
+                dlsym_symbols = dlopen_result.dlsym_symbols
+                dlopen_libs = dlopen_result.dlopen_libs
+                existing = set(openssl_symbols)
+                for s in dlsym_symbols:
+                    if s not in existing:
+                        openssl_symbols.append(s)
+
         return FileResult(
             path=path,
             file_type=info.elf_type,
             arch=info.arch,
             direct_deps=info.needed_libs,
             openssl_direct=openssl_direct,
-            openssl_transitive=False,  # Set later in tree scan
+            openssl_transitive=False,
             openssl_libs=openssl_libs,
             openssl_symbols=openssl_symbols,
+            uses_dlopen=uses_dlopen,
+            dlsym_symbols=dlsym_symbols,
+            dlopen_libs=dlopen_libs,
         )
 
     def scan_tree(self, root_path: str) -> ScanResult:
@@ -320,6 +371,7 @@ class Scanner:
         self._mark_transitive_deps(result)
         self._compute_symbols_by_depth(result)
         self._compute_import_chains(result)
+        self._aggregate_dlopen(result)
 
         return result
 
@@ -407,6 +459,7 @@ class Scanner:
         )
 
         self._compute_dependency_graph(result, file_results, openssl_libs)
+        self._aggregate_dlopen(result)
 
         return result
 
@@ -522,6 +575,8 @@ class Scanner:
             self._compute_symbols_by_depth(result)
             self._compute_import_chains(result)
 
+        self._aggregate_dlopen(result)
+
         runtime_libs = [lib.basename for lib in process_info.mapped_libraries
                         if lib.runtime_only]
         result.process_info = {
@@ -596,6 +651,28 @@ class Scanner:
             tool_version=__version__,
             arch='unknown',
         )
+
+    @staticmethod
+    def _aggregate_dlopen(result: ScanResult) -> None:
+        """Aggregate dlopen detection results from individual file results."""
+        dlsym_symbols_by_file: Dict[str, List[str]] = {}
+        all_dlsym_set: Set[str] = set()
+        dlopen_libs_set: Set[str] = set()
+        files_with_dlopen = 0
+
+        for fr in result.files_detail:
+            if fr.uses_dlopen:
+                files_with_dlopen += 1
+            if fr.dlsym_symbols:
+                dlsym_symbols_by_file[fr.path] = fr.dlsym_symbols
+                all_dlsym_set.update(fr.dlsym_symbols)
+            for lib in fr.dlopen_libs:
+                dlopen_libs_set.add(lib)
+
+        result.files_with_dlopen = files_with_dlopen
+        result.dlsym_symbols_by_file = dlsym_symbols_by_file
+        result.all_dlsym_symbols = sorted(all_dlsym_set)
+        result.dlopen_libs_detected = sorted(dlopen_libs_set)
 
     def _collect_tree_paths(self, node: DependencyNode) -> List[str]:
         """Collect all file paths from dependency tree."""
