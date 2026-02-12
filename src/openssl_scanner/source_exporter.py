@@ -82,7 +82,7 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=6, value=cs.category)
             ws.cell(row=row_idx, column=7, value=cs.call_args)
             ws.cell(row=row_idx, column=8,
-                    value=getattr(cs, 'detection_method', 'direct'))
+                    value=getattr(cs, 'detection_method', 'dynamic-link'))
 
         if result.call_sites:
             last_row = len(result.call_sites) + 1
@@ -164,7 +164,7 @@ class SourceJsonExporter:
                     'category': cs.category,
                     'call_args': cs.call_args,
                     'language': cs.language,
-                    'detection_method': getattr(cs, 'detection_method', 'direct'),
+                    'detection_method': getattr(cs, 'detection_method', 'dynamic-link'),
                 }
                 for cs in result.call_sites
             ],
@@ -351,7 +351,7 @@ class SourceMergeExporter:
                 cs.get('ossl_symbol', ''),
                 cs.get('category', ''),
                 cs.get('call_args', ''),
-                cs.get('detection_method', 'direct'),
+                cs.get('detection_method', 'dynamic-link'),
             ])
 
         name = os.path.splitext(os.path.basename(path))[0]
@@ -574,7 +574,7 @@ class SourceMergeExporter:
         return [
             [cs.file_path, cs.file_name, cs.caller_function,
              cs.line_number, cs.ossl_symbol, cs.category, cs.call_args,
-             getattr(cs, 'detection_method', 'direct')]
+             getattr(cs, 'detection_method', 'dynamic-link')]
             for cs in result.call_sites
         ]
 
@@ -714,7 +714,7 @@ class SourceMergeExporter:
                         'category': cs.category,
                         'call_args': cs.call_args,
                         'detection_method': getattr(cs, 'detection_method',
-                                                    'direct'),
+                                                    'dynamic-link'),
                     }
                     for cs in result.call_sites
                 ],

@@ -131,9 +131,9 @@ class ExcelExporter:
 
         headers = [
             "File Path", "File Name", "Type", "Arch",
-            "OpenSSL Direct", "OpenSSL Transitive", "OpenSSL Libs",
+            "Link Type", "OpenSSL Transitive", "OpenSSL Libs",
             "Symbol Count", "Direct Dependencies",
-            "dlopen", "dlsym Symbols", "dlsym Count",
+            "dlopen Symbols", "dlopen Count",
         ]
         for col, header in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=header)
@@ -179,27 +179,34 @@ class ExcelExporter:
             symbols = f.get('openssl_symbols_used', [])
             direct_deps = f.get('direct_deps', [])
 
+            dlopen_det = f.get('dlopen_detection', {})
+            if dlopen_det.get('uses_dlopen'):
+                link_type = 'dlopen'
+            elif f.get('static_openssl'):
+                link_type = 'static-link'
+            elif openssl_deps.get('direct'):
+                link_type = 'dynamic-link'
+            else:
+                link_type = ''
+
             ws.cell(row=row_idx, column=1, value=path)
             ws.cell(row=row_idx, column=2, value=os.path.basename(path))
             ws.cell(row=row_idx, column=3, value=f.get('type', ''))
             ws.cell(row=row_idx, column=4, value=f.get('arch', ''))
-            ws.cell(row=row_idx, column=5, value='Yes' if openssl_deps.get('direct') else 'No')
+            ws.cell(row=row_idx, column=5, value=link_type)
             ws.cell(row=row_idx, column=6, value='Yes' if openssl_deps.get('transitive') else 'No')
             ws.cell(row=row_idx, column=7, value=', '.join(openssl_deps.get('libs', [])))
             ws.cell(row=row_idx, column=8, value=len(symbols))
             ws.cell(row=row_idx, column=9, value=', '.join(direct_deps) if direct_deps else '')
-
-            dlopen_det = f.get('dlopen_detection', {})
-            ws.cell(row=row_idx, column=10, value='Yes' if dlopen_det.get('uses_dlopen') else '')
-            dlsym_syms = dlopen_det.get('dlsym_symbols', [])
-            ws.cell(row=row_idx, column=11, value=', '.join(dlsym_syms) if dlsym_syms else '')
-            ws.cell(row=row_idx, column=12, value=len(dlsym_syms) if dlsym_syms else '')
+            dlsym_syms = dlopen_det.get('dlopen_symbols', [])
+            ws.cell(row=row_idx, column=10, value=', '.join(dlsym_syms) if dlsym_syms else '')
+            ws.cell(row=row_idx, column=11, value=len(dlsym_syms) if dlsym_syms else '')
             row_idx += 1
 
         if row_idx == 2:
             ws.cell(row=2, column=1, value="No file data available")
 
-        col_widths = [60, 25, 15, 10, 15, 18, 40, 12, 60, 12, 50, 12]
+        col_widths = [60, 25, 15, 10, 15, 18, 40, 12, 60, 50, 12]
         for col, width in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(col)].width = width
 
@@ -216,7 +223,7 @@ class ExcelExporter:
         report_type = data.get('meta', {}).get('report_type', 'single')
         is_aggregated = report_type == 'aggregated'
 
-        headers = ["Component", "Binary", "Symbol", "Category"]
+        headers = ["Component", "Binary", "Symbol", "Category", "Detection"]
         for col, header in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=header)
         self._style_header(ws, 1, len(headers))
@@ -236,6 +243,17 @@ class ExcelExporter:
                         for sym in cat_data.get('symbols', []):
                             symbol_to_category[sym] = cat
 
+        dlsym_lookup = set()
+        static_lookup = set()
+        for f in data.get('files_detail', []):
+            fpath = f.get('path', '')
+            if f.get('static_openssl'):
+                static_lookup.add(fpath)
+            det = f.get('dlopen_detection', {})
+            if det.get('uses_dlopen'):
+                for sym in det.get('dlopen_symbols', []):
+                    dlsym_lookup.add((fpath, sym))
+
         row_idx = 2
 
         by_file = data.get('openssl_symbols', {}).get('by_file', {})
@@ -245,10 +263,17 @@ class ExcelExporter:
                 filename = os.path.basename(path)
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
+                    if (path, sym) in dlsym_lookup:
+                        detection = 'dlopen'
+                    elif path in static_lookup:
+                        detection = 'static-link'
+                    else:
+                        detection = 'dynamic-link'
                     ws.cell(row=row_idx, column=1, value=path)
                     ws.cell(row=row_idx, column=2, value=filename)
                     ws.cell(row=row_idx, column=3, value=sym)
                     ws.cell(row=row_idx, column=4, value=category)
+                    ws.cell(row=row_idx, column=5, value=detection)
                     row_idx += 1
 
         files_detail = data.get('files_detail', [])
@@ -259,10 +284,17 @@ class ExcelExporter:
                 symbols = f.get('openssl_symbols_used', [])
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
+                    if (path, sym) in dlsym_lookup:
+                        detection = 'dlopen'
+                    elif path in static_lookup:
+                        detection = 'static-link'
+                    else:
+                        detection = 'dynamic-link'
                     ws.cell(row=row_idx, column=1, value=path)
                     ws.cell(row=row_idx, column=2, value=filename)
                     ws.cell(row=row_idx, column=3, value=sym)
                     ws.cell(row=row_idx, column=4, value=category)
+                    ws.cell(row=row_idx, column=5, value=detection)
                     row_idx += 1
 
         if components and row_idx == 2:
@@ -277,6 +309,7 @@ class ExcelExporter:
                                 ws.cell(row=row_idx, column=2, value=bin_name)
                                 ws.cell(row=row_idx, column=3, value=sym)
                                 ws.cell(row=row_idx, column=4, value=cat)
+                                ws.cell(row=row_idx, column=5, value='dynamic-link')
                                 row_idx += 1
                 else:
                     for cat, cat_data in comp_data.get('by_category', {}).items():
@@ -286,6 +319,7 @@ class ExcelExporter:
                             ws.cell(row=row_idx, column=2, value=comp_name)
                             ws.cell(row=row_idx, column=3, value=sym)
                             ws.cell(row=row_idx, column=4, value=cat)
+                            ws.cell(row=row_idx, column=5, value='direct')
                             row_idx += 1
 
         if row_idx == 2:
@@ -295,6 +329,7 @@ class ExcelExporter:
         ws.column_dimensions['B'].width = 25
         ws.column_dimensions['C'].width = 35
         ws.column_dimensions['D'].width = 18
+        ws.column_dimensions['E'].width = 12
 
     def _create_import_chains_sheet(self, wb, data: Dict) -> None:
         """

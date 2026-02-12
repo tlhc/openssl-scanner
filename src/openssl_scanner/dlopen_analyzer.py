@@ -139,10 +139,13 @@ def detect_dlopen_openssl(elf_path: str,
                 data = section.data()
                 all_strings.update(extract_c_strings(data))
 
-            dlsym_symbols = sorted(s for s in all_strings if s in openssl_exports)
             dlopen_libs = sorted(
                 s for s in all_strings
                 if _is_openssl_lib_string(s, lib_patterns)
+            )
+
+            dlsym_symbols = sorted(
+                s for s in all_strings if s in openssl_exports
             )
 
             return DlopenResult(

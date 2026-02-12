@@ -40,7 +40,7 @@ class CallSite:
     category: str
     call_args: str
     language: str
-    detection_method: str = "direct"
+    detection_method: str = "dynamic-link"
 
 
 @dataclass
@@ -277,7 +277,7 @@ def _scan_file_ast(file_path: str, lang: str,
                 category=category,
                 call_args='dlsym(_, "%s")' % sym_text,
                 language=lang,
-                detection_method="dlsym",
+                detection_method="dlopen",
             ))
 
     elif lang == 'rust':

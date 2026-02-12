@@ -60,10 +60,22 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
     undefined_names = [s.name for s in info.undefined_symbols]
     openssl_symbols = [s for s in undefined_names if s in openssl_exports]
 
+    defined_names = [s.name for s in info.defined_symbols]
+    openssl_defined = [s for s in defined_names if s in openssl_exports]
+
     openssl_lib_patterns = ('libcrypto', 'libssl', 'libopenssl')
     openssl_libs = [lib for lib in info.needed_libs
                     if any(p in lib.lower() for p in openssl_lib_patterns)]
     openssl_direct = len(openssl_libs) > 0
+
+    static_openssl = False
+    if not openssl_symbols and openssl_defined:
+        logger.debug(
+            "static OpenSSL %s: UND_ossl=0 DEF_ossl=%d needed=%s",
+            os.path.basename(path), len(openssl_defined), info.needed_libs)
+        openssl_symbols = openssl_defined
+        openssl_direct = True
+        static_openssl = True
 
     uses_dlopen = False
     dlsym_symbols = []
@@ -74,13 +86,26 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
         dlopen_result = detect_dlopen_openssl(path, openssl_exports,
                                                OPENSSL_LIBRARY_PATTERNS)
         if dlopen_result:
-            uses_dlopen = True
-            dlsym_symbols = dlopen_result.dlsym_symbols
             dlopen_libs = dlopen_result.dlopen_libs
-            existing = set(openssl_symbols)
-            for s in dlsym_symbols:
-                if s not in existing:
-                    openssl_symbols.append(s)
+            if not openssl_direct or dlopen_libs:
+                uses_dlopen = True
+                direct_set = set(openssl_symbols)
+                dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
+                                 if s not in direct_set]
+                overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
+                logger.debug(
+                    "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
+                    "overlap=%d dlopen_only=%d direct=%s libs=%s",
+                    os.path.basename(path), len(openssl_symbols),
+                    len(dlopen_result.dlsym_symbols), overlap,
+                    len(dlsym_symbols), openssl_direct, dlopen_libs)
+                openssl_symbols.extend(dlsym_symbols)
+            elif dlopen_result.dlsym_symbols:
+                logger.debug(
+                    "dlopen skip %s: direct OpenSSL link + no lib "
+                    "patterns in .rodata, ignoring %d matches",
+                    os.path.basename(path),
+                    len(dlopen_result.dlsym_symbols))
 
     return FileResult(
         path=path,
@@ -91,6 +116,7 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
         openssl_transitive=False,
         openssl_libs=openssl_libs,
         openssl_symbols=openssl_symbols,
+        static_openssl=static_openssl,
         uses_dlopen=uses_dlopen,
         dlsym_symbols=dlsym_symbols,
         dlopen_libs=dlopen_libs,
@@ -109,6 +135,7 @@ class FileResult:
     openssl_libs: List[str]
     openssl_symbols: List[str]
     error: Optional[str] = None
+    static_openssl: bool = False
     uses_dlopen: bool = False
     dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs: List[str] = field(default_factory=list)
@@ -151,6 +178,9 @@ class ScanResult:
 
     # Package scan mode
     package_info: Optional[Dict] = None
+
+    # Static OpenSSL detection
+    files_with_static_openssl: int = 0
 
     # dlopen/dlsym detection
     files_with_dlopen: int = 0
@@ -261,9 +291,22 @@ class Scanner:
             [s.name for s in info.undefined_symbols]
         )
 
+        openssl_defined = self._matcher.filter_openssl_symbols(
+            [s.name for s in info.defined_symbols]
+        )
+
         openssl_libs = [lib for lib in info.needed_libs
                         if self._matcher.is_openssl_library(lib)]
         openssl_direct = len(openssl_libs) > 0
+
+        static_openssl = False
+        if not openssl_symbols and openssl_defined:
+            logger.debug(
+                "static OpenSSL %s: UND_ossl=0 DEF_ossl=%d needed=%s",
+                os.path.basename(path), len(openssl_defined), info.needed_libs)
+            openssl_symbols = openssl_defined
+            openssl_direct = True
+            static_openssl = True
 
         uses_dlopen = False
         dlsym_symbols = []
@@ -275,13 +318,26 @@ class Scanner:
             dlopen_result = detect_dlopen_openssl(path, openssl_exports,
                                                    OPENSSL_LIBRARY_PATTERNS)
             if dlopen_result:
-                uses_dlopen = True
-                dlsym_symbols = dlopen_result.dlsym_symbols
                 dlopen_libs = dlopen_result.dlopen_libs
-                existing = set(openssl_symbols)
-                for s in dlsym_symbols:
-                    if s not in existing:
-                        openssl_symbols.append(s)
+                if not openssl_direct or dlopen_libs:
+                    uses_dlopen = True
+                    direct_set = set(openssl_symbols)
+                    dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
+                                     if s not in direct_set]
+                    overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
+                    logger.debug(
+                        "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
+                        "overlap=%d dlopen_only=%d direct=%s libs=%s",
+                        os.path.basename(path), len(openssl_symbols),
+                        len(dlopen_result.dlsym_symbols), overlap,
+                        len(dlsym_symbols), openssl_direct, dlopen_libs)
+                    openssl_symbols.extend(dlsym_symbols)
+                elif dlopen_result.dlsym_symbols:
+                    logger.debug(
+                        "dlopen skip %s: direct OpenSSL link + no lib "
+                        "patterns in .rodata, ignoring %d matches",
+                        os.path.basename(path),
+                        len(dlopen_result.dlsym_symbols))
 
         return FileResult(
             path=path,
@@ -292,6 +348,7 @@ class Scanner:
             openssl_transitive=False,
             openssl_libs=openssl_libs,
             openssl_symbols=openssl_symbols,
+            static_openssl=static_openssl,
             uses_dlopen=uses_dlopen,
             dlsym_symbols=dlsym_symbols,
             dlopen_libs=dlopen_libs,
@@ -654,13 +711,16 @@ class Scanner:
 
     @staticmethod
     def _aggregate_dlopen(result: ScanResult) -> None:
-        """Aggregate dlopen detection results from individual file results."""
+        """Aggregate dlopen and static detection results from file results."""
         dlsym_symbols_by_file: Dict[str, List[str]] = {}
         all_dlsym_set: Set[str] = set()
         dlopen_libs_set: Set[str] = set()
         files_with_dlopen = 0
+        files_with_static_openssl = 0
 
         for fr in result.files_detail:
+            if fr.static_openssl:
+                files_with_static_openssl += 1
             if fr.uses_dlopen:
                 files_with_dlopen += 1
             if fr.dlsym_symbols:
@@ -669,6 +729,7 @@ class Scanner:
             for lib in fr.dlopen_libs:
                 dlopen_libs_set.add(lib)
 
+        result.files_with_static_openssl = files_with_static_openssl
         result.files_with_dlopen = files_with_dlopen
         result.dlsym_symbols_by_file = dlsym_symbols_by_file
         result.all_dlsym_symbols = sorted(all_dlsym_set)

@@ -275,7 +275,7 @@ void load_ssl(void *handle) {
             assert err is None
             assert len(sites) == 1
             assert sites[0].ossl_symbol == 'SSL_CTX_new'
-            assert sites[0].detection_method == 'dlsym'
+            assert sites[0].detection_method == 'dlopen'
             assert 'dlsym' in sites[0].call_args
         finally:
             os.unlink(path)
@@ -297,7 +297,7 @@ void load_lib(void *handle) {
             os.unlink(path)
 
     def test_dlsym_detection_method_field(self):
-        """detection_method should be "dlsym" for dlsym calls."""
+        """detection_method should be "dlopen" for dlsym calls."""
         code = '''
 void init(void *h) {
     void *f1 = dlsym(h, "EVP_sha256");
@@ -308,7 +308,7 @@ void init(void *h) {
             sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
                                          SYMBOL_CATEGORIES)
             assert len(sites) == 1
-            assert sites[0].detection_method == 'dlsym'
+            assert sites[0].detection_method == 'dlopen'
         finally:
             os.unlink(path)
 
@@ -341,8 +341,8 @@ void setup(void *h) {
             sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
                                          SYMBOL_CATEGORIES)
             assert len(sites) == 2
-            direct = [s for s in sites if s.detection_method == 'direct']
-            dlsym = [s for s in sites if s.detection_method == 'dlsym']
+            direct = [s for s in sites if s.detection_method == 'dynamic-link']
+            dlsym = [s for s in sites if s.detection_method == 'dlopen']
             assert len(direct) == 1
             assert len(dlsym) == 1
             assert direct[0].ossl_symbol == 'SSL_CTX_new'
@@ -367,7 +367,7 @@ void init(void *h) {
             assert 'SSL_connect' in syms
             assert 'SSL_read' in syms
             assert 'SSL_write' in syms
-            assert all(s.detection_method == 'dlsym' for s in sites)
+            assert all(s.detection_method == 'dlopen' for s in sites)
         finally:
             os.unlink(path)
 

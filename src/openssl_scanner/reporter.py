@@ -89,9 +89,11 @@ class Reporter:
         lines.append(f"Total Files Scanned:       {result.total_files_scanned}")
         lines.append(f"ELF Files Found:           {result.total_elf_files}")
         lines.append(f"Files with OpenSSL Deps:   {result.files_with_openssl}")
+        if result.files_with_static_openssl > 0:
+            lines.append(f"Static OpenSSL Link:       {result.files_with_static_openssl}")
         if result.files_with_dlopen > 0:
             lines.append(f"Files using dlopen:        {result.files_with_dlopen}")
-            lines.append(f"dlsym OpenSSL Symbols:     {len(result.all_dlsym_symbols)} unique")
+            lines.append(f"dlopen OpenSSL Symbols:    {len(result.all_dlsym_symbols)} unique")
             if result.dlopen_libs_detected:
                 libs_str = ', '.join(result.dlopen_libs_detected)
                 lines.append(f"dlopen Libraries:          {libs_str}")
@@ -211,8 +213,9 @@ class Reporter:
                 ),
                 'unique_openssl_symbols': len(result.all_unique_symbols),
                 'openssl_libs_found': result.openssl_libs_found,
+                'files_with_static_openssl': result.files_with_static_openssl,
                 'files_with_dlopen': result.files_with_dlopen,
-                'dlsym_unique_symbols': len(result.all_dlsym_symbols),
+                'dlopen_unique_symbols': len(result.all_dlsym_symbols),
                 'dlopen_libs_detected': result.dlopen_libs_detected,
             },
             'openssl_symbols': {
@@ -243,11 +246,11 @@ class Reporter:
         if result.files_with_dlopen > 0:
             data['dlopen_analysis'] = {
                 'files_with_dlopen': result.files_with_dlopen,
-                'dlsym_symbols_by_file': {
+                'dlopen_symbols_by_file': {
                     path: {'count': len(syms), 'symbols': syms}
                     for path, syms in result.dlsym_symbols_by_file.items()
                 },
-                'all_dlsym_symbols': result.all_dlsym_symbols,
+                'all_dlopen_symbols': result.all_dlsym_symbols,
                 'dlopen_libs_detected': result.dlopen_libs_detected,
             }
 
@@ -275,12 +278,13 @@ class Reporter:
                 'libs': file_result.openssl_libs,
             },
             'openssl_symbols_used': file_result.openssl_symbols,
+            'static_openssl': file_result.static_openssl,
             'error': file_result.error,
         }
         if file_result.uses_dlopen:
             d['dlopen_detection'] = {
                 'uses_dlopen': True,
-                'dlsym_symbols': file_result.dlsym_symbols,
+                'dlopen_symbols': file_result.dlsym_symbols,
                 'dlopen_libs': file_result.dlopen_libs,
             }
         return d

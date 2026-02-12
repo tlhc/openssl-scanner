@@ -461,6 +461,39 @@ class TestDlopenDetection:
             finally:
                 os.unlink(path)
 
+    def test_no_openssl_lib_path_still_extracts_symbols(self):
+        """dlopen/dlsym without OpenSSL library path still extracts symbols.
+
+        detect_dlopen_openssl does raw extraction. Policy decisions
+        (e.g., gating on openssl_direct) are in the scanner worker.
+        """
+        rodata = (
+            b'SSL_CTX_new\x00'
+            b'EVP_sha256\x00'
+            b'libplugin.so\x00'
+        )
+        mock_elf = _make_mock_elf(
+            undefined_symbols=[
+                ('dlopen', 'SHN_UNDEF'),
+                ('dlsym', 'SHN_UNDEF'),
+            ],
+            section_data={'.rodata': rodata},
+        )
+
+        with patch('elftools.elf.elffile.ELFFile', return_value=mock_elf):
+            fd, path = tempfile.mkstemp()
+            try:
+                os.write(fd, b'\x7fELF' + b'\x00' * 60)
+                os.close(fd)
+                result = detect_dlopen_openssl(path, OSSL_EXPORTS)
+                assert result.uses_dlopen
+                assert result.uses_dlsym
+                assert result.dlopen_libs == []
+                assert 'SSL_CTX_new' in result.dlsym_symbols
+                assert 'EVP_sha256' in result.dlsym_symbols
+            finally:
+                os.unlink(path)
+
     def test_defined_dlopen_not_triggered(self):
         """dlopen as a DEFINED symbol (not UND) should not trigger detection."""
         mock_elf = _make_mock_elf(
@@ -478,3 +511,190 @@ class TestDlopenDetection:
                 assert result.dlsym_symbols == []
             finally:
                 os.unlink(path)
+
+
+class TestWorkerThreeWayClassification:
+    """Test _analyze_file_worker three-way detection: direct / static / dlopen."""
+
+    def _make_elf_info(self, *, undefined=None, defined=None,
+                       needed_libs=None, has_dlopen=False, has_dlsym=False):
+        from openssl_scanner.elf_analyzer import ELFInfo, Symbol
+        undef = [Symbol(name=n, bind='GLOBAL', type_='FUNC', defined=False)
+                 for n in (undefined or [])]
+        defn = [Symbol(name=n, bind='GLOBAL', type_='FUNC', defined=True)
+                for n in (defined or [])]
+        return ELFInfo(
+            path='/fake/lib.so',
+            arch='aarch64',
+            elf_type='shared_library',
+            needed_libs=needed_libs or [],
+            rpath=None, runpath=None,
+            undefined_symbols=undef,
+            defined_symbols=defn,
+            soname=None,
+            has_dlopen=has_dlopen,
+            has_dlsym=has_dlsym,
+        )
+
+    def _run_worker(self, info, dlopen_result=None):
+        from openssl_scanner.scanner import _analyze_file_worker
+        with patch('openssl_scanner.scanner.os.path.isfile', return_value=True), \
+             patch('openssl_scanner.scanner.ELFAnalyzer') as mock_cls, \
+             patch('openssl_scanner.dlopen_analyzer.detect_dlopen_openssl',
+                   return_value=dlopen_result) as mock_detect:
+            mock_cls.return_value.analyze.return_value = info
+            return _analyze_file_worker(('/fake/lib.so', OSSL_EXPORTS))
+
+    def test_direct_dynamic_link(self):
+        """DT_NEEDED libcrypto + UND symbols -> direct, not static."""
+        info = self._make_elf_info(
+            undefined=['SSL_CTX_new', 'SSL_connect', 'printf'],
+            defined=['main'],
+            needed_libs=['libcrypto.so.3', 'libc.so.6'],
+        )
+        result = self._run_worker(info)
+
+        assert result.openssl_direct is True
+        assert result.static_openssl is False
+        assert result.uses_dlopen is False
+        assert 'SSL_CTX_new' in result.openssl_symbols
+        assert 'SSL_connect' in result.openssl_symbols
+        assert 'printf' not in result.openssl_symbols
+
+    def test_static_openssl_link(self):
+        """UND_ossl=0, DEF_ossl>0 -> static, openssl_direct=True."""
+        info = self._make_elf_info(
+            undefined=['printf', 'malloc'],
+            defined=['SSL_CTX_new', 'EVP_sha256', 'main'],
+            needed_libs=['libc.so.6'],
+        )
+        result = self._run_worker(info)
+
+        assert result.static_openssl is True
+        assert result.openssl_direct is True
+        assert result.uses_dlopen is False
+        assert 'SSL_CTX_new' in result.openssl_symbols
+        assert 'EVP_sha256' in result.openssl_symbols
+
+    def test_dlopen_only(self):
+        """No DT_NEEDED libcrypto, has dlopen+dlsym -> dlopen detection."""
+        info = self._make_elf_info(
+            undefined=['dlopen', 'dlsym', 'printf'],
+            defined=['main'],
+            needed_libs=['libc.so.6'],
+            has_dlopen=True,
+            has_dlsym=True,
+        )
+        dlopen_result = DlopenResult(
+            uses_dlopen=True,
+            uses_dlsym=True,
+            dlopen_libs=['libcrypto.so.3'],
+            dlsym_symbols=['SSL_CTX_new', 'EVP_sha256'],
+        )
+        result = self._run_worker(info, dlopen_result)
+
+        assert result.static_openssl is False
+        assert result.openssl_direct is False
+        assert result.uses_dlopen is True
+        assert 'SSL_CTX_new' in result.dlsym_symbols
+        assert 'EVP_sha256' in result.dlsym_symbols
+        assert 'SSL_CTX_new' in result.openssl_symbols
+
+    def test_direct_plus_dlopen_with_lib_patterns(self):
+        """Direct link + dlopen with lib patterns -> both direct and dlopen."""
+        info = self._make_elf_info(
+            undefined=['SSL_CTX_new', 'dlopen', 'dlsym'],
+            defined=['main'],
+            needed_libs=['libcrypto.so.3', 'libc.so.6'],
+            has_dlopen=True,
+            has_dlsym=True,
+        )
+        dlopen_result = DlopenResult(
+            uses_dlopen=True,
+            uses_dlsym=True,
+            dlopen_libs=['libssl.so.3'],
+            dlsym_symbols=['SSL_CTX_new', 'EVP_sha256'],
+        )
+        result = self._run_worker(info, dlopen_result)
+
+        assert result.openssl_direct is True
+        assert result.uses_dlopen is True
+        assert result.static_openssl is False
+        assert 'SSL_CTX_new' in result.openssl_symbols
+        assert 'EVP_sha256' in result.dlsym_symbols
+        assert 'SSL_CTX_new' not in result.dlsym_symbols
+
+    def test_direct_link_blocks_rodata_noise(self):
+        """Direct link + no lib patterns in .rodata -> .rodata matches ignored."""
+        info = self._make_elf_info(
+            undefined=['SSL_CTX_new', 'SSL_connect'],
+            defined=['main'],
+            needed_libs=['libcrypto.so.3'],
+            has_dlopen=True,
+            has_dlsym=True,
+        )
+        dlopen_result = DlopenResult(
+            uses_dlopen=True,
+            uses_dlsym=True,
+            dlopen_libs=[],
+            dlsym_symbols=['EVP_sha256', 'BIO_new'],
+        )
+        result = self._run_worker(info, dlopen_result)
+
+        assert result.openssl_direct is True
+        assert result.uses_dlopen is False
+        assert result.static_openssl is False
+        assert 'SSL_CTX_new' in result.openssl_symbols
+        assert 'EVP_sha256' not in result.openssl_symbols
+        assert result.dlsym_symbols == []
+
+    def test_no_openssl_at_all(self):
+        """No OpenSSL symbols anywhere -> empty result."""
+        info = self._make_elf_info(
+            undefined=['printf', 'malloc'],
+            defined=['main'],
+            needed_libs=['libc.so.6'],
+        )
+        result = self._run_worker(info)
+
+        assert result.openssl_direct is False
+        assert result.static_openssl is False
+        assert result.uses_dlopen is False
+        assert result.openssl_symbols == []
+
+    def test_aggregate_counts_static(self):
+        """ScanResult aggregation counts static_openssl files."""
+        from openssl_scanner.scanner import FileResult, ScanResult, Scanner
+        fr_direct = FileResult(
+            path='/a.so', file_type='shared_library', arch='aarch64',
+            direct_deps=['libcrypto.so'], openssl_direct=True,
+            openssl_transitive=False, openssl_libs=['libcrypto.so'],
+            openssl_symbols=['SSL_CTX_new'],
+        )
+        fr_static = FileResult(
+            path='/b.so', file_type='shared_library', arch='aarch64',
+            direct_deps=['libc.so'], openssl_direct=True,
+            openssl_transitive=False, openssl_libs=[],
+            openssl_symbols=['EVP_sha256'],
+            static_openssl=True,
+        )
+        fr_dlopen = FileResult(
+            path='/c.so', file_type='shared_library', arch='aarch64',
+            direct_deps=['libc.so'], openssl_direct=False,
+            openssl_transitive=False, openssl_libs=[],
+            openssl_symbols=['BIO_new'],
+            uses_dlopen=True,
+            dlsym_symbols=['BIO_new'],
+            dlopen_libs=['libcrypto.so.3'],
+        )
+        result = ScanResult(
+            target='/test', scan_time='2026-01-01', tool_version='1.0.0',
+            arch='aarch64',
+        )
+        result.files_detail = [fr_direct, fr_static, fr_dlopen]
+        Scanner._aggregate_dlopen(result)
+
+        assert result.files_with_static_openssl == 1
+        assert result.files_with_dlopen == 1
+        assert 'BIO_new' in result.all_dlsym_symbols
+        assert 'libcrypto.so.3' in result.dlopen_libs_detected
