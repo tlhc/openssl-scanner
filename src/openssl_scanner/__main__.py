@@ -953,9 +953,19 @@ def cmd_hap(args) -> int:
     all_results = []
     scanned_packages = []
     start_time = time.time()
+    total_packages = len(packages)
+
+    output_path = os.path.abspath(args.output)
+    output_ext = os.path.splitext(output_path)[1].lower()
+    per_package = (not output_ext) or os.path.isdir(output_path)
+
+    if per_package:
+        os.makedirs(output_path, exist_ok=True)
+        fmt_ext = '.json' if args.json_only else '.xlsx'
+        out_names = _resolve_hap_output_names(packages, output_path, fmt_ext)
 
     try:
-        for pkg_path in packages:
+        for pkg_idx, pkg_path in enumerate(packages, 1):
             logger.info("Extracting: %s", pkg_path)
             try:
                 extract_result = extractor.extract(pkg_path, abi=args.abi)
@@ -1023,21 +1033,35 @@ def cmd_hap(args) -> int:
             if not args.keep_extracted:
                 extractor.cleanup(extract_result)
 
+            pkg_name = meta.bundle_name or os.path.basename(pkg_path)
+            sym_count = len(result.all_unique_symbols)
+            file_count = result.files_with_openssl
+
+            if per_package:
+                _hap_write_single_report(
+                    result, pkg_path, out_names[pkg_path], reporter, args.json_only
+                )
+                out_name = os.path.basename(out_names[pkg_path])
+                print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
+                      f" ({sym_count} symbols, {file_count} files)",
+                      flush=True)
+            else:
+                if not args.json_only:
+                    print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
+                          f" | {sym_count} OpenSSL symbols | {file_count} files",
+                          flush=True)
+
         elapsed = time.time() - start_time
 
         if not all_results:
             logger.error("No packages could be scanned successfully")
             return 1
 
-        output_path = os.path.abspath(args.output)
-        output_ext = os.path.splitext(output_path)[1].lower()
-        per_package = (not output_ext) or os.path.isdir(output_path)
-
         if per_package:
-            return _hap_write_per_package(
-                all_results, scanned_packages, reporter, output_path,
-                args.json_only, elapsed
-            )
+            if not args.json_only:
+                print(f"\nBatch complete: {len(all_results)} packages scanned"
+                      f" in {elapsed:.2f}s -> {output_path}/")
+            return 0
 
         if len(all_results) == 1:
             final_result = all_results[0]
@@ -1066,9 +1090,7 @@ def cmd_hap(args) -> int:
             Exporter().export(json_path, output_path)
 
         if not args.json_only:
-            summary = reporter.generate_summary(final_result)
-            print(summary)
-            print(f"Report saved to: {output_path}")
+            print(f"\nReport saved to: {output_path}")
             if output_ext != '.json':
                 json_path = os.path.splitext(output_path)[0] + '.json'
                 print(f"JSON data:  {json_path}")
@@ -1101,43 +1123,17 @@ def _resolve_hap_output_names(packages, output_dir, ext):
     return result
 
 
-def _hap_write_per_package(all_results, packages, reporter,
-                           output_dir, json_only, elapsed):
-    """Write independent per-package reports to a directory."""
-    os.makedirs(output_dir, exist_ok=True)
-    fmt_ext = '.json' if json_only else '.xlsx'
-    names = _resolve_hap_output_names(packages, output_dir, fmt_ext)
-    pkg_to_result = dict(zip(packages, all_results))
-    total = len(pkg_to_result)
-    idx = 0
+def _hap_write_single_report(result, pkg_path, out_path, reporter, json_only):
+    """Write a single package report immediately after scanning."""
+    json_report = reporter.generate_json(result)
 
-    for pkg_path, result in pkg_to_result.items():
-        idx += 1
-        out_path = names[pkg_path]
-        json_report = reporter.generate_json(result)
-
-        json_path = os.path.splitext(out_path)[0] + '.json'
-        with open(json_path, 'w', encoding='utf-8') as f:
-            f.write(json_report)
-
-        if not json_only:
-            from .exporter import Exporter
-            Exporter().export(json_path, out_path)
-
-        pkg_name = os.path.basename(pkg_path)
-        out_name = os.path.basename(out_path)
-        sym_count = len(result.all_unique_symbols)
-        file_count = result.files_with_openssl
-
-        if not json_only:
-            print(f"[{idx}/{total}] {pkg_name} -> {out_name}"
-                  f" ({sym_count} OpenSSL symbols, {file_count} files)")
+    json_path = os.path.splitext(out_path)[0] + '.json'
+    with open(json_path, 'w', encoding='utf-8') as f:
+        f.write(json_report)
 
     if not json_only:
-        print(f"\nBatch complete: {total} packages scanned"
-              f" in {elapsed:.2f}s -> {output_dir}/")
-
-    return 0
+        from .exporter import Exporter
+        Exporter().export(json_path, out_path)
 
 
 def _resolve_output_names(targets, output_arg, ext):
