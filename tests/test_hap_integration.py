@@ -301,5 +301,203 @@ class TestHapReportMetadata:
         assert 'arm64-v8a' in summary
 
 
+class TestHapSummaryReport:
+    """Test Package Summary XLSX generated during batch HAP scan."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _batch_scan(self, hap_count=3):
+        """Create HAPs in a dir, batch scan to output dir, return output dir."""
+        pkg_dir = os.path.join(self.tmpdir, "packages")
+        os.makedirs(pkg_dir)
+        for i in range(hap_count):
+            _create_test_hap(
+                os.path.join(pkg_dir, f"app{i}.hap"),
+                bundle_name=f"com.test.app{i}",
+                module_name=f"mod{i}",
+            )
+        out_dir = os.path.join(self.tmpdir, "output")
+        ret = main(['hap', pkg_dir, '-o', out_dir, '--json-only'])
+        return ret, out_dir
+
+    def test_summary_xlsx_generated(self):
+        """Batch scan should produce summary.xlsx in output dir."""
+        ret, out_dir = self._batch_scan(2)
+        assert ret == 0
+        summary = os.path.join(out_dir, "summary.xlsx")
+        assert os.path.isfile(summary)
+
+    def test_summary_has_correct_columns(self):
+        """Header row should have all 24 columns."""
+        ret, out_dir = self._batch_scan(2)
+        assert ret == 0
+        summary = os.path.join(out_dir, "summary.xlsx")
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary)
+        ws = wb.active
+        assert ws.title == "Package Summary"
+        headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+        assert headers[0] == "Package Name"
+        assert headers[5] == "Uses OpenSSL"
+        assert headers[6] == "Detection"
+        assert headers[13] == "Total Symbols"
+        assert headers[14] == "Top Category"
+        assert headers[23] == "dlopen Libs"
+        assert len(headers) == 24
+
+    def test_summary_row_count(self):
+        """Should have header + N data rows + TOTAL row."""
+        ret, out_dir = self._batch_scan(3)
+        assert ret == 0
+        summary = os.path.join(out_dir, "summary.xlsx")
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary)
+        ws = wb.active
+        assert ws.cell(row=1, column=1).value == "Package Name"
+        assert ws.cell(row=5, column=1).value == "TOTAL"
+        for r in range(2, 5):
+            val = ws.cell(row=r, column=1).value
+            assert val is not None and val != "TOTAL"
+
+    def test_summary_total_row_so_count(self):
+        """TOTAL row .so Files should be sum of all packages."""
+        ret, out_dir = self._batch_scan(3)
+        assert ret == 0
+
+        from openpyxl import load_workbook
+        wb = load_workbook(os.path.join(out_dir, "summary.xlsx"))
+        ws = wb.active
+        total_row = ws.max_row
+        assert ws.cell(row=total_row, column=1).value == "TOTAL"
+        pkg_so = sum(ws.cell(row=r, column=5).value or 0
+                     for r in range(2, total_row))
+        assert ws.cell(row=total_row, column=5).value == pkg_so
+
+    def test_summary_uses_openssl_ratio(self):
+        """TOTAL row Uses OpenSSL should show X/Y format."""
+        ret, out_dir = self._batch_scan(2)
+        assert ret == 0
+
+        from openpyxl import load_workbook
+        wb = load_workbook(os.path.join(out_dir, "summary.xlsx"))
+        ws = wb.active
+        total_row = ws.max_row
+        val = ws.cell(row=total_row, column=6).value
+        assert '/' in str(val)
+
+    def test_summary_detection_none_for_minimal_elf(self):
+        """Minimal ELFs have no OpenSSL -> detection should be None."""
+        ret, out_dir = self._batch_scan(2)
+        assert ret == 0
+
+        from openpyxl import load_workbook
+        wb = load_workbook(os.path.join(out_dir, "summary.xlsx"))
+        ws = wb.active
+        for r in range(2, ws.max_row):
+            assert ws.cell(row=r, column=7).value == 'None'
+
+
+class TestClassifyHapDetection:
+    """Unit tests for _classify_hap_detection helper."""
+
+    def test_no_openssl(self):
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[]),
+        ]
+        method, dyn, static, dlop = _classify_hap_detection(result)
+        assert method == 'None'
+        assert dyn == 0 and static == 0 and dlop == 0
+
+    def test_dynamic_only(self):
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect"]),
+        ]
+        method, dyn, static, dlop = _classify_hap_detection(result)
+        assert method == 'Dynamic'
+        assert dyn == 1 and static == 0 and dlop == 0
+
+    def test_static_only(self):
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"],
+                       static_openssl=True),
+        ]
+        method, dyn, static, dlop = _classify_hap_detection(result)
+        assert method == 'Static'
+        assert dyn == 0 and static == 1 and dlop == 0
+
+    def test_dlopen_only(self):
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read"],
+                       uses_dlopen=True, dlsym_symbols=["SSL_read"]),
+        ]
+        method, dyn, static, dlop = _classify_hap_detection(result)
+        assert method == 'dlopen'
+        assert dlop == 1
+
+    def test_mixed(self):
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect"]),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"],
+                       static_openssl=True),
+        ]
+        method, dyn, static, dlop = _classify_hap_detection(result)
+        assert method == 'Mixed'
+        assert dyn == 1 and static == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

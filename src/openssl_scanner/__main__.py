@@ -1058,9 +1058,13 @@ def cmd_hap(args) -> int:
             return 1
 
         if per_package:
-            if not args.json_only:
-                print(f"\nBatch complete: {len(all_results)} packages scanned"
-                      f" in {elapsed:.2f}s -> {output_path}/")
+            summary_path = _generate_hap_summary(
+                all_results, scanned_packages, output_path
+            )
+            if summary_path:
+                print(f"Summary: {os.path.basename(summary_path)}")
+            print(f"\nBatch complete: {len(all_results)} packages scanned"
+                  f" in {elapsed:.2f}s -> {output_path}/")
             return 0
 
         if len(all_results) == 1:
@@ -1134,6 +1138,216 @@ def _hap_write_single_report(result, pkg_path, out_path, reporter, json_only):
     if not json_only:
         from .exporter import Exporter
         Exporter().export(json_path, out_path)
+
+
+_HAP_SUMMARY_COLUMNS = [
+    ('pkg_name',        30, 'Package Name'),
+    ('pkg_type',         8, 'Type'),
+    ('version',         12, 'Version'),
+    ('abi',             15, 'ABI'),
+    ('so_files',        10, '.so Files'),
+    ('uses_openssl',    12, 'Uses OpenSSL'),
+    ('detection',       14, 'Detection'),
+    ('bundled_openssl', 14, 'Bundled OpenSSL'),
+    ('dynamic_files',   12, 'Dynamic Files'),
+    ('static_files',    12, 'Static Files'),
+    ('dlopen_files',    12, 'dlopen Files'),
+    ('dynamic_syms',    14, 'Dynamic Symbols'),
+    ('dlsym_syms',      14, 'dlsym Symbols'),
+    ('total_syms',      12, 'Total Symbols'),
+    ('top_category',    18, 'Top Category'),
+    ('ssl_core',        10, 'ssl_core'),
+    ('crypto_evp',      10, 'crypto_evp'),
+    ('crypto_x509',     10, 'crypto_x509'),
+    ('crypto_ec',       10, 'crypto_ec'),
+    ('crypto_hash',     10, 'crypto_hash'),
+    ('crypto_sm',       10, 'crypto_sm'),
+    ('crypto_bio',      10, 'crypto_bio'),
+    ('other_cats',      10, 'Other Cats'),
+    ('dlopen_libs',     30, 'dlopen Libs'),
+]
+
+_HAP_HIGHLIGHT_CATS = [
+    'ssl_core', 'crypto_evp', 'crypto_x509',
+    'crypto_ec', 'crypto_hash', 'crypto_sm', 'crypto_bio',
+]
+
+
+def _classify_hap_detection(result):
+    """Classify detection methods and count files per method."""
+    dynamic = static = dlopen = 0
+    for fr in result.files_detail:
+        if fr.static_openssl:
+            static += 1
+        if fr.uses_dlopen:
+            dlopen += 1
+        if fr.openssl_symbols and not fr.static_openssl and not fr.uses_dlopen:
+            dynamic += 1
+
+    methods = []
+    if dynamic > 0:
+        methods.append('Dynamic')
+    if static > 0:
+        methods.append('Static')
+    if dlopen > 0:
+        methods.append('dlopen')
+
+    if not methods:
+        method = 'None'
+    elif len(methods) == 1:
+        method = methods[0]
+    else:
+        method = 'Mixed'
+
+    return method, dynamic, static, dlopen
+
+
+def _build_hap_summary_row(result, pkg_path):
+    """Build a dict of column values for one package."""
+    pi = result.package_info or {}
+    abi = pi.get('scanned_abi', '')
+    if isinstance(abi, list):
+        abi = ', '.join(abi)
+
+    method, dynamic_f, static_f, dlopen_f = _classify_hap_detection(result)
+
+    total_syms = len(result.all_unique_symbols)
+    dlsym_syms = len(result.all_dlsym_symbols)
+    dynamic_syms = total_syms - dlsym_syms
+
+    cat_counts = {}
+    for cat, syms in result.symbols_by_category.items():
+        cat_counts[cat] = len(syms)
+
+    highlight_sum = sum(cat_counts.get(c, 0) for c in _HAP_HIGHLIGHT_CATS)
+    other_cats = sum(cat_counts.values()) - highlight_sum
+
+    top_cat = ''
+    if cat_counts:
+        top_cat = max(cat_counts, key=cat_counts.get)
+
+    return {
+        'pkg_name': pi.get('bundle_name') or os.path.splitext(
+            os.path.basename(pkg_path))[0],
+        'pkg_type': pi.get('package_type', ''),
+        'version': pi.get('version_name', ''),
+        'abi': abi,
+        'so_files': pi.get('native_libs_count', 0),
+        'uses_openssl': 'Yes' if result.files_with_openssl > 0 else 'No',
+        'detection': method,
+        'bundled_openssl': 'Yes' if pi.get('bundled_openssl') else 'No',
+        'dynamic_files': dynamic_f,
+        'static_files': static_f,
+        'dlopen_files': dlopen_f,
+        'dynamic_syms': dynamic_syms,
+        'dlsym_syms': dlsym_syms,
+        'total_syms': total_syms,
+        'top_category': top_cat,
+        'other_cats': other_cats,
+        'dlopen_libs': ', '.join(result.dlopen_libs_detected),
+    }
+
+
+def _generate_hap_summary(all_results, scanned_packages, output_dir):
+    """Generate Package Summary XLSX for HAP batch scan.
+
+    Returns the output path on success, None on failure.
+    """
+    _logger = logging.getLogger(__name__)
+
+    from . import _vendor  # noqa: F401
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Package Summary"
+
+    header_font = Font(bold=True)
+    header_fill = PatternFill(
+        start_color="E8F4FC", end_color="E8F4FC", fill_type="solid"
+    )
+    total_font = Font(bold=True)
+    total_fill = PatternFill(
+        start_color="F2F2F2", end_color="F2F2F2", fill_type="solid"
+    )
+
+    col_keys = [c[0] for c in _HAP_SUMMARY_COLUMNS]
+    for col_idx, (_, width, title) in enumerate(_HAP_SUMMARY_COLUMNS, 1):
+        cell = ws.cell(row=1, column=col_idx, value=title)
+        cell.font = header_font
+        cell.fill = header_fill
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    rows = []
+    for result, pkg_path in zip(all_results, scanned_packages):
+        row = _build_hap_summary_row(result, pkg_path)
+        for cat in _HAP_HIGHLIGHT_CATS:
+            row[cat] = len(result.symbols_by_category.get(cat, []))
+        rows.append(row)
+
+    for row_idx, row in enumerate(rows, 2):
+        for col_idx, key in enumerate(col_keys, 1):
+            ws.cell(row=row_idx, column=col_idx, value=row.get(key, ''))
+
+    total_row = len(rows) + 2
+    all_syms_union = set()
+    all_dlsym_union = set()
+    cat_union = {}
+    for r in all_results:
+        all_syms_union.update(r.all_unique_symbols)
+        all_dlsym_union.update(r.all_dlsym_symbols)
+        for cat, syms in r.symbols_by_category.items():
+            cat_union.setdefault(cat, set()).update(syms)
+
+    total_total_syms = len(all_syms_union)
+    total_dlsym_syms = len(all_dlsym_union)
+    total_dynamic_syms = total_total_syms - total_dlsym_syms
+
+    highlight_union = sum(len(cat_union.get(c, set())) for c in _HAP_HIGHLIGHT_CATS)
+    other_union = sum(len(v) for v in cat_union.values()) - highlight_union
+
+    top_cat_total = ''
+    if cat_union:
+        top_cat_total = max(cat_union, key=lambda c: len(cat_union[c]))
+
+    uses_count = sum(1 for r in rows if r['uses_openssl'] == 'Yes')
+
+    total_data = {
+        'pkg_name': 'TOTAL',
+        'pkg_type': '',
+        'version': '',
+        'abi': '',
+        'so_files': sum(r['so_files'] for r in rows),
+        'uses_openssl': f'{uses_count}/{len(rows)}',
+        'detection': '',
+        'bundled_openssl': '',
+        'dynamic_files': sum(r['dynamic_files'] for r in rows),
+        'static_files': sum(r['static_files'] for r in rows),
+        'dlopen_files': sum(r['dlopen_files'] for r in rows),
+        'dynamic_syms': total_dynamic_syms,
+        'dlsym_syms': total_dlsym_syms,
+        'total_syms': total_total_syms,
+        'top_category': top_cat_total,
+        'other_cats': other_union,
+        'dlopen_libs': '',
+    }
+    for cat in _HAP_HIGHLIGHT_CATS:
+        total_data[cat] = len(cat_union.get(cat, set()))
+
+    for col_idx, key in enumerate(col_keys, 1):
+        cell = ws.cell(row=total_row, column=col_idx, value=total_data.get(key, ''))
+        cell.font = total_font
+        cell.fill = total_fill
+
+    last_col = get_column_letter(len(_HAP_SUMMARY_COLUMNS))
+    ws.auto_filter.ref = f"A1:{last_col}{total_row - 1}"
+
+    summary_path = os.path.join(output_dir, 'summary.xlsx')
+    wb.save(summary_path)
+    _logger.info("HAP summary saved to: %s", summary_path)
+    return summary_path
 
 
 def _resolve_output_names(targets, output_arg, ext):

@@ -59,7 +59,7 @@ class HapExtractor:
     SUPPORTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.app', '.zip'}
     ABI_PRIORITY = ['arm64-v8a', 'armeabi-v7a', 'armeabi', 'x86_64', 'x86']
     ELF_MAGIC = b'\x7fELF'
-    MAX_EXTRACT_SIZE = 2 * 1024 * 1024 * 1024
+    MAX_EXTRACT_SIZE = 20 * 1024 * 1024 * 1024
 
     ABI_ELF_MACHINE = {
         'arm64-v8a':   0xB7,   # EM_AARCH64
