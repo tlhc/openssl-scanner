@@ -6,6 +6,7 @@ __pycache__/
 # C extensions
 *.so
 !src/openssl_scanner/_vendor/**/*.so
+!tests/fixtures/dlopen_binaries/*.so
 
 # Distribution / packaging
 .Python
