@@ -181,7 +181,10 @@ class ExcelExporter:
 
             dlopen_det = f.get('dlopen_detection', {})
             if dlopen_det.get('uses_dlopen'):
-                link_type = 'dlopen'
+                if dlopen_det.get('confidence') == 'inferred':
+                    link_type = 'dlopen-infer'
+                else:
+                    link_type = 'dlopen'
             elif f.get('static_openssl'):
                 link_type = 'static-link'
             elif openssl_deps.get('direct'):
@@ -244,6 +247,7 @@ class ExcelExporter:
                             symbol_to_category[sym] = cat
 
         dlsym_lookup = set()
+        dlopen_infer_files = set()
         static_lookup = set()
         for f in data.get('files_detail', []):
             fpath = f.get('path', '')
@@ -251,8 +255,17 @@ class ExcelExporter:
                 static_lookup.add(fpath)
             det = f.get('dlopen_detection', {})
             if det.get('uses_dlopen'):
+                if det.get('confidence') == 'inferred':
+                    dlopen_infer_files.add(fpath)
                 for sym in det.get('dlopen_symbols', []):
                     dlsym_lookup.add((fpath, sym))
+
+        def _detection_label(fpath, sym):
+            if (fpath, sym) in dlsym_lookup:
+                return 'dlopen-infer' if fpath in dlopen_infer_files else 'dlopen'
+            if fpath in static_lookup:
+                return 'static-link'
+            return 'dynamic-link'
 
         row_idx = 2
 
@@ -263,12 +276,7 @@ class ExcelExporter:
                 filename = os.path.basename(path)
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
-                    if (path, sym) in dlsym_lookup:
-                        detection = 'dlopen'
-                    elif path in static_lookup:
-                        detection = 'static-link'
-                    else:
-                        detection = 'dynamic-link'
+                    detection = _detection_label(path, sym)
                     ws.cell(row=row_idx, column=1, value=path)
                     ws.cell(row=row_idx, column=2, value=filename)
                     ws.cell(row=row_idx, column=3, value=sym)
@@ -284,12 +292,7 @@ class ExcelExporter:
                 symbols = f.get('openssl_symbols_used', [])
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
-                    if (path, sym) in dlsym_lookup:
-                        detection = 'dlopen'
-                    elif path in static_lookup:
-                        detection = 'static-link'
-                    else:
-                        detection = 'dynamic-link'
+                    detection = _detection_label(path, sym)
                     ws.cell(row=row_idx, column=1, value=path)
                     ws.cell(row=row_idx, column=2, value=filename)
                     ws.cell(row=row_idx, column=3, value=sym)

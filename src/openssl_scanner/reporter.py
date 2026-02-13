@@ -286,6 +286,7 @@ class Reporter:
                 'uses_dlopen': True,
                 'dlopen_symbols': file_result.dlsym_symbols,
                 'dlopen_libs': file_result.dlopen_libs,
+                'confidence': file_result.dlopen_confidence,
             }
         return d
 

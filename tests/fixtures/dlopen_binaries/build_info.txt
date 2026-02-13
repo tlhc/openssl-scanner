@@ -1,0 +1,5 @@
+os=darwin
+arch=aarch64
+cc=gcc
+built=7
+failed=0
