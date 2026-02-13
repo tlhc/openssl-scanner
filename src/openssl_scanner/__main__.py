@@ -18,6 +18,8 @@ Usage:
 """
 
 import argparse
+import glob
+import json
 import logging
 import os
 import sys
@@ -38,9 +40,22 @@ SOURCE_EXTS = {'.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.rs'}
 SOURCE_GLOBS = ['*.c', '*.h', '*.cpp', '*.hpp', '*.cc', '*.cxx', '*.hxx', '*.rs']
 
 
-def setup_logging(verbose: bool, log_file: Optional[str] = None) -> None:
-    """Configure logging handlers."""
-    level = logging.DEBUG if verbose else logging.INFO
+def setup_logging(verbose, log_file: Optional[str] = None) -> None:
+    """Configure logging handlers.
+
+    verbose: int or bool — 0/False=WARNING, 1/True=INFO, 2+=DEBUG
+    """
+    if isinstance(verbose, bool):
+        verbose = 1 if verbose else 0
+    verbose = verbose or 0
+
+    if verbose >= 2:
+        level = logging.DEBUG
+    elif verbose >= 1:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+
     fmt = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
 
     handlers: List[logging.Handler] = []
@@ -78,6 +93,7 @@ def create_parser() -> argparse.ArgumentParser:
     create_scan_parser(subparsers)
     create_proc_parser(subparsers)
     create_hap_parser(subparsers)
+    create_hap_summary_parser(subparsers)
     create_source_parser(subparsers)
     create_source_merge_parser(subparsers)
     create_source_probe_parser(subparsers)
@@ -148,8 +164,9 @@ Examples:
 
     scan_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     scan_parser.add_argument(
@@ -242,8 +259,9 @@ Examples:
 
     proc_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     proc_parser.add_argument(
@@ -299,6 +317,13 @@ Examples:
   # Scan ZIP package (nested HAP/ZIP supported)
   openssl-scanner hap MyBundle.zip -o report.xlsx
 
+  # Multiple files via shell glob
+  openssl-scanner hap *.zip -o /tmp/reports/
+  openssl-scanner hap vendor1.zip vendor2.hap app.app -o report.xlsx
+
+  # Mix files and directories
+  openssl-scanner hap /path/to/packages/ extra.hap -o /tmp/reports/
+
   # Batch scan directory (single merged report)
   openssl-scanner hap /path/to/packages/ -o report.xlsx
 
@@ -312,8 +337,9 @@ Examples:
     )
 
     hap_parser.add_argument(
-        'target',
-        help='HAP/HAR/HSP/APP/ZIP file or directory containing packages',
+        'targets',
+        nargs='+',
+        help='HAP/HAR/HSP/APP/ZIP files or directories (supports shell glob: *.zip)',
     )
 
     hap_parser.add_argument(
@@ -341,8 +367,9 @@ Examples:
 
     hap_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     hap_parser.add_argument(
@@ -365,8 +392,52 @@ Examples:
     )
 
     hap_parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Force rescan all packages (ignore existing reports)',
+    )
+
+    hap_parser.add_argument(
         '--log-file',
         help='Write logs to file',
+    )
+
+
+def create_hap_summary_parser(subparsers) -> None:
+    """Create parser for hap-summary command."""
+    p = subparsers.add_parser(
+        'hap-summary',
+        help='Generate summary.xlsx from existing HAP scan JSON reports',
+        epilog='''
+Examples:
+  # From directory of per-package reports
+  openssl-scanner hap-summary /tmp/hap_reports/
+
+  # With explicit output path
+  openssl-scanner hap-summary /tmp/hap_reports/ -o /tmp/overview.xlsx
+
+  # From explicit JSON file list
+  openssl-scanner hap-summary entry.json feature.json -o summary.xlsx
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    p.add_argument(
+        'inputs',
+        nargs='+',
+        help='JSON report files or directories containing *.json reports',
+    )
+
+    p.add_argument(
+        '-o', '--output',
+        help='Output summary.xlsx path (default: summary.xlsx in first input dir)',
+    )
+
+    p.add_argument(
+        '-v', '--verbose',
+        action='count',
+        default=0,
+        help='Increase verbosity',
     )
 
 
@@ -430,8 +501,9 @@ Examples:
 
     src_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     src_parser.add_argument(
@@ -476,8 +548,9 @@ Examples:
 
     parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     parser.add_argument(
@@ -521,8 +594,9 @@ parent contain OpenSSL usage, the parent is reported instead.
 
     parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Show per-directory match details on stderr',
+        action='count',
+        default=0,
+        help='Show per-directory match details on stderr (-vv for debug)',
     )
 
     parser.add_argument(
@@ -552,8 +626,9 @@ def create_vendor_rg_parser(subparsers) -> None:
 
     parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     parser.add_argument(
@@ -616,8 +691,9 @@ Mapping file format (JSON):
 
     agg_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     agg_parser.add_argument(
@@ -661,8 +737,9 @@ Examples:
 
     exp_parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     exp_parser.add_argument(
@@ -933,27 +1010,38 @@ def cmd_hap(args) -> int:
 
     from .hap_extractor import HapExtractor
 
-    target = os.path.abspath(args.target)
-    if not os.path.exists(target):
-        logger.error("Target not found: %s", target)
-        return 1
-
     extractor = HapExtractor()
 
-    if os.path.isdir(target):
-        packages = extractor.find_packages(target)
-        if not packages:
-            logger.error("No HAP/HAR/HSP/APP/ZIP packages found in: %s", target)
+    packages = []
+    for t in args.targets:
+        target = os.path.abspath(t)
+        if not os.path.exists(target):
+            logger.error("Target not found: %s", t)
             return 1
-        logger.info("Found %d packages in %s", len(packages), target)
-    else:
-        packages = [target]
+        if os.path.isdir(target):
+            found = extractor.find_packages(target)
+            if not found:
+                logger.warning("No packages found in: %s", target)
+            else:
+                logger.info("Found %d packages in %s", len(found), target)
+                packages.extend(found)
+        else:
+            packages.append(target)
+
+    if not packages:
+        logger.error("No HAP/HAR/HSP/APP/ZIP packages found")
+        return 1
+
+    pkg_plan = _plan_packages(packages, logger)
+    if not pkg_plan:
+        logger.error("No scannable packages found")
+        return 1
 
     reporter = Reporter()
     all_results = []
     scanned_packages = []
     start_time = time.time()
-    total_packages = len(packages)
+    total_packages = len(pkg_plan)
 
     output_path = os.path.abspath(args.output)
     output_ext = os.path.splitext(output_path)[1].lower()
@@ -962,119 +1050,148 @@ def cmd_hap(args) -> int:
     if per_package:
         os.makedirs(output_path, exist_ok=True)
         fmt_ext = '.json' if args.json_only else '.xlsx'
-        out_names = _resolve_hap_output_names(packages, output_path, fmt_ext)
+        pkg_names_for_output = [e.display_name for e in pkg_plan]
+        out_names = _resolve_hap_output_names(pkg_names_for_output, output_path, fmt_ext)
 
+    skipped = 0
     try:
-        for pkg_idx, pkg_path in enumerate(packages, 1):
-            logger.info("Extracting: %s", pkg_path)
-            try:
-                extract_result = extractor.extract(pkg_path, abi=args.abi)
-            except (ValueError, zipfile.BadZipFile) as e:
-                logger.error("Failed to extract %s: %s", pkg_path, e)
-                continue
+        for pkg_idx, entry in enumerate(pkg_plan, 1):
+            entry_key = entry.display_name
 
-            if not extract_result.so_files:
-                logger.warning("No native libraries found in %s", pkg_path)
+            if per_package and not args.force:
+                out_file = out_names[entry_key]
+                json_file = os.path.splitext(out_file)[0] + '.json'
+                source_path = entry.path or entry.container
+                cached = (os.path.exists(json_file) and
+                          os.path.getmtime(json_file) >= os.path.getmtime(source_path))
+                if cached and not args.json_only and not os.path.exists(out_file):
+                    cached = False
+                if cached:
+                    print(f"[{pkg_idx}/{total_packages}] {entry_key} -> SKIPPED (cached)",
+                          flush=True)
+                    skipped += 1
+                    continue
+
+            tmp_file = None
+            try:
+                pkg_path, tmp_file = _extract_pkg_entry(entry, logger)
+                logger.info("Extracting: %s", entry.display_name)
+
+                extract_result = extractor.extract(pkg_path, abi=args.abi)
+
+                if not extract_result.so_files:
+                    logger.warning("No native libraries found in %s", entry.display_name)
+                    if not args.keep_extracted:
+                        extractor.cleanup(extract_result)
+                    continue
+
+                logger.info(
+                    "Package: %s | ABI: %s | Native libs: %d",
+                    extract_result.metadata.bundle_name or entry.display_name,
+                    extract_result.metadata.abis_found,
+                    len(extract_result.so_files)
+                )
+
+                matcher = OpenSSLMatcher()
+                count = matcher.load_builtin_symbols()
+                logger.info("Loaded %d built-in OpenSSL symbols", count)
+
+                removed = 0
+                for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
+                    for fname in filenames:
+                        if matcher.is_openssl_library(fname):
+                            fpath = os.path.join(dirpath, fname)
+                            os.remove(fpath)
+                            removed += 1
+                            logger.debug("Excluded OpenSSL lib: %s", fpath)
+                if removed:
+                    logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
+
+                scanner = Scanner(
+                    search_paths=[extract_result.extract_dir],
+                    workers=args.jobs,
+                    matcher=matcher,
+                )
+
+                result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
+                result.report_type = 'package'
+
+                meta = extract_result.metadata
+                result.package_info = {
+                    'package_path': entry.container or meta.package_path,
+                    'package_type': meta.package_type,
+                    'bundle_name': meta.bundle_name or entry.display_name,
+                    'module_name': meta.module_name,
+                    'module_type': meta.module_type,
+                    'version_name': meta.version_name,
+                    'version_code': meta.version_code,
+                    'min_api_version': meta.min_api_version,
+                    'device_types': meta.device_types,
+                    'scanned_abi': meta.abis_found,
+                    'abis_available': meta.abis_found,
+                    'native_libs_count': len(extract_result.so_files),
+                    'bundled_openssl': removed > 0 or extract_result.openssl_lib is not None,
+                }
+
+                all_results.append(result)
+                scanned_packages.append(entry_key)
+
                 if not args.keep_extracted:
                     extractor.cleanup(extract_result)
-                continue
 
-            logger.info(
-                "Package: %s | ABI: %s | Native libs: %d",
-                extract_result.metadata.bundle_name or os.path.basename(pkg_path),
-                extract_result.metadata.abis_found,
-                len(extract_result.so_files)
-            )
+                pkg_name = meta.bundle_name or entry.display_name
+                sym_count = len(result.all_unique_symbols)
+                file_count = result.files_with_openssl
 
-            matcher = OpenSSLMatcher()
-            count = matcher.load_builtin_symbols()
-            logger.info("Loaded %d built-in OpenSSL symbols", count)
-
-            removed = 0
-            for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
-                for fname in filenames:
-                    if matcher.is_openssl_library(fname):
-                        fpath = os.path.join(dirpath, fname)
-                        os.remove(fpath)
-                        removed += 1
-                        logger.debug("Excluded OpenSSL lib: %s", fpath)
-            if removed:
-                logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
-
-            scanner = Scanner(
-                search_paths=[extract_result.extract_dir],
-                workers=args.jobs,
-                matcher=matcher,
-            )
-
-            result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
-            result.report_type = 'package'
-
-            meta = extract_result.metadata
-            result.package_info = {
-                'package_path': meta.package_path,
-                'package_type': meta.package_type,
-                'bundle_name': meta.bundle_name,
-                'module_name': meta.module_name,
-                'module_type': meta.module_type,
-                'version_name': meta.version_name,
-                'version_code': meta.version_code,
-                'min_api_version': meta.min_api_version,
-                'device_types': meta.device_types,
-                'scanned_abi': meta.abis_found,
-                'abis_available': meta.abis_found,
-                'native_libs_count': len(extract_result.so_files),
-                'bundled_openssl': removed > 0 or extract_result.openssl_lib is not None,
-            }
-
-            all_results.append(result)
-            scanned_packages.append(pkg_path)
-
-            if not args.keep_extracted:
-                extractor.cleanup(extract_result)
-
-            pkg_name = meta.bundle_name or os.path.basename(pkg_path)
-            sym_count = len(result.all_unique_symbols)
-            file_count = result.files_with_openssl
-
-            if per_package:
-                _hap_write_single_report(
-                    result, pkg_path, out_names[pkg_path], reporter, args.json_only
-                )
-                out_name = os.path.basename(out_names[pkg_path])
-                print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
-                      f" ({sym_count} symbols, {file_count} files)",
-                      flush=True)
-            else:
-                if not args.json_only:
-                    print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
-                          f" | {sym_count} OpenSSL symbols | {file_count} files",
+                if per_package:
+                    _hap_write_single_report(
+                        result, entry_key, out_names[entry_key], reporter, args.json_only
+                    )
+                    out_name = os.path.basename(out_names[entry_key])
+                    print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
+                          f" ({sym_count} symbols, {file_count} files)",
                           flush=True)
+                else:
+                    if not args.json_only:
+                        print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
+                              f" | {sym_count} OpenSSL symbols | {file_count} files",
+                              flush=True)
+
+            except (ValueError, zipfile.BadZipFile) as e:
+                logger.error("Failed to extract %s: %s", entry.display_name, e)
+                continue
+            finally:
+                if tmp_file and os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+                    logger.debug("Cleaned up temp: %s", tmp_file)
 
         elapsed = time.time() - start_time
 
-        if not all_results:
+        attempted = total_packages - skipped
+        if not all_results and attempted > 0:
             logger.error("No packages could be scanned successfully")
             return 1
+        if not all_results and attempted == 0:
+            print(f"\nAll {skipped} packages cached, nothing to do."
+                  f" Use --force to rescan.")
+            return 0
 
         if per_package:
-            summary_path = _generate_hap_summary(
-                all_results, scanned_packages, output_path
-            )
-            if summary_path:
-                print(f"Summary: {os.path.basename(summary_path)}")
+            if all_results:
+                summary_path = _generate_hap_summary(
+                    all_results, scanned_packages, output_path
+                )
+                if summary_path:
+                    print(f"Summary: {os.path.basename(summary_path)}")
+            skip_msg = f", {skipped} skipped" if skipped else ""
             print(f"\nBatch complete: {len(all_results)} packages scanned"
-                  f" in {elapsed:.2f}s -> {output_path}/")
+                  f"{skip_msg} in {elapsed:.2f}s -> {output_path}/")
             return 0
 
         if len(all_results) == 1:
             final_result = all_results[0]
         else:
-            final_result = all_results[0]
-            final_result.report_type = 'package_batch'
-            final_result.package_info['batch'] = [
-                r.package_info for r in all_results[1:]
-            ]
+            final_result = _merge_hap_results(all_results)
 
         json_report = reporter.generate_json(final_result)
         output_dir = os.path.dirname(output_path)
@@ -1111,11 +1228,187 @@ def cmd_hap(args) -> int:
         return 1
 
 
-def _resolve_hap_output_names(packages, output_dir, ext):
-    """Map package paths to unique output file paths."""
+_CONTAINER_EXTENSIONS = {'.zip', '.app'}
+_INNER_PACKAGE_EXTENSIONS = {'.hap', '.har', '.hsp'}
+
+
+class _PkgEntry:
+    """A scannable package reference — standalone file or entry inside a container."""
+    __slots__ = ('path', 'container', 'zip_entry', 'display_name')
+
+    def __init__(self, path, container=None, zip_entry=None, display_name=None):
+        self.path = path
+        self.container = container
+        self.zip_entry = zip_entry
+        self.display_name = display_name or os.path.basename(path or '')
+
+
+def _plan_packages(packages, logger):
+    """Enumerate scannable packages without extracting containers.
+
+    Peeks into ZIP/APP containers to list inner HAPs, but does NOT
+    extract them. Returns a flat list of _PkgEntry descriptors.
+    Actual extraction happens one-at-a-time in the scan loop.
+    """
+    plan = []
+    for pkg in packages:
+        ext = os.path.splitext(pkg)[1].lower()
+        if ext not in _CONTAINER_EXTENSIONS:
+            plan.append(_PkgEntry(path=pkg))
+            continue
+
+        try:
+            with zipfile.ZipFile(pkg, 'r') as zf:
+                nested = [
+                    e for e in zf.namelist()
+                    if os.path.splitext(e)[1].lower() in _INNER_PACKAGE_EXTENSIONS
+                    and not e.startswith('__MACOSX')
+                ]
+        except (zipfile.BadZipFile, OSError) as e:
+            logger.warning("Cannot open %s: %s, keeping as-is", pkg, e)
+            plan.append(_PkgEntry(path=pkg))
+            continue
+
+        if not nested:
+            plan.append(_PkgEntry(path=pkg))
+            continue
+
+        container_stem = os.path.splitext(os.path.basename(pkg))[0]
+        seen_names = set()
+        for entry in nested:
+            inner_name = os.path.basename(entry)
+            if not inner_name:
+                continue
+            inner_base, inner_ext = os.path.splitext(inner_name)
+            safe_name = f"{container_stem}_{inner_base}{inner_ext}"
+            if safe_name in seen_names:
+                counter = 2
+                while f"{container_stem}_{inner_base}_{counter}{inner_ext}" in seen_names:
+                    counter += 1
+                safe_name = f"{container_stem}_{inner_base}_{counter}{inner_ext}"
+            seen_names.add(safe_name)
+            plan.append(_PkgEntry(
+                path=None,
+                container=pkg,
+                zip_entry=entry,
+                display_name=safe_name,
+            ))
+        logger.info("Container %s -> %d inner packages",
+                     os.path.basename(pkg), len(nested))
+
+    return plan
+
+
+def _extract_pkg_entry(entry, logger):
+    """Extract a single _PkgEntry just-in-time. Returns (actual_path, tmp_to_cleanup).
+
+    For standalone packages, returns (path, None).
+    For container entries, extracts to a temp file and returns (tmp_path, tmp_path).
+    """
+    if entry.container is None:
+        return entry.path, None
+
+    import tempfile as _tempfile
+    import shutil as _shutil
+    fd, tmp_path = _tempfile.mkstemp(suffix=os.path.splitext(entry.display_name)[1],
+                                      prefix='hap_')
+    try:
+        with zipfile.ZipFile(entry.container, 'r') as zf:
+            with zf.open(entry.zip_entry) as src, os.fdopen(fd, 'wb') as dst:
+                _shutil.copyfileobj(src, dst)
+                fd = -1
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    logger.debug("Extracted %s:%s -> %s", os.path.basename(entry.container),
+                 entry.zip_entry, tmp_path)
+    return tmp_path, tmp_path
+
+
+def _merge_hap_results(results):
+    """Merge multiple ScanResult objects into a single batch result.
+
+    Combines files_detail, symbols_by_file, symbols_by_category,
+    all_unique_symbols, and all counter fields from every result.
+    """
+    from .scanner import ScanResult
+
+    base = results[0]
+    merged = ScanResult(
+        target=base.target,
+        scan_time=base.scan_time,
+        tool_version=base.tool_version,
+        arch=base.arch,
+        report_type='package_batch',
+    )
+
+    all_files_detail = []
+    merged_by_file = {}
+    merged_by_category = {}
+    unique_syms = set()
+    total_scanned = 0
+    total_elf = 0
+    with_openssl = 0
+    with_static = 0
+    with_dlopen = 0
+    merged_dlsym_by_file = {}
+    dlsym_unique = set()
+    dlopen_libs = set()
+    ossl_libs = set()
+    all_errors = []
+
+    for r in results:
+        all_files_detail.extend(r.files_detail)
+        merged_by_file.update(r.symbols_by_file)
+        for cat, syms in r.symbols_by_category.items():
+            if cat not in merged_by_category:
+                merged_by_category[cat] = set()
+            merged_by_category[cat].update(syms)
+        unique_syms.update(r.all_unique_symbols)
+        total_scanned += r.total_files_scanned
+        total_elf += r.total_elf_files
+        with_openssl += r.files_with_openssl
+        with_static += r.files_with_static_openssl
+        with_dlopen += r.files_with_dlopen
+        merged_dlsym_by_file.update(r.dlsym_symbols_by_file)
+        dlsym_unique.update(r.all_dlsym_symbols)
+        dlopen_libs.update(r.dlopen_libs_detected)
+        ossl_libs.update(r.openssl_libs_found)
+        all_errors.extend(r.errors)
+
+    merged.files_detail = all_files_detail
+    merged.symbols_by_file = merged_by_file
+    merged.symbols_by_category = {
+        cat: sorted(syms) for cat, syms in merged_by_category.items()
+    }
+    merged.all_unique_symbols = sorted(unique_syms)
+    merged.total_files_scanned = total_scanned
+    merged.total_elf_files = total_elf
+    merged.files_with_openssl = with_openssl
+    merged.files_with_static_openssl = with_static
+    merged.files_with_dlopen = with_dlopen
+    merged.dlsym_symbols_by_file = merged_dlsym_by_file
+    merged.all_dlsym_symbols = sorted(dlsym_unique)
+    merged.dlopen_libs_detected = sorted(dlopen_libs)
+    merged.openssl_libs_found = sorted(ossl_libs)
+    merged.errors = all_errors
+
+    merged.package_info = results[0].package_info
+    merged.package_info['batch'] = [
+        r.package_info for r in results[1:]
+    ]
+
+    return merged
+
+
+def _resolve_hap_output_names(names, output_dir, ext):
+    """Map package display names to unique output file paths."""
     used = set()
     result = {}
-    for pkg in packages:
+    for pkg in names:
         base = os.path.splitext(os.path.basename(pkg))[0]
         candidate = base
         counter = 2
@@ -1146,14 +1439,12 @@ _HAP_SUMMARY_COLUMNS = [
     ('version',         12, 'Version'),
     ('abi',             15, 'ABI'),
     ('so_files',        10, '.so Files'),
-    ('uses_openssl',    12, 'Uses OpenSSL'),
+    ('ossl_type',       16, 'OpenSSL Type'),
     ('detection',       14, 'Detection'),
     ('bundled_openssl', 14, 'Bundled OpenSSL'),
-    ('dynamic_files',   12, 'Dynamic Files'),
-    ('static_files',    12, 'Static Files'),
-    ('dlopen_files',    12, 'dlopen Files'),
+    ('static_syms',     14, 'Static Symbols'),
     ('dynamic_syms',    14, 'Dynamic Symbols'),
-    ('dlsym_syms',      14, 'dlsym Symbols'),
+    ('dlopen_syms',     14, 'dlopen Symbols'),
     ('total_syms',      12, 'Total Symbols'),
     ('top_category',    18, 'Top Category'),
     ('ssl_core',        10, 'ssl_core'),
@@ -1174,22 +1465,49 @@ _HAP_HIGHLIGHT_CATS = [
 
 
 def _classify_hap_detection(result):
-    """Classify detection methods and count files per method."""
-    dynamic = static = dlopen = 0
+    """Classify OpenSSL usage and return deduped symbol sets.
+
+    Returns ``(method, static_syms, dynamic_syms, dlopen_syms, ossl_type)``
+    where the middle three are **sets** of unique symbol names.
+
+    Classification rule::
+
+        static > (dynamic | dlopen)  ->  Self-Contained
+        otherwise                    ->  System-Link
+        both empty                   ->  No-OpenSSL
+    """
+    static_syms = set()
+    dynamic_syms = set()
+    dlopen_syms = set()
+    has_dynamic = has_static = has_dlopen = False
+
     for fr in result.files_detail:
         if fr.static_openssl:
-            static += 1
-        if fr.uses_dlopen:
-            dlopen += 1
-        if fr.openssl_symbols and not fr.static_openssl and not fr.uses_dlopen:
-            dynamic += 1
+            has_static = True
+            if fr.uses_dlopen:
+                has_dlopen = True
+                dlopen_syms.update(fr.dlsym_symbols)
+                static_only = set(fr.openssl_symbols) - set(fr.dlsym_symbols)
+                static_syms.update(static_only)
+            else:
+                static_syms.update(fr.openssl_symbols)
+        elif fr.uses_dlopen:
+            has_dlopen = True
+            dlopen_syms.update(fr.dlsym_symbols)
+            non_dlsym = set(fr.openssl_symbols) - set(fr.dlsym_symbols)
+            if non_dlsym:
+                has_dynamic = True
+                dynamic_syms.update(non_dlsym)
+        elif fr.openssl_symbols:
+            has_dynamic = True
+            dynamic_syms.update(fr.openssl_symbols)
 
     methods = []
-    if dynamic > 0:
+    if has_dynamic:
         methods.append('Dynamic')
-    if static > 0:
+    if has_static:
         methods.append('Static')
-    if dlopen > 0:
+    if has_dlopen:
         methods.append('dlopen')
 
     if not methods:
@@ -1199,21 +1517,30 @@ def _classify_hap_detection(result):
     else:
         method = 'Mixed'
 
-    return method, dynamic, static, dlopen
+    external_count = len(dynamic_syms | dlopen_syms)
+    static_count = len(static_syms)
+    if static_count == 0 and external_count == 0:
+        ossl_type = 'No-OpenSSL'
+    elif static_count > external_count:
+        ossl_type = 'Self-Contained'
+    else:
+        ossl_type = 'System-Link'
+
+    return method, static_syms, dynamic_syms, dlopen_syms, ossl_type
 
 
-def _build_hap_summary_row(result, pkg_path):
-    """Build a dict of column values for one package."""
+def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
+                           ossl_type):
+    """Build a dict of column values for one package.
+
+    All symbol counts derive from the deduped sets returned by
+    ``_classify_hap_detection`` so that Static + Dynamic + dlopen
+    decomposition is internally consistent.
+    """
     pi = result.package_info or {}
     abi = pi.get('scanned_abi', '')
     if isinstance(abi, list):
         abi = ', '.join(abi)
-
-    method, dynamic_f, static_f, dlopen_f = _classify_hap_detection(result)
-
-    total_syms = len(result.all_unique_symbols)
-    dlsym_syms = len(result.all_dlsym_symbols)
-    dynamic_syms = total_syms - dlsym_syms
 
     cat_counts = {}
     for cat, syms in result.symbols_by_category.items():
@@ -1233,15 +1560,13 @@ def _build_hap_summary_row(result, pkg_path):
         'version': pi.get('version_name', ''),
         'abi': abi,
         'so_files': pi.get('native_libs_count', 0),
-        'uses_openssl': 'Yes' if result.files_with_openssl > 0 else 'No',
+        'ossl_type': ossl_type,
         'detection': method,
         'bundled_openssl': 'Yes' if pi.get('bundled_openssl') else 'No',
-        'dynamic_files': dynamic_f,
-        'static_files': static_f,
-        'dlopen_files': dlopen_f,
-        'dynamic_syms': dynamic_syms,
-        'dlsym_syms': dlsym_syms,
-        'total_syms': total_syms,
+        'static_syms': len(s_syms),
+        'dynamic_syms': len(d_syms),
+        'dlopen_syms': len(dl_syms),
+        'total_syms': len(s_syms | d_syms | dl_syms),
         'top_category': top_cat,
         'other_cats': other_cats,
         'dlopen_libs': ', '.join(result.dlopen_libs_detected),
@@ -1281,29 +1606,31 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     rows = []
+    all_static = set()
+    all_dynamic = set()
+    all_dlopen = set()
     for result, pkg_path in zip(all_results, scanned_packages):
-        row = _build_hap_summary_row(result, pkg_path)
+        method, s_syms, d_syms, dl_syms, ossl_type = \
+            _classify_hap_detection(result)
+        row = _build_hap_summary_row(
+            result, pkg_path, method, s_syms, d_syms, dl_syms, ossl_type)
         for cat in _HAP_HIGHLIGHT_CATS:
             row[cat] = len(result.symbols_by_category.get(cat, []))
         rows.append(row)
+        all_static |= s_syms
+        all_dynamic |= d_syms
+        all_dlopen |= dl_syms
 
     for row_idx, row in enumerate(rows, 2):
         for col_idx, key in enumerate(col_keys, 1):
             ws.cell(row=row_idx, column=col_idx, value=row.get(key, ''))
 
     total_row = len(rows) + 2
-    all_syms_union = set()
-    all_dlsym_union = set()
+
     cat_union = {}
     for r in all_results:
-        all_syms_union.update(r.all_unique_symbols)
-        all_dlsym_union.update(r.all_dlsym_symbols)
         for cat, syms in r.symbols_by_category.items():
             cat_union.setdefault(cat, set()).update(syms)
-
-    total_total_syms = len(all_syms_union)
-    total_dlsym_syms = len(all_dlsym_union)
-    total_dynamic_syms = total_total_syms - total_dlsym_syms
 
     highlight_union = sum(len(cat_union.get(c, set())) for c in _HAP_HIGHLIGHT_CATS)
     other_union = sum(len(v) for v in cat_union.values()) - highlight_union
@@ -1312,7 +1639,12 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
     if cat_union:
         top_cat_total = max(cat_union, key=lambda c: len(cat_union[c]))
 
-    uses_count = sum(1 for r in rows if r['uses_openssl'] == 'Yes')
+    type_counts = {}
+    for r in rows:
+        t = r.get('ossl_type', '')
+        if t:
+            type_counts[t] = type_counts.get(t, 0) + 1
+    type_summary = ', '.join(f'{v} {k}' for k, v in sorted(type_counts.items()))
 
     total_data = {
         'pkg_name': 'TOTAL',
@@ -1320,15 +1652,13 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
         'version': '',
         'abi': '',
         'so_files': sum(r['so_files'] for r in rows),
-        'uses_openssl': f'{uses_count}/{len(rows)}',
+        'ossl_type': type_summary,
         'detection': '',
         'bundled_openssl': '',
-        'dynamic_files': sum(r['dynamic_files'] for r in rows),
-        'static_files': sum(r['static_files'] for r in rows),
-        'dlopen_files': sum(r['dlopen_files'] for r in rows),
-        'dynamic_syms': total_dynamic_syms,
-        'dlsym_syms': total_dlsym_syms,
-        'total_syms': total_total_syms,
+        'static_syms': len(all_static),
+        'dynamic_syms': len(all_dynamic),
+        'dlopen_syms': len(all_dlopen),
+        'total_syms': len(all_static | all_dynamic | all_dlopen),
         'top_category': top_cat_total,
         'other_cats': other_union,
         'dlopen_libs': '',
@@ -1348,6 +1678,149 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
     wb.save(summary_path)
     _logger.info("HAP summary saved to: %s", summary_path)
     return summary_path
+
+
+def _load_scan_result_from_json(json_path):
+    """Reconstruct a ScanResult from a per-package JSON report.
+
+    Returns (ScanResult, pkg_path) or (None, None) on error.
+    """
+    from .scanner import ScanResult, FileResult
+
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        logging.getLogger(__name__).warning(
+            "Skipping %s: %s", json_path, e)
+        return None, None
+
+    meta = data.get('meta', {})
+    if meta.get('report_type') != 'package':
+        return None, None
+
+    summary = data.get('summary', {})
+    ossl_syms = data.get('openssl_symbols', {})
+
+    files_detail = []
+    for fd in data.get('files_detail', []):
+        dlopen_det = fd.get('dlopen_detection', {})
+        fr = FileResult(
+            path=fd.get('path', ''),
+            file_type=fd.get('type', ''),
+            arch=fd.get('arch', ''),
+            direct_deps=fd.get('direct_deps', []),
+            openssl_direct=fd.get('openssl_deps', {}).get('direct', False),
+            openssl_transitive=fd.get('openssl_deps', {}).get('transitive', False),
+            openssl_libs=fd.get('openssl_deps', {}).get('libs', []),
+            openssl_symbols=fd.get('openssl_symbols_used', []),
+            static_openssl=fd.get('static_openssl', False),
+            uses_dlopen=dlopen_det.get('uses_dlopen', False),
+            dlsym_symbols=dlopen_det.get('dlopen_symbols', []),
+            dlopen_libs=dlopen_det.get('dlopen_libs', []),
+            dlopen_confidence=dlopen_det.get('confidence', 'high'),
+        )
+        files_detail.append(fr)
+
+    by_cat = {}
+    for cat, info in ossl_syms.get('by_category', {}).items():
+        by_cat[cat] = info.get('symbols', []) if isinstance(info, dict) else info
+
+    by_file = {}
+    for path, info in ossl_syms.get('by_file', {}).items():
+        by_file[path] = info.get('symbols', []) if isinstance(info, dict) else info
+
+    dlopen_analysis = data.get('dlopen_analysis', {})
+
+    result = ScanResult(
+        target=meta.get('scan_root', ''),
+        scan_time=meta.get('scan_time', ''),
+        tool_version=meta.get('tool_version', ''),
+        arch=meta.get('target_arch', ''),
+        report_type=meta.get('report_type', 'package'),
+        total_files_scanned=summary.get('total_files_scanned', 0),
+        total_elf_files=summary.get('total_elf_files', 0),
+        files_with_openssl=summary.get('files_with_openssl_deps', 0),
+        openssl_libs_found=summary.get('openssl_libs_found', []),
+        files_detail=files_detail,
+        symbols_by_file=by_file,
+        symbols_by_category=by_cat,
+        all_unique_symbols=ossl_syms.get('all_unique', []),
+        files_with_static_openssl=summary.get('files_with_static_openssl', 0),
+        files_with_dlopen=summary.get('files_with_dlopen', 0),
+        all_dlsym_symbols=dlopen_analysis.get('all_dlopen_symbols', []),
+        dlopen_libs_detected=summary.get('dlopen_libs_detected', []),
+    )
+
+    result.package_info = meta.get('package')
+
+    pkg_path = ''
+    if result.package_info:
+        pkg_path = result.package_info.get('package_path', '')
+    if not pkg_path:
+        pkg_path = json_path
+
+    return result, pkg_path
+
+
+def cmd_hap_summary(args) -> int:
+    """Generate summary.xlsx from existing per-package JSON reports."""
+    json_files = []
+    for inp in args.inputs:
+        if os.path.isdir(inp):
+            for f in sorted(glob.glob(os.path.join(inp, '*.json'))):
+                json_files.append(f)
+        elif os.path.isfile(inp) and inp.endswith('.json'):
+            json_files.append(inp)
+        else:
+            print(f"Warning: skipping {inp} (not a .json file or directory)")
+
+    if not json_files:
+        print("Error: no JSON report files found")
+        return 1
+
+    all_results = []
+    scanned_packages = []
+    skipped = 0
+    for jf in json_files:
+        result, pkg_path = _load_scan_result_from_json(jf)
+        if result is None:
+            skipped += 1
+            logging.getLogger(__name__).debug(
+                "Skipped %s (not a package report)", jf)
+            continue
+        all_results.append(result)
+        scanned_packages.append(pkg_path)
+
+    if not all_results:
+        print("Error: no valid package reports found"
+              f" ({skipped} files skipped, report_type != 'package')")
+        return 1
+
+    if args.output:
+        output_path = os.path.abspath(args.output)
+    else:
+        first_dir = os.path.dirname(json_files[0]) or '.'
+        output_path = os.path.join(first_dir, 'summary.xlsx')
+
+    if output_path.lower().endswith('.xlsx'):
+        out_dir = os.path.dirname(output_path) or '.'
+    else:
+        out_dir = output_path
+        output_path = os.path.join(out_dir, 'summary.xlsx')
+    os.makedirs(out_dir, exist_ok=True)
+
+    tmp_path = _generate_hap_summary(all_results, scanned_packages, out_dir)
+    if not tmp_path:
+        print("Error: failed to generate summary")
+        return 1
+
+    if tmp_path != output_path:
+        os.replace(tmp_path, output_path)
+
+    print(f"Summary generated: {output_path}"
+          f" ({len(all_results)} packages)")
+    return 0
 
 
 def _resolve_output_names(targets, output_arg, ext):
@@ -1644,8 +2117,9 @@ Examples:
 
     parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     parser.add_argument(
@@ -2027,8 +2501,9 @@ Pipeline:
 
     parser.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        help='Enable verbose logging',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
     parser.add_argument(
@@ -2887,7 +3362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if argv and argv[0] not in ['scan', 'proc', 'hap', 'source', 'source-merge', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
+    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-merge', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
         argv = ['scan'] + argv
 
     args = parser.parse_args(argv)
@@ -2902,6 +3377,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_proc(args)
     elif args.command == 'hap':
         return cmd_hap(args)
+    elif args.command == 'hap-summary':
+        return cmd_hap_summary(args)
     elif args.command == 'source':
         return cmd_source(args)
     elif args.command == 'source-merge':

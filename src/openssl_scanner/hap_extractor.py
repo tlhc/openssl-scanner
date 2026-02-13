@@ -360,11 +360,18 @@ class HapExtractor:
 
                 try:
                     sub_ext = os.path.splitext(sub_path)[1].lower()
+                    sub_extract_dir = os.path.join(
+                        extract_dir,
+                        os.path.splitext(safe_name)[0]
+                    )
+                    os.makedirs(sub_extract_dir, exist_ok=True)
                     if sub_ext == '.zip':
                         sub_result = self._extract_zip(
-                            sub_path, abi, None, _depth=_depth + 1)
+                            sub_path, abi, sub_extract_dir,
+                            _depth=_depth + 1)
                     else:
-                        sub_result = self._extract_single(sub_path, abi, None)
+                        sub_result = self._extract_single(
+                            sub_path, abi, sub_extract_dir)
                     sub_packages.append(sub_result)
                 except (ValueError, zipfile.BadZipFile, KeyError) as e:
                     logger.warning(

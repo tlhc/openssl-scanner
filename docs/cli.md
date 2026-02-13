@@ -54,6 +54,7 @@ Commands:
   combo-scan    一键完成探测+扫描+合并流水线
   proc          扫描运行中进程加载的 OpenSSL 依赖（Linux）
   hap           扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP/ZIP）
+  hap-summary   从已有 HAP 报告生成汇总（无需重新扫描）
   update-data   更新内置 OpenSSL 符号和宏数据
   aggregate     聚合多个扫描报告
   export        导出为 HTML 或 Excel
@@ -757,6 +758,7 @@ OpenHarmony 应用包本质是 ZIP 压缩文件，native 库位于 `libs/<abi>/`
 | `-o, --output PATH` | 输出文件(.xlsx/.html/.json)或目录（逐包独立报告）（默认: openssl_deps_report.xlsx） |
 | `-j, --jobs N` | 并行线程数（默认: CPU 核心数） |
 | `--json-only` | 仅输出 JSON |
+| `--force` | 强制重新扫描（忽略已有报告，覆盖增量缓存） |
 | `--keep-extracted` | 保留解压的临时文件 |
 | `-v, --verbose` | 详细日志 |
 | `--log-file FILE` | 日志写入文件 |
@@ -912,6 +914,28 @@ ZIP 文件可能是：
 }
 ```
 
+### 增量扫描
+
+批量扫描目录时（`-o` 指向目录），工具支持增量扫描：已生成报告的包会自动跳过，仅扫描新增包。
+
+```bash
+# 首次扫描：逐包生成报告
+./scan hap /path/to/packages/ -o /tmp/reports/
+#   -> /tmp/reports/MyApp.xlsx + MyApp.json
+#   -> /tmp/reports/Plugin.xlsx + Plugin.json
+
+# 增量扫描：新增包才扫描，已有报告的包自动跳过
+./scan hap /path/to/packages/ -o /tmp/reports/
+#   MyApp: skipped (report exists)
+#   Plugin: skipped (report exists)
+#   NewApp: scanning...
+
+# 强制重新扫描：覆盖已有报告
+./scan hap /path/to/packages/ -o /tmp/reports/ --force
+```
+
+跳过条件：输出目录中同时存在 `<包名>.json` 和 `<包名>.xlsx`（或 `--json-only` 时仅检查 `.json`）。
+
 ### 包类型差异
 
 | | HAP/HAR/HSP | APP | ZIP |
@@ -920,6 +944,79 @@ ZIP 文件可能是：
 | 扫描方式 | 直接提取 native 库 | 逐个解压子包后分析 | 自动检测：扁平则直接提取，嵌套则递归处理 |
 | 元数据 | 单个 module.json | 外层 + 每个子包各有 module.json | module.json（如有）|
 | 报告 | 单包报告 | 包含子包聚合信息 | 扁平为单包报告，嵌套则聚合子包 |
+
+---
+
+## hap-summary - 包扫描汇总命令
+
+从已有的 HAP 逐包 JSON 报告生成汇总 XLSX 报告，无需重新扫描。适用于批量扫描完成后生成或刷新汇总视图。
+
+### 背景
+
+`hap` 命令在批量扫描时为每个包生成独立的 JSON + XLSX 报告。`hap-summary` 读取这些 JSON 报告，生成包含所有包的汇总 XLSX（含 Summary、File-Symbol、分类统计等工作表），并对每个包进行 **OpenSSL Type 分类**。
+
+### OpenSSL Type 分类
+
+基于符号去重后的统计，自动判断每个包的 OpenSSL 使用类型：
+
+| OpenSSL Type | 条件 | 说明 |
+|--------------|------|------|
+| **Self-Contained** | `unique_static_symbols > unique_external_symbols` | 包内自带 OpenSSL 库（静态链接为主） |
+| **System-Link** | `unique_external_symbols >= unique_static_symbols` | 依赖系统 OpenSSL（动态链接或 dlopen） |
+| **No-OpenSSL** | 无任何 OpenSSL 符号 | 不使用 OpenSSL |
+
+符号去重规则：
+- 同一符号出现在多个 static .so 文件中，仅计一次
+- `external_symbols = dynamic_symbols | dlopen_symbols`（取并集后计数）
+- 一个 .so 可以同时贡献 static 和 dlopen 符号（不互斥）
+
+### 语法
+
+```bash
+./scan hap-summary <inputs...> [-o output.xlsx]
+```
+
+### 参数
+
+| 参数 | 说明 |
+|------|------|
+| `inputs` | JSON 报告文件或包含 JSON 报告的目录（一个或多个） |
+| `-o, --output FILE` | 输出 XLSX 文件（默认: 输入目录下的 `summary.xlsx`） |
+| `-v, --verbose` | 详细日志 |
+| `--log-file FILE` | 日志写入文件 |
+
+### 示例
+
+```bash
+# 从报告目录生成汇总
+./scan hap-summary /tmp/hap_reports/
+#   -> /tmp/hap_reports/summary.xlsx
+
+# 指定输出路径
+./scan hap-summary /tmp/hap_reports/ -o ~/Desktop/overview.xlsx
+
+# 从多个目录或指定文件
+./scan hap-summary /tmp/batch1/ /tmp/batch2/ -o combined_summary.xlsx
+./scan hap-summary entry.json feature.json -o summary.xlsx
+```
+
+### 输出 XLSX 结构
+
+汇总 XLSX 与 `hap` 命令的合并报告格式一致（Summary + File-Symbol + By Category + Errors 等工作表），额外包含 OpenSSL Type 分类信息。
+
+### 典型工作流
+
+```bash
+# Step 1: 批量逐包扫描（可分批，支持增量）
+./scan hap /path/to/all_packages/ -o /tmp/hap_reports/
+
+# Step 2: 生成汇总报告
+./scan hap-summary /tmp/hap_reports/ -o summary.xlsx
+
+# Step 3: 新增包后，增量扫描 + 刷新汇总
+./scan hap /path/to/all_packages/ -o /tmp/hap_reports/   # 仅扫描新包
+./scan hap-summary /tmp/hap_reports/ -o summary.xlsx      # 重新生成汇总
+```
 
 ---
 

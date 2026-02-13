@@ -332,7 +332,7 @@ class TestHapSummaryReport:
         assert os.path.isfile(summary)
 
     def test_summary_has_correct_columns(self):
-        """Header row should have all 24 columns."""
+        """Header row should have all 22 columns."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
         summary = os.path.join(out_dir, "summary.xlsx")
@@ -341,14 +341,18 @@ class TestHapSummaryReport:
         wb = load_workbook(summary)
         ws = wb.active
         assert ws.title == "Package Summary"
-        headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+        headers = [ws.cell(row=1, column=c).value for c in range(1, 23)]
         assert headers[0] == "Package Name"
-        assert headers[5] == "Uses OpenSSL"
+        assert headers[5] == "OpenSSL Type"
         assert headers[6] == "Detection"
-        assert headers[13] == "Total Symbols"
-        assert headers[14] == "Top Category"
-        assert headers[23] == "dlopen Libs"
-        assert len(headers) == 24
+        assert headers[7] == "Bundled OpenSSL"
+        assert headers[8] == "Static Symbols"
+        assert headers[9] == "Dynamic Symbols"
+        assert headers[10] == "dlopen Symbols"
+        assert headers[11] == "Total Symbols"
+        assert headers[12] == "Top Category"
+        assert headers[21] == "dlopen Libs"
+        assert len(headers) == 22
 
     def test_summary_row_count(self):
         """Should have header + N data rows + TOTAL row."""
@@ -379,17 +383,19 @@ class TestHapSummaryReport:
                      for r in range(2, total_row))
         assert ws.cell(row=total_row, column=5).value == pkg_so
 
-    def test_summary_uses_openssl_ratio(self):
-        """TOTAL row Uses OpenSSL should show X/Y format."""
+    def test_summary_ossl_type_for_minimal_elf(self):
+        """Minimal ELFs have no OpenSSL -> OpenSSL Type should be No-OpenSSL."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
 
         from openpyxl import load_workbook
         wb = load_workbook(os.path.join(out_dir, "summary.xlsx"))
         ws = wb.active
+        for r in range(2, ws.max_row):
+            assert ws.cell(row=r, column=6).value == 'No-OpenSSL'
         total_row = ws.max_row
         val = ws.cell(row=total_row, column=6).value
-        assert '/' in str(val)
+        assert 'No-OpenSSL' in str(val)
 
     def test_summary_detection_none_for_minimal_elf(self):
         """Minimal ELFs have no OpenSSL -> detection should be None."""
@@ -419,9 +425,10 @@ class TestClassifyHapDetection:
                        openssl_transitive=False, openssl_libs=[],
                        openssl_symbols=[]),
         ]
-        method, dyn, static, dlop = _classify_hap_detection(result)
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'None'
-        assert dyn == 0 and static == 0 and dlop == 0
+        assert len(s_set) == 0 and len(d_set) == 0 and len(dl_set) == 0
+        assert ossl_type == 'No-OpenSSL'
 
     def test_dynamic_only(self):
         from openssl_scanner.scanner import ScanResult, FileResult
@@ -436,9 +443,10 @@ class TestClassifyHapDetection:
                        openssl_transitive=False, openssl_libs=[],
                        openssl_symbols=["SSL_connect"]),
         ]
-        method, dyn, static, dlop = _classify_hap_detection(result)
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'Dynamic'
-        assert dyn == 1 and static == 0 and dlop == 0
+        assert ossl_type == 'System-Link'
+        assert d_set == {"SSL_connect"} and len(s_set) == 0
 
     def test_static_only(self):
         from openssl_scanner.scanner import ScanResult, FileResult
@@ -454,9 +462,10 @@ class TestClassifyHapDetection:
                        openssl_symbols=["EVP_sha256"],
                        static_openssl=True),
         ]
-        method, dyn, static, dlop = _classify_hap_detection(result)
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'Static'
-        assert dyn == 0 and static == 1 and dlop == 0
+        assert ossl_type == 'Self-Contained'
+        assert s_set == {"EVP_sha256"}
 
     def test_dlopen_only(self):
         from openssl_scanner.scanner import ScanResult, FileResult
@@ -472,9 +481,10 @@ class TestClassifyHapDetection:
                        openssl_symbols=["SSL_read"],
                        uses_dlopen=True, dlsym_symbols=["SSL_read"]),
         ]
-        method, dyn, static, dlop = _classify_hap_detection(result)
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'dlopen'
-        assert dlop == 1
+        assert ossl_type == 'System-Link'
+        assert dl_set == {"SSL_read"}
 
     def test_mixed(self):
         from openssl_scanner.scanner import ScanResult, FileResult
@@ -494,9 +504,215 @@ class TestClassifyHapDetection:
                        openssl_symbols=["EVP_sha256"],
                        static_openssl=True),
         ]
-        method, dyn, static, dlop = _classify_hap_detection(result)
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'Mixed'
-        assert dyn == 1 and static == 1
+        assert s_set == {"EVP_sha256"} and d_set == {"SSL_connect"}
+        assert ossl_type == 'System-Link'
+
+    def test_self_contained_static_majority(self):
+        """Package with many static symbols and few dynamic -> Self-Contained."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        static_syms = [f"EVP_sym_{i}" for i in range(50)]
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/libcrypto.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=static_syms, static_openssl=True),
+            FileResult(path="/app.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect", "SSL_read"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'Mixed'
+        assert len(s_set) == 50 and len(d_set) == 2
+        assert ossl_type == 'Self-Contained'
+
+    def test_system_link_dynamic_majority(self):
+        """Package with many dynamic symbols and few static -> System-Link."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        dynamic_syms = [f"SSL_sym_{i}" for i in range(30)]
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=dynamic_syms),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha1", "EVP_sha256"],
+                       static_openssl=True),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert len(s_set) == 2 and len(d_set) == 30
+        assert ossl_type == 'System-Link'
+
+    def test_equal_static_dynamic_is_system_link(self):
+        """Equal static and dynamic counts -> System-Link (not >)."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect", "SSL_read", "SSL_write"]),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha1", "EVP_sha256", "EVP_md5"],
+                       static_openssl=True),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert len(s_set) == 3 and len(d_set) == 3
+        assert ossl_type == 'System-Link'
+
+    def test_dlopen_plus_dynamic_system_link(self):
+        """Package with both dlopen and dynamic (no static) -> System-Link."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect"]),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read"],
+                       uses_dlopen=True, dlsym_symbols=["SSL_read"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert len(d_set) == 1 and len(dl_set) == 1 and len(s_set) == 0
+        assert ossl_type == 'System-Link'
+
+    def test_hybrid_dlopen_file_with_direct_und(self):
+        """File with both dlopen symbols and direct UND -> split counts."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect", "SSL_read", "EVP_sha256"],
+                       uses_dlopen=True, dlsym_symbols=["EVP_sha256"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert dl_set == {"EVP_sha256"}
+        assert d_set == {"SSL_connect", "SSL_read"}
+        assert ossl_type == 'System-Link'
+
+    def test_static_dlopen_overlap_not_double_counted(self):
+        """Static file with dlopen: dlsym symbols should NOT inflate static count.
+
+        scanner.py appends filtered dlsym symbols to openssl_symbols, so
+        fr.openssl_symbols = UND + dlsym-only.  Without the fix, all of
+        openssl_symbols would go into static_syms, inflating the count.
+
+        Setup: static file with 1 true UND symbol + 2 dlsym-appended symbols.
+        Correct: static=1, dlopen=2 -> 1 < 2 -> System-Link.
+        Bug:     static=3, dlopen=2 -> 3 > 2 -> Self-Contained (wrong).
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/libcrypto.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256", "SSL_read", "SSL_write"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=["SSL_read", "SSL_write"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert s_set == {"EVP_sha256"}
+        assert dl_set == {"SSL_read", "SSL_write"}
+        assert len(s_set) == 1 and len(dl_set) == 2
+        assert ossl_type == 'System-Link'
+
+    def test_static_dlopen_all_symbols_are_dlsym(self):
+        """Static file where ALL symbols are dlsym -> empty static_only.
+
+        static_only = openssl_symbols - dlsym_symbols = empty.
+        method='Mixed' (has_static + has_dlopen), ossl_type='System-Link'.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read", "SSL_write"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=["SSL_read", "SSL_write"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert s_set == set()
+        assert dl_set == {"SSL_read", "SSL_write"}
+        assert method == 'Mixed'
+        assert ossl_type == 'System-Link'
+
+    def test_dedup_shared_symbols_across_static_files(self):
+        """Duplicate symbols across static files count once after dedup.
+
+        Two static .so files share the same 2 symbols -> s_set has 2, not 4.
+        Three dynamic symbols -> external=3 > static=2 -> System-Link.
+        Without dedup this would be 4 > 3 -> Self-Contained (wrong).
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        shared_static = ["EVP_sha256", "EVP_md5"]
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=shared_static, static_openssl=True),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=shared_static, static_openssl=True),
+            FileResult(path="/app.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect", "SSL_read", "SSL_write"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert len(s_set) == 2
+        assert len(d_set) == 3
+        assert ossl_type == 'System-Link'
+        assert len(s_set | d_set | dl_set) == 5
 
 
 if __name__ == "__main__":

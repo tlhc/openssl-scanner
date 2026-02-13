@@ -36,6 +36,12 @@ cd openssl-scanner
 # 批量扫描目录（逐包独立报告）
 ./scan hap /path/to/packages/ -o /tmp/reports/
 
+# 增量扫描（跳过已有报告的包，--force 强制重扫）
+./scan hap /path/to/packages/ -o /tmp/reports/ --force
+
+# 从已有报告生成汇总（无需重新扫描）
+./scan hap-summary /tmp/reports/ -o summary.xlsx
+
 # 扫描源代码（tree-sitter）
 ./scan source /path/to/src -o report.xlsx
 
@@ -69,6 +75,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | `combo-scan` | 一键探测+扫描+合并 | 根目录 | 合并 XLSX/JSON |
 | `proc` | 运行中进程分析 | PID 或进程名 | JSON |
 | `hap` | OpenHarmony 包分析 | HAP/HAR/HSP/APP/ZIP | XLSX/HTML/JSON |
+| `hap-summary` | 从已有报告生成汇总 | JSON 报告目录/文件 | XLSX |
 | `update-data` | 更新内置符号数据 | libcrypto.so / 头文件目录 | data/*.json |
 | `aggregate` | 聚合多个报告 | JSON 报告目录 | JSON |
 | `export` | 导出为 HTML/Excel | JSON 报告 | HTML/XLSX |
@@ -83,6 +90,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | **Combo Scan** | `./scan combo-scan /root -o r.xlsx` | 一键完成 probe+scan+merge 流水线 |
 | **Process Scan** | `./scan proc --pid 1234` | 分析运行进程的已加载库 |
 | **Package Scan** | `./scan hap MyApp.hap` | 从 HAP/HAR/HSP/APP/ZIP 包提取并分析 native .so |
+| **Package Summary** | `./scan hap-summary /reports/` | 从已有 JSON 报告生成汇总 XLSX（含 OpenSSL Type 分类） |
 
 ## 源码扫描
 
