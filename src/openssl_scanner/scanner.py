@@ -80,25 +80,30 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
     uses_dlopen = False
     dlsym_symbols = []
     dlopen_libs = []
+    dlopen_confidence = 'high'
 
     if info.has_dlopen or info.has_dlsym:
         from .dlopen_analyzer import detect_dlopen_openssl
+        exclude_ossl = set(openssl_symbols) | set(openssl_defined)
         dlopen_result = detect_dlopen_openssl(path, openssl_exports,
-                                               OPENSSL_LIBRARY_PATTERNS)
+                                               OPENSSL_LIBRARY_PATTERNS,
+                                               exclude_symbols=exclude_ossl)
         if dlopen_result:
             dlopen_libs = dlopen_result.dlopen_libs
             if not openssl_direct or dlopen_libs:
                 uses_dlopen = True
+                dlopen_confidence = dlopen_result.confidence
                 direct_set = set(openssl_symbols)
                 dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
                                  if s not in direct_set]
                 overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
                 logger.debug(
                     "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
-                    "overlap=%d dlopen_only=%d direct=%s libs=%s",
+                    "overlap=%d dlopen_only=%d direct=%s libs=%s conf=%s",
                     os.path.basename(path), len(openssl_symbols),
                     len(dlopen_result.dlsym_symbols), overlap,
-                    len(dlsym_symbols), openssl_direct, dlopen_libs)
+                    len(dlsym_symbols), openssl_direct, dlopen_libs,
+                    dlopen_confidence)
                 openssl_symbols.extend(dlsym_symbols)
             elif dlopen_result.dlsym_symbols:
                 logger.debug(
@@ -120,6 +125,7 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
         uses_dlopen=uses_dlopen,
         dlsym_symbols=dlsym_symbols,
         dlopen_libs=dlopen_libs,
+        dlopen_confidence=dlopen_confidence,
     )
 
 
@@ -139,6 +145,7 @@ class FileResult:
     uses_dlopen: bool = False
     dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs: List[str] = field(default_factory=list)
+    dlopen_confidence: str = 'high'
 
 
 @dataclass
@@ -311,26 +318,31 @@ class Scanner:
         uses_dlopen = False
         dlsym_symbols = []
         dlopen_libs = []
+        dlopen_confidence = 'high'
 
         if info.has_dlopen or info.has_dlsym:
             from .dlopen_analyzer import detect_dlopen_openssl
             openssl_exports = self._matcher.get_openssl_exports()
+            exclude_ossl = set(openssl_symbols) | set(openssl_defined)
             dlopen_result = detect_dlopen_openssl(path, openssl_exports,
-                                                   OPENSSL_LIBRARY_PATTERNS)
+                                                   OPENSSL_LIBRARY_PATTERNS,
+                                                   exclude_symbols=exclude_ossl)
             if dlopen_result:
                 dlopen_libs = dlopen_result.dlopen_libs
                 if not openssl_direct or dlopen_libs:
                     uses_dlopen = True
+                    dlopen_confidence = dlopen_result.confidence
                     direct_set = set(openssl_symbols)
                     dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
                                      if s not in direct_set]
                     overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
                     logger.debug(
                         "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
-                        "overlap=%d dlopen_only=%d direct=%s libs=%s",
+                        "overlap=%d dlopen_only=%d direct=%s libs=%s conf=%s",
                         os.path.basename(path), len(openssl_symbols),
                         len(dlopen_result.dlsym_symbols), overlap,
-                        len(dlsym_symbols), openssl_direct, dlopen_libs)
+                        len(dlsym_symbols), openssl_direct, dlopen_libs,
+                        dlopen_confidence)
                     openssl_symbols.extend(dlsym_symbols)
                 elif dlopen_result.dlsym_symbols:
                     logger.debug(
@@ -352,6 +364,7 @@ class Scanner:
             uses_dlopen=uses_dlopen,
             dlsym_symbols=dlsym_symbols,
             dlopen_libs=dlopen_libs,
+            dlopen_confidence=dlopen_confidence,
         )
 
     def scan_tree(self, root_path: str) -> ScanResult:
