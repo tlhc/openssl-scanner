@@ -7,7 +7,7 @@
 - **ELF 扫描** - 分析 ELF 文件的 OpenSSL 符号依赖（从 .dynsym 提取）
 - **源码扫描** - 基于 tree-sitter AST 分析 C/C++/Rust 源码中的 OpenSSL API 调用点
 - **进程扫描** - 分析运行中进程加载的共享库（Linux）
-- **包扫描** - 分析 OpenHarmony HAP/HAR/HSP/APP 包内的 OpenSSL 依赖
+- **包扫描** - 分析 OpenHarmony HAP/HAR/HSP/APP/ZIP 包内的 OpenSSL 依赖
 - **组合扫描** - 一键完成探测、扫描、合并流水线（probe + scan + merge）
 - **聚合** - 合并多个扫描报告，按组件统计
 - **导出** - 生成 Excel（8 个工作表）和交互式 HTML 报告
@@ -27,8 +27,14 @@ cd openssl-scanner
 # 扫描目录
 ./scan scan /path/to/dir --scan-dir -o report.json
 
-# 扫描 OpenHarmony 应用包
-./scan hap MyApp.hap -o report.json
+# 扫描 OpenHarmony 应用包（支持 HAP/HAR/HSP/APP/ZIP）
+./scan hap MyApp.hap -o report.xlsx
+
+# 扫描 ZIP 包（自动处理嵌套 HAP/ZIP）
+./scan hap MyBundle.zip -o report.xlsx
+
+# 批量扫描目录（逐包独立报告）
+./scan hap /path/to/packages/ -o /tmp/reports/
 
 # 扫描源代码（tree-sitter）
 ./scan source /path/to/src -o report.xlsx
@@ -62,7 +68,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | `source-merge` | 合并多个源码扫描报告 | 多个 XLSX | 合并 XLSX |
 | `combo-scan` | 一键探测+扫描+合并 | 根目录 | 合并 XLSX/JSON |
 | `proc` | 运行中进程分析 | PID 或进程名 | JSON |
-| `hap` | OpenHarmony 包分析 | HAP/HAR/HSP/APP | JSON |
+| `hap` | OpenHarmony 包分析 | HAP/HAR/HSP/APP/ZIP | XLSX/HTML/JSON |
 | `update-data` | 更新内置符号数据 | libcrypto.so / 头文件目录 | data/*.json |
 | `aggregate` | 聚合多个报告 | JSON 报告目录 | JSON |
 | `export` | 导出为 HTML/Excel | JSON 报告 | HTML/XLSX |
@@ -76,7 +82,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | **Source Scan** | `./scan source /path/to/src -o r.xlsx` | AST 分析源码，提取每个 OpenSSL 调用的位置和参数 |
 | **Combo Scan** | `./scan combo-scan /root -o r.xlsx` | 一键完成 probe+scan+merge 流水线 |
 | **Process Scan** | `./scan proc --pid 1234` | 分析运行进程的已加载库 |
-| **Package Scan** | `./scan hap MyApp.hap` | 从 HAP/HAR/HSP/APP 包提取并分析 native .so |
+| **Package Scan** | `./scan hap MyApp.hap` | 从 HAP/HAR/HSP/APP/ZIP 包提取并分析 native .so |
 
 ## 源码扫描
 

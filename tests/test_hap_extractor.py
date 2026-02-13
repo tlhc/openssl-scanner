@@ -555,5 +555,164 @@ class TestDirectoryScanning:
         assert packages == [] or len(packages) == 0
 
 
+class TestZipSupport:
+    """Tests for .zip extension support."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.extractor = HapExtractor()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_zip_in_supported_extensions(self):
+        """'.zip' should be in SUPPORTED_EXTENSIONS."""
+        assert '.zip' in HapExtractor.SUPPORTED_EXTENSIONS
+
+    def test_find_packages_includes_zip(self):
+        """find_packages() should discover .zip files."""
+        for name in ["app.hap", "bundle.zip", "readme.txt"]:
+            path = os.path.join(self.tmpdir, name)
+            if name.endswith((".hap", ".zip")):
+                _create_hap(path)
+            else:
+                with open(path, 'w') as f:
+                    f.write("not a package")
+
+        packages = self.extractor.find_packages(self.tmpdir)
+        extensions = {os.path.splitext(p)[1] for p in packages}
+        assert '.zip' in extensions
+        assert '.hap' in extensions
+        assert len(packages) == 2
+
+    def test_extract_flat_zip(self):
+        """A .zip with libs/<abi>/*.so should extract like a HAP."""
+        zip_path = os.path.join(self.tmpdir, "flat_pkg.zip")
+        _create_hap(zip_path, bundle_name="com.test.flatzip")
+
+        result = self.extractor.extract(zip_path)
+        assert len(result.so_files) >= 1
+        assert result.metadata.package_type == 'zip'
+        self.extractor.cleanup(result)
+
+    def test_extract_nested_zip_with_haps(self):
+        """A .zip containing .hap files should extract sub-packages."""
+        inner_hap = os.path.join(self.tmpdir, "inner.hap")
+        _create_hap(inner_hap, bundle_name="com.test.inner",
+                     so_names=["libinner.so"])
+
+        container_path = os.path.join(self.tmpdir, "container.zip")
+        with zipfile.ZipFile(container_path, 'w') as zf:
+            zf.write(inner_hap, "inner.hap")
+
+        result = self.extractor.extract(container_path)
+        assert len(result.sub_packages) == 1
+        assert len(result.sub_packages[0].so_files) >= 1
+        self.extractor.cleanup(result)
+
+    def test_extract_nested_zip_with_zip(self):
+        """A .zip containing another .zip should extract recursively."""
+        inner_zip = os.path.join(self.tmpdir, "inner.zip")
+        _create_hap(inner_zip, bundle_name="com.test.nested",
+                     so_names=["libnested.so"])
+
+        outer_path = os.path.join(self.tmpdir, "outer.zip")
+        with zipfile.ZipFile(outer_path, 'w') as zf:
+            zf.write(inner_zip, "inner.zip")
+
+        result = self.extractor.extract(outer_path)
+        assert len(result.sub_packages) == 1
+        total_so = sum(len(sub.so_files) for sub in result.sub_packages)
+        assert total_so >= 1
+        self.extractor.cleanup(result)
+
+
+class TestPerPackageOutput:
+    """Tests for per-package directory output helpers."""
+
+    def test_resolve_hap_output_names_basic(self):
+        from openssl_scanner.__main__ import _resolve_hap_output_names
+
+        packages = ["/a/MyApp.hap", "/b/Plugin.hap"]
+        result = _resolve_hap_output_names(packages, "/out", ".xlsx")
+        assert result["/a/MyApp.hap"] == "/out/MyApp.xlsx"
+        assert result["/b/Plugin.hap"] == "/out/Plugin.xlsx"
+
+    def test_resolve_hap_output_names_collision(self):
+        from openssl_scanner.__main__ import _resolve_hap_output_names
+
+        packages = ["/a/MyApp.hap", "/b/MyApp.hap", "/c/Other.zip"]
+        result = _resolve_hap_output_names(packages, "/out", ".xlsx")
+        values = list(result.values())
+        assert len(set(values)) == 3
+        assert "/out/MyApp.xlsx" in values
+        assert "/out/MyApp_2.xlsx" in values
+        assert "/out/Other.xlsx" in values
+
+    def test_resolve_hap_output_names_json(self):
+        from openssl_scanner.__main__ import _resolve_hap_output_names
+
+        packages = ["/x/test.zip"]
+        result = _resolve_hap_output_names(packages, "/out", ".json")
+        assert result["/x/test.zip"] == "/out/test.json"
+
+
+    def test_resolve_hap_output_names_global_collision(self):
+        """Foo.hap + Foo_2.hap should not produce duplicate Foo_2.xlsx."""
+        from openssl_scanner.__main__ import _resolve_hap_output_names
+
+        packages = ["/a/Foo.hap", "/b/Foo_2.hap", "/c/Foo.hsp"]
+        result = _resolve_hap_output_names(packages, "/out", ".xlsx")
+        values = list(result.values())
+        assert len(set(values)) == 3
+
+
+class TestZipAdvanced:
+    """Advanced ZIP tests: mixed content, depth limits."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.extractor = HapExtractor()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_extract_zip_mixed_outer_and_nested(self):
+        """A .zip with both outer libs and nested .hap should include both."""
+        inner_hap = os.path.join(self.tmpdir, "inner.hap")
+        _create_hap(inner_hap, bundle_name="com.test.inner",
+                     so_names=["libinner.so"])
+
+        mixed_path = os.path.join(self.tmpdir, "mixed.zip")
+        with zipfile.ZipFile(mixed_path, 'w') as zf:
+            zf.writestr("libs/arm64-v8a/libouter.so", _minimal_elf64())
+            zf.write(inner_hap, "inner.hap")
+
+        result = self.extractor.extract(mixed_path)
+        all_basenames = [os.path.basename(f) for f in result.so_files]
+        assert "libouter.so" in all_basenames
+        assert len(result.sub_packages) == 1
+        sub_basenames = [os.path.basename(f)
+                         for f in result.sub_packages[0].so_files]
+        assert "libinner.so" in sub_basenames
+        self.extractor.cleanup(result)
+
+    def test_zip_max_depth_limit(self):
+        """Deeply nested ZIPs should stop at MAX_ZIP_DEPTH."""
+        prev = os.path.join(self.tmpdir, "leaf.zip")
+        _create_hap(prev, bundle_name="com.test.leaf",
+                     so_names=["libleaf.so"])
+
+        for i in range(self.extractor.MAX_ZIP_DEPTH + 2):
+            wrapper = os.path.join(self.tmpdir, f"wrap_{i}.zip")
+            with zipfile.ZipFile(wrapper, 'w') as zf:
+                zf.write(prev, os.path.basename(prev))
+            prev = wrapper
+
+        result = self.extractor.extract(prev)
+        assert result.so_files is not None
+        self.extractor.cleanup(result)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

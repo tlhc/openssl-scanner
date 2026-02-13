@@ -12,7 +12,7 @@ cd openssl-scanner
 ./scan scan /path/to/binary -o report.json
 
 # 扫描 OpenHarmony 应用包
-./scan hap MyApp.hap -o report.json
+./scan hap MyApp.hap -o report.xlsx
 
 # 聚合
 ./scan aggregate /reports/ -o aggregated.json
@@ -53,7 +53,7 @@ Commands:
   source-merge  合并多个源码扫描 XLSX 报告
   combo-scan    一键完成探测+扫描+合并流水线
   proc          扫描运行中进程加载的 OpenSSL 依赖（Linux）
-  hap           扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP）
+  hap           扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP/ZIP）
   update-data   更新内置 OpenSSL 符号和宏数据
   aggregate     聚合多个扫描报告
   export        导出为 HTML 或 Excel
@@ -82,7 +82,7 @@ Commands:
 | `target` | 扫描目标（文件或目录） |
 | `--openssl-lib PATH` | 指定 libcrypto.so 路径（默认自动检测） |
 | `--openssl-ssl PATH` | 指定 libssl.so 路径 |
-| `-o, --output FILE` | 输出文件（默认: openssl_deps_report.json） |
+| `-o, --output FILE` | 输出文件（默认: openssl_deps_report.xlsx） |
 | `-L, --lib-path PATH` | 额外库搜索路径（可多次使用） |
 | `--sysroot PATH` | 根文件系统路径（自动发现所有库目录） |
 | `-j, --jobs N` | 并行线程数（默认: CPU 核心数） |
@@ -720,7 +720,7 @@ $TMPDIR/                               系统临时目录
 
 ## hap - 包扫描命令
 
-扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP）中打包的 native .so 库的 OpenSSL 依赖。
+扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP/ZIP）中打包的 native .so 库的 OpenSSL 依赖。
 
 ### 背景
 
@@ -738,6 +738,7 @@ OpenHarmony 应用包本质是 ZIP 压缩文件，native 库位于 `libs/<abi>/`
 | **HAR** | .har | Harmony Archive，静态共享包 |
 | **HSP** | .hsp | Harmony Shared Package，动态共享包 |
 | **APP** | .app | 应用发布包，内含多个 HAP/HSP |
+| **ZIP** | .zip | ZIP 压缩包，支持嵌套 HAP/HAR/HSP/ZIP（递归提取） |
 
 ### 语法
 
@@ -749,11 +750,11 @@ OpenHarmony 应用包本质是 ZIP 压缩文件，native 库位于 `libs/<abi>/`
 
 | 参数 | 说明 |
 |------|------|
-| `target` | HAP/HAR/HSP/APP 文件或包含包的目录 |
+| `target` | HAP/HAR/HSP/APP/ZIP 文件或包含包的目录 |
 | `--abi ABI` | 指定目标 ABI（默认自动选择，优先 arm64-v8a） |
 | `--openssl-lib PATH` | 指定外部 libcrypto.so（包未内置 OpenSSL 时使用） |
 | `--openssl-ssl PATH` | 指定外部 libssl.so（可选） |
-| `-o, --output FILE` | 输出文件（默认: openssl_deps_report.json） |
+| `-o, --output PATH` | 输出文件(.xlsx/.html/.json)或目录（逐包独立报告）（默认: openssl_deps_report.xlsx） |
 | `-j, --jobs N` | 并行线程数（默认: CPU 核心数） |
 | `--json-only` | 仅输出 JSON |
 | `--keep-extracted` | 保留解压的临时文件 |
@@ -771,31 +772,95 @@ arm64-v8a > armeabi-v7a > armeabi > x86_64 > x86
 ### 示例
 
 ```bash
-# 扫描单个 HAP 包
-./scan hap MyApp.hap -o report.json
+# 扫描单个 HAP 包（默认输出 XLSX + JSON）
+./scan hap MyApp.hap -o report.xlsx
 
 # 扫描 APP 发布包（自动分析所有内含 HAP/HSP）
-./scan hap MyApp.app -o report.json
+./scan hap MyApp.app -o report.xlsx
+
+# 扫描 ZIP 包（自动处理嵌套 HAP/ZIP，递归提取）
+./scan hap MyBundle.zip -o report.xlsx
 
 # 扫描第三方 HAR 库
-./scan hap thirdparty.har -o report.json
+./scan hap thirdparty.har -o report.xlsx
 
 # 指定 ABI
-./scan hap MyApp.hap --abi armeabi-v7a -o report.json
+./scan hap MyApp.hap --abi armeabi-v7a -o report.xlsx
 
-# 批量扫描目录下所有包
-./scan hap /path/to/packages/ -o report.json
+# 批量扫描目录（单个合并报告）
+./scan hap /path/to/packages/ -o report.xlsx
+
+# 批量扫描目录（逐包独立报告，-o 指向目录）
+./scan hap /path/to/packages/ -o /tmp/reports/
+#   -> /tmp/reports/MyApp.xlsx   + MyApp.json
+#   -> /tmp/reports/Plugin.xlsx  + Plugin.json
+#   -> /tmp/reports/MyBundle.xlsx + MyBundle.json
 
 # 使用外部 OpenSSL 参考库（包未内置时）
-./scan hap MyApp.hap --openssl-lib /system/lib64/libcrypto.so.3 -o report.json
+./scan hap MyApp.hap --openssl-lib /system/lib64/libcrypto.so.3 -o report.xlsx
+
+# JSON 输出
+./scan hap MyApp.hap -o report.json
+
+# HTML 输出
+./scan hap MyApp.hap -o report.html
 
 # 保留解压文件用于调试
-./scan hap MyApp.hap -o report.json --keep-extracted -v
-
-# 导出 HTML 报告
-./scan hap MyApp.hap -o report.json
-./scan export report.json -o report.html
+./scan hap MyApp.hap -o report.xlsx --keep-extracted -v
 ```
+
+### `-o` 输出路径自动识别
+
+与 `source` 命令类似，`-o` 根据路径特征自动选择输出模式：
+
+| 路径形式 | 识别规则 | 输出行为 |
+|----------|----------|----------|
+| `report.xlsx` | 有 `.xlsx` 扩展名 | 文件模式：所有包合并为单个报告 |
+| `report.html` | 有 `.html` 扩展名 | 文件模式：合并 HTML 报告 |
+| `report.json` | 有 `.json` 扩展名 | 文件模式：合并 JSON 报告 |
+| `/tmp/reports` | 无扩展名 | 目录模式：逐包独立报告 |
+| `/tmp/existing_dir/` | 已存在目录 | 目录模式：逐包独立报告 |
+
+#### 文件模式（合并报告）
+
+```bash
+# 单个包 -> 单个报告
+./scan hap MyApp.hap -o report.xlsx
+#   -> report.xlsx + report.json
+
+# 多个包（目录扫描）-> 合并为单个报告
+./scan hap /path/to/packages/ -o report.xlsx
+#   -> report.xlsx (所有包合并)
+```
+
+#### 目录模式（逐包独立报告）
+
+```bash
+# -o 指向目录 -> 每个包生成独立报告
+./scan hap /path/to/packages/ -o /tmp/reports/
+#   -> /tmp/reports/
+#        MyApp.xlsx   + MyApp.json
+#        Plugin.xlsx  + Plugin.json
+#        MyBundle.xlsx + MyBundle.json
+
+# 仅输出 JSON
+./scan hap /path/to/packages/ -o /tmp/reports/ --json-only
+#   -> /tmp/reports/
+#        MyApp.json
+#        Plugin.json
+#        MyBundle.json
+```
+
+逐包独立报告适合需要分别归档或对比分析各包的场景。文件名取自包名（去扩展名），重名时自动追加 `_2`、`_3` 等后缀。
+
+### ZIP 嵌套包处理
+
+ZIP 文件可能是：
+- **扁平包**：内含 `libs/<abi>/*.so`，按普通包处理
+- **容器包**：内含嵌套的 `.hap`/`.har`/`.hsp`/`.zip`，递归提取并分析
+- **混合包**：同时包含外层 native 库和嵌套子包
+
+嵌套深度限制为 5 层，防止恶意递归。
 
 ### OpenSSL 检测逻辑
 
@@ -849,12 +914,12 @@ arm64-v8a > armeabi-v7a > armeabi > x86_64 > x86
 
 ### 包类型差异
 
-| | HAP/HAR/HSP | APP |
-|--|-------------|-----|
-| 内部结构 | libs/\<abi\>/*.so + module.json | 多个 .hap/.hsp 子包 |
-| 扫描方式 | 直接提取 native 库 | 逐个解压子包后分析 |
-| 元数据 | 单个 module.json | 外层 + 每个子包各有 module.json |
-| 报告 | 单包报告 | 包含子包聚合信息 |
+| | HAP/HAR/HSP | APP | ZIP |
+|--|-------------|-----|-----|
+| 内部结构 | libs/\<abi\>/*.so + module.json | 多个 .hap/.hsp 子包 | 扁平包或嵌套 .hap/.zip |
+| 扫描方式 | 直接提取 native 库 | 逐个解压子包后分析 | 自动检测：扁平则直接提取，嵌套则递归处理 |
+| 元数据 | 单个 module.json | 外层 + 每个子包各有 module.json | module.json（如有）|
+| 报告 | 单包报告 | 包含子包聚合信息 | 扁平为单包报告，嵌套则聚合子包 |
 
 ---
 
@@ -1236,14 +1301,17 @@ depth 2: 二级依赖引用的符号
 
 **Q: hap 命令和 scan 命令有什么区别?**
 
-`scan` 直接分析 ELF 文件或目录，`hap` 先从 OpenHarmony 应用包（ZIP 格式）中提取 native .so 库，再进行分析。`hap` 还会解析 `module.json` 提取包元数据（bundleName、版本等）。
+`scan` 直接分析 ELF 文件或目录，`hap` 先从 OpenHarmony 应用包（HAP/APP/ZIP 等格式）中提取 native .so 库，再进行分析。`hap` 还会解析 `module.json` 提取包元数据（bundleName、版本等）。ZIP 包支持嵌套的 HAP/ZIP 递归提取。
 
 ```bash
 # scan: 直接分析 ELF
 ./scan scan /system/lib64/libcurl.so -o report.json
 
 # hap: 从包中提取后分析
-./scan hap MyApp.hap -o report.json
+./scan hap MyApp.hap -o report.xlsx
+
+# hap: ZIP 包（嵌套 HAP/ZIP 自动递归提取）
+./scan hap MyBundle.zip -o report.xlsx
 ```
 
 **Q: HAP 包没有内置 OpenSSL 怎么办?**
@@ -1251,7 +1319,7 @@ depth 2: 二级依赖引用的符号
 使用 `--openssl-lib` 指定设备上或 SDK 中的 OpenSSL 库作为参考：
 
 ```bash
-./scan hap MyApp.hap --openssl-lib /path/to/libcrypto.so.3 -o report.json
+./scan hap MyApp.hap --openssl-lib /path/to/libcrypto.so.3 -o report.xlsx
 ```
 
 **Q: HTML 报告需要网络吗?**

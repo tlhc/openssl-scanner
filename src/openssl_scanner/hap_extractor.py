@@ -56,7 +56,7 @@ class HapExtractor:
     under libs/<abi>/.
     """
 
-    SUPPORTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.app'}
+    SUPPORTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.app', '.zip'}
     ABI_PRIORITY = ['arm64-v8a', 'armeabi-v7a', 'armeabi', 'x86_64', 'x86']
     ELF_MAGIC = b'\x7fELF'
     MAX_EXTRACT_SIZE = 2 * 1024 * 1024 * 1024
@@ -100,6 +100,9 @@ class HapExtractor:
 
         if ext == '.app':
             return self._extract_app(package_path, abi, extract_dir)
+
+        if ext == '.zip':
+            return self._extract_zip(package_path, abi, extract_dir)
 
         return self._extract_single(package_path, abi, extract_dir)
 
@@ -262,6 +265,114 @@ class HapExtractor:
         all_so_files = []
         openssl_lib = None
         openssl_ssl = None
+        for sub in sub_packages:
+            all_so_files.extend(sub.so_files)
+            if sub.openssl_lib and not openssl_lib:
+                openssl_lib = sub.openssl_lib
+            if sub.openssl_ssl and not openssl_ssl:
+                openssl_ssl = sub.openssl_ssl
+
+        return HapExtractResult(
+            metadata=metadata,
+            extract_dir=extract_dir,
+            so_files=all_so_files,
+            openssl_lib=openssl_lib,
+            openssl_ssl=openssl_ssl,
+            sub_packages=sub_packages
+        )
+
+    NESTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.zip'}
+
+    MAX_ZIP_DEPTH = 5
+
+    def _extract_zip(self, zip_path: str, abi: Optional[str],
+                     extract_dir: Optional[str],
+                     _depth: int = 0) -> HapExtractResult:
+        """Extract a ZIP file, handling nested packages if present.
+
+        A .zip may be either:
+        - A flat package (like .hap) with libs/<abi>/*.so
+        - A container with nested .hap/.har/.hsp/.zip inside
+        - Both (outer libs + nested packages)
+        Nested packages are extracted and processed recursively.
+        Outer libs/<abi>/*.so are always extracted alongside.
+        """
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            nested = [e for e in zf.namelist()
+                      if os.path.splitext(e)[1].lower() in self.NESTED_EXTENSIONS
+                      and not e.startswith('__MACOSX')]
+
+        if not nested:
+            return self._extract_single(zip_path, abi, extract_dir)
+
+        if _depth >= self.MAX_ZIP_DEPTH:
+            logger.warning("Max nesting depth (%d) reached for %s, "
+                           "treating as flat package", self.MAX_ZIP_DEPTH,
+                           zip_path)
+            return self._extract_single(zip_path, abi, extract_dir)
+
+        if extract_dir is None:
+            extract_dir = tempfile.mkdtemp(prefix='hap_scan_')
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            module_config = self._read_module_json(zf)
+            abis, native_libs = self._discover_native_libs(zf)
+            metadata = self._build_metadata(
+                zip_path, 'zip', module_config, abis, native_libs
+            )
+
+            outer_so_files = []
+            if abis:
+                target_abis = [abi] if abi and abi in abis else abis
+                for abi_name in target_abis:
+                    abi_dir = os.path.join(extract_dir, abi_name)
+                    os.makedirs(abi_dir, exist_ok=True)
+                    extracted = self._extract_abi_libs(zf, abi_name, abi_dir)
+                    outer_so_files.extend(extracted)
+                if outer_so_files:
+                    logger.info("Extracted %d outer libs from %s",
+                                len(outer_so_files), zip_path)
+
+            sub_packages = []
+            seen_names = set()
+            for entry in nested:
+                safe_name = os.path.basename(entry)
+                if not safe_name:
+                    logger.warning("Skipping entry with empty basename: %s", entry)
+                    continue
+
+                if safe_name in seen_names:
+                    base, ext = os.path.splitext(safe_name)
+                    counter = 2
+                    while f"{base}_{counter}{ext}" in seen_names:
+                        counter += 1
+                    safe_name = f"{base}_{counter}{ext}"
+                seen_names.add(safe_name)
+
+                sub_path = os.path.join(extract_dir, safe_name)
+                real_sub = os.path.realpath(sub_path)
+                real_base = os.path.realpath(extract_dir)
+                if not real_sub.startswith(real_base + os.sep):
+                    logger.warning("Skipping path traversal entry: %s", entry)
+                    continue
+
+                self._safe_extract_member(zf, entry, sub_path)
+
+                try:
+                    sub_ext = os.path.splitext(sub_path)[1].lower()
+                    if sub_ext == '.zip':
+                        sub_result = self._extract_zip(
+                            sub_path, abi, None, _depth=_depth + 1)
+                    else:
+                        sub_result = self._extract_single(sub_path, abi, None)
+                    sub_packages.append(sub_result)
+                except (ValueError, zipfile.BadZipFile, KeyError) as e:
+                    logger.warning(
+                        "Failed to process nested package %s: %s", entry, e
+                    )
+
+        all_so_files = list(outer_so_files)
+        openssl_lib, openssl_ssl = self._detect_openssl(outer_so_files)
         for sub in sub_packages:
             all_so_files.extend(sub.so_files)
             if sub.openssl_lib and not openssl_lib:

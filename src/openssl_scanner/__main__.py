@@ -275,7 +275,7 @@ def create_hap_parser(subparsers) -> None:
     """Create parser for hap command."""
     hap_parser = subparsers.add_parser(
         'hap',
-        help='Scan HAP/HAR/HSP/APP packages for OpenSSL dependencies',
+        help='Scan HAP/HAR/HSP/APP/ZIP packages for OpenSSL dependencies',
         epilog='''
 Examples:
   # Scan single HAP (XLSX output, default)
@@ -296,8 +296,14 @@ Examples:
   # Specify ABI to scan
   openssl-scanner hap MyApp.hap --abi armeabi-v7a -o report.xlsx
 
-  # Batch scan directory of packages
+  # Scan ZIP package (nested HAP/ZIP supported)
+  openssl-scanner hap MyBundle.zip -o report.xlsx
+
+  # Batch scan directory (single merged report)
   openssl-scanner hap /path/to/packages/ -o report.xlsx
+
+  # Batch scan directory (per-package independent reports)
+  openssl-scanner hap /path/to/packages/ -o /tmp/reports/
 
   # With external OpenSSL reference library
   openssl-scanner hap MyApp.hap --openssl-lib /system/lib64/libcrypto.so.3
@@ -307,7 +313,7 @@ Examples:
 
     hap_parser.add_argument(
         'target',
-        help='HAP/HAR/HSP/APP file or directory containing packages',
+        help='HAP/HAR/HSP/APP/ZIP file or directory containing packages',
     )
 
     hap_parser.add_argument(
@@ -330,7 +336,7 @@ Examples:
     hap_parser.add_argument(
         '-o', '--output',
         default='openssl_deps_report.xlsx',
-        help='Output report file (.xlsx, .html, or .json) (default: openssl_deps_report.xlsx)',
+        help='Output file (.xlsx/.html/.json) or directory for per-package reports (default: openssl_deps_report.xlsx)',
     )
 
     hap_parser.add_argument(
@@ -937,7 +943,7 @@ def cmd_hap(args) -> int:
     if os.path.isdir(target):
         packages = extractor.find_packages(target)
         if not packages:
-            logger.error("No HAP/HAR/HSP/APP packages found in: %s", target)
+            logger.error("No HAP/HAR/HSP/APP/ZIP packages found in: %s", target)
             return 1
         logger.info("Found %d packages in %s", len(packages), target)
     else:
@@ -945,6 +951,7 @@ def cmd_hap(args) -> int:
 
     reporter = Reporter()
     all_results = []
+    scanned_packages = []
     start_time = time.time()
 
     try:
@@ -1011,6 +1018,7 @@ def cmd_hap(args) -> int:
             }
 
             all_results.append(result)
+            scanned_packages.append(pkg_path)
 
             if not args.keep_extracted:
                 extractor.cleanup(extract_result)
@@ -1020,6 +1028,16 @@ def cmd_hap(args) -> int:
         if not all_results:
             logger.error("No packages could be scanned successfully")
             return 1
+
+        output_path = os.path.abspath(args.output)
+        output_ext = os.path.splitext(output_path)[1].lower()
+        per_package = (not output_ext) or os.path.isdir(output_path)
+
+        if per_package:
+            return _hap_write_per_package(
+                all_results, scanned_packages, reporter, output_path,
+                args.json_only, elapsed
+            )
 
         if len(all_results) == 1:
             final_result = all_results[0]
@@ -1031,14 +1049,14 @@ def cmd_hap(args) -> int:
             ]
 
         json_report = reporter.generate_json(final_result)
-        output_path = os.path.abspath(args.output)
-        output_ext = os.path.splitext(output_path)[1].lower()
         output_dir = os.path.dirname(output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        if output_ext == '.json':
-            with open(output_path, 'w', encoding='utf-8') as f:
+        if output_ext == '.json' or args.json_only:
+            json_out = output_path if output_ext == '.json' \
+                else os.path.splitext(output_path)[0] + '.json'
+            with open(json_out, 'w', encoding='utf-8') as f:
                 f.write(json_report)
         else:
             json_path = os.path.splitext(output_path)[0] + '.json'
@@ -1065,6 +1083,61 @@ def cmd_hap(args) -> int:
     except Exception as e:
         logger.exception("Scan failed: %s", e)
         return 1
+
+
+def _resolve_hap_output_names(packages, output_dir, ext):
+    """Map package paths to unique output file paths."""
+    used = set()
+    result = {}
+    for pkg in packages:
+        base = os.path.splitext(os.path.basename(pkg))[0]
+        candidate = base
+        counter = 2
+        while candidate in used:
+            candidate = f"{base}_{counter}"
+            counter += 1
+        used.add(candidate)
+        result[pkg] = os.path.join(output_dir, candidate + ext)
+    return result
+
+
+def _hap_write_per_package(all_results, packages, reporter,
+                           output_dir, json_only, elapsed):
+    """Write independent per-package reports to a directory."""
+    os.makedirs(output_dir, exist_ok=True)
+    fmt_ext = '.json' if json_only else '.xlsx'
+    names = _resolve_hap_output_names(packages, output_dir, fmt_ext)
+    pkg_to_result = dict(zip(packages, all_results))
+    total = len(pkg_to_result)
+    idx = 0
+
+    for pkg_path, result in pkg_to_result.items():
+        idx += 1
+        out_path = names[pkg_path]
+        json_report = reporter.generate_json(result)
+
+        json_path = os.path.splitext(out_path)[0] + '.json'
+        with open(json_path, 'w', encoding='utf-8') as f:
+            f.write(json_report)
+
+        if not json_only:
+            from .exporter import Exporter
+            Exporter().export(json_path, out_path)
+
+        pkg_name = os.path.basename(pkg_path)
+        out_name = os.path.basename(out_path)
+        sym_count = len(result.all_unique_symbols)
+        file_count = result.files_with_openssl
+
+        if not json_only:
+            print(f"[{idx}/{total}] {pkg_name} -> {out_name}"
+                  f" ({sym_count} OpenSSL symbols, {file_count} files)")
+
+    if not json_only:
+        print(f"\nBatch complete: {total} packages scanned"
+              f" in {elapsed:.2f}s -> {output_dir}/")
+
+    return 0
 
 
 def _resolve_output_names(targets, output_arg, ext):
