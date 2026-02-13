@@ -279,6 +279,9 @@ class Reporter:
             },
             'openssl_symbols_used': file_result.openssl_symbols,
             'static_openssl': file_result.static_openssl,
+            'static_openssl_version': file_result.static_openssl_version,
+            'static_ssl_library': file_result.static_ssl_library,
+            'openssl_exported': file_result.openssl_exported,
             'error': file_result.error,
         }
         if file_result.uses_dlopen:

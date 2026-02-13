@@ -509,8 +509,13 @@ class TestClassifyHapDetection:
         assert s_set == {"EVP_sha256"} and d_set == {"SSL_connect"}
         assert ossl_type == 'System-Link'
 
-    def test_self_contained_static_majority(self):
-        """Package with many static symbols and few dynamic -> Self-Contained."""
+    def test_static_majority_but_unresolved_dynamic(self):
+        """Static lib self-sufficient but dynamic lib unresolved -> System-Link.
+
+        Per-library resolution: libcrypto.so is self-sufficient (static),
+        but app.so has dynamic OpenSSL symbols with no bundled .so to satisfy
+        them.  The HAP is NOT Self-Contained despite static count > dynamic.
+        """
         from openssl_scanner.scanner import ScanResult, FileResult
         from openssl_scanner.__main__ import _classify_hap_detection
 
@@ -531,7 +536,7 @@ class TestClassifyHapDetection:
         method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert method == 'Mixed'
         assert len(s_set) == 50 and len(d_set) == 2
-        assert ossl_type == 'Self-Contained'
+        assert ossl_type == 'System-Link'
 
     def test_system_link_dynamic_majority(self):
         """Package with many dynamic symbols and few static -> System-Link."""
@@ -713,6 +718,319 @@ class TestClassifyHapDetection:
         assert len(d_set) == 3
         assert ossl_type == 'System-Link'
         assert len(s_set | d_set | dl_set) == 5
+
+    def test_bundled_resolves_dynamic_dt_needed(self):
+        """HAP with bundled libcrypto.so.3 satisfies DT_NEEDED -> Self-Contained.
+
+        Production flow: cmd_hap removes bundled OpenSSL .so before scanning,
+        storing filenames in package_info['bundled_openssl_files'].  app.so
+        DT_NEEDs libcrypto.so.3 which matches the bundled lib stem.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/libs/arm64-v8a/app.so",
+                       file_type="shared_library", arch="aarch64",
+                       direct_deps=["libcrypto.so.3"], openssl_direct=True,
+                       openssl_transitive=False,
+                       openssl_libs=["libcrypto.so.3"],
+                       openssl_symbols=["SSL_connect", "SSL_read"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'Self-Contained'
+
+    def test_bundled_resolves_dlopen(self):
+        """HAP with bundled libcrypto.so.3 satisfies dlopen -> Self-Contained.
+
+        lib.so does dlopen("libcrypto.so"), stem matches bundled libcrypto.so.3.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/libs/arm64-v8a/lib.so",
+                       file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read"],
+                       uses_dlopen=True, dlsym_symbols=["SSL_read"],
+                       dlopen_libs=["libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'Self-Contained'
+
+    def test_static_plus_dlopen_no_bundle(self):
+        """Static lib with dlopen symbols, no bundled .so -> System-Link.
+
+        One lib has static OpenSSL for its own needs but also dlopen-loads
+        additional symbols.  Without bundled .so, the dlopen part is unresolved.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256", "SSL_read"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=["SSL_read"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert s_set == {"EVP_sha256"}
+        assert dl_set == {"SSL_read"}
+        assert ossl_type == 'System-Link'
+
+    def test_static_plus_dlopen_with_bundle(self):
+        """Static lib with dlopen symbols, bundled .so present -> Self-Contained.
+
+        The static portion self-resolves; the dlopen("libcrypto.so") resolves
+        via bundled libcrypto.so.3 (stem match).
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/libs/arm64-v8a/lib.so",
+                       file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256", "SSL_read"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=["SSL_read"],
+                       dlopen_libs=["libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'Self-Contained'
+
+    def test_dlopen_partial_bundle_system_link(self):
+        """dlopen needs both libcrypto + libssl but only libcrypto bundled.
+
+        Per-target resolution: ALL OpenSSL dlopen targets must resolve.
+        libssl.so is missing -> System-Link.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read", "EVP_sha256"],
+                       uses_dlopen=True,
+                       dlsym_symbols=["SSL_read", "EVP_sha256"],
+                       dlopen_libs=["libcrypto.so", "libssl.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'System-Link'
+
+    def test_dlopen_absolute_path_resolved(self):
+        """dlopen with absolute path '/system/lib64/libcrypto.so' is normalized.
+
+        Basename extraction ensures path prefix does not break matching.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read"],
+                       uses_dlopen=True, dlsym_symbols=["SSL_read"],
+                       dlopen_libs=["/system/lib64/libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'Self-Contained'
+
+    def test_hybrid_static_plus_dt_needed_unresolved(self):
+        """Static OpenSSL lib that also DT_NEEDs external libssl -> System-Link.
+
+        File implements some OpenSSL symbols (static) but also imports from
+        libssl.so.3 via DT_NEEDED.  Without bundled libssl, the dynamic part
+        is unresolved.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=["libssl.so.3"],
+                       openssl_direct=True,
+                       openssl_transitive=False,
+                       openssl_libs=["libssl.so.3"],
+                       openssl_symbols=["EVP_sha256", "SSL_connect"],
+                       static_openssl=True),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'System-Link'
+
+    def test_hybrid_static_plus_dt_needed_resolved(self):
+        """Static OpenSSL lib that DT_NEEDs libssl, bundled -> Self-Contained."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libssl.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=["libssl.so.3"],
+                       openssl_direct=True,
+                       openssl_transitive=False,
+                       openssl_libs=["libssl.so.3"],
+                       openssl_symbols=["EVP_sha256", "SSL_connect"],
+                       static_openssl=True),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'Self-Contained'
+
+    def test_bundled_openssl_files_absent_fallback(self):
+        """bundled_openssl=True but bundled_openssl_files missing -> System-Link.
+
+        Tests backward compat: old scan results without bundled_openssl_files
+        key produce conservative System-Link (not crash).
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {'bundled_openssl': True}
+        result.files_detail = [
+            FileResult(path="/app.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=["libcrypto.so.3"],
+                       openssl_direct=True, openssl_transitive=False,
+                       openssl_libs=["libcrypto.so.3"],
+                       openssl_symbols=["SSL_connect"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'System-Link'
+
+    def test_harflix_scenario_system_link(self):
+        """Harflix-like: static ijkplayer + dlopen reddownload -> System-Link.
+
+        libijkplayer.so: 5215 static OpenSSL symbols, self-sufficient.
+        libreddownload.so: 756 dlopen-detected symbols, no bundled .so.
+        The HAP is NOT Self-Contained because libreddownload.so needs system
+        OpenSSL to resolve its dlopen("libcrypto.so") call.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        static_syms = [f"OSSL_{i}" for i in range(100)]
+        dlopen_syms = [f"EVP_{i}" for i in range(50)]
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/libijkplayer.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=static_syms, static_openssl=True),
+            FileResult(path="/libreddownload.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=dlopen_syms,
+                       uses_dlopen=True, dlsym_symbols=dlopen_syms),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert len(s_set) == 100
+        assert len(dl_set) == 50
+        assert ossl_type == 'System-Link'
+
+    def test_multiple_static_all_self_sufficient(self):
+        """Multiple static-only libs with no external deps -> Self-Contained."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"], static_openssl=True),
+            FileResult(path="/b.so", file_type="shared_library", arch="aarch64",
+                       direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect"], static_openssl=True),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert s_set == {"EVP_sha256", "SSL_connect"}
+        assert ossl_type == 'Self-Contained'
+
+    def test_dlopen_no_lib_name_no_bundle(self):
+        """dlopen with empty dlopen_libs (unknown target) -> System-Link.
+
+        When dlopen_libs is empty, the scanner couldn't determine which .so
+        the library is trying to load.  Without a bundled OpenSSL, this is
+        conservatively treated as unresolved.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import _classify_hap_detection
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_read"],
+                       uses_dlopen=True, dlsym_symbols=["SSL_read"],
+                       dlopen_libs=[]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert ossl_type == 'System-Link'
 
 
 class TestBundledOpenSSLDetection:

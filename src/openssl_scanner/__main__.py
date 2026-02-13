@@ -1097,12 +1097,14 @@ def cmd_hap(args) -> int:
                 logger.info("Loaded %d built-in OpenSSL symbols", count)
 
                 removed = 0
+                removed_libs = []
                 for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
                     for fname in filenames:
                         if matcher.is_openssl_library(fname):
                             fpath = os.path.join(dirpath, fname)
                             os.remove(fpath)
                             removed += 1
+                            removed_libs.append(fname)
                             logger.debug("Excluded OpenSSL lib: %s", fpath)
                 if removed:
                     logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
@@ -1133,6 +1135,8 @@ def cmd_hap(args) -> int:
                     'bundled_openssl': (removed > 0
                                         or extract_result.openssl_lib is not None
                                         or extract_result.openssl_ssl is not None),
+                    'bundled_openssl_files': _collect_bundled_names(
+                        removed_libs, extract_result),
                 }
 
                 all_results.append(result)
@@ -1466,22 +1470,78 @@ _HAP_HIGHLIGHT_CATS = [
 ]
 
 
+def _collect_bundled_names(removed_libs, extract_result):
+    """Collect bundled OpenSSL library basenames from multiple sources."""
+    names = list(removed_libs)
+    if extract_result.openssl_lib:
+        bn = os.path.basename(extract_result.openssl_lib)
+        if bn not in names:
+            names.append(bn)
+    if extract_result.openssl_ssl:
+        bn = os.path.basename(extract_result.openssl_ssl)
+        if bn not in names:
+            names.append(bn)
+    return names
+
+
+def _lib_stem(name):
+    """Extract library stem: 'libcrypto.so.3' -> 'libcrypto'."""
+    bn = os.path.basename(name)
+    return bn.split('.so')[0] if '.so' in bn else bn
+
+
+def _dlopen_targets_resolved(dlopen_libs, bundled_basenames, patterns):
+    """Check if ALL OpenSSL dlopen targets are resolved by bundled libs.
+
+    Returns False (unresolved) when dlopen_libs is empty (unknown target)
+    or any OpenSSL target lacks a matching bundled lib.
+    """
+    if not dlopen_libs or not bundled_basenames:
+        return False
+    ossl_targets = [lib for lib in dlopen_libs
+                    if any(_lib_stem(lib).lower().startswith(p)
+                           for p in patterns)]
+    if not ossl_targets:
+        return False
+    bundled_stems = {_lib_stem(b).lower() for b in bundled_basenames}
+    return all(_lib_stem(t).lower() in bundled_stems for t in ossl_targets)
+
+
+def _dt_needed_resolved(openssl_libs, bundled_basenames, patterns):
+    """Check if DT_NEEDED OpenSSL libs are all resolved by bundled libs.
+
+    Returns False when no OpenSSL lib in DT_NEEDED or when any needed
+    OpenSSL lib lacks a matching bundled lib.
+    """
+    needed = [lib for lib in openssl_libs
+              if any(_lib_stem(lib).lower().startswith(p)
+                     for p in patterns)]
+    if not needed or not bundled_basenames:
+        return False
+    bundled_stems = {_lib_stem(b).lower() for b in bundled_basenames}
+    return all(_lib_stem(lib).lower() in bundled_stems for lib in needed)
+
+
 def _classify_hap_detection(result):
     """Classify OpenSSL usage and return deduped symbol sets.
 
     Returns ``(method, static_syms, dynamic_syms, dlopen_syms, ossl_type)``
     where the middle three are **sets** of unique symbol names.
 
-    Classification rule::
-
-        static > (dynamic | dlopen)  ->  Self-Contained
-        otherwise                    ->  System-Link
-        both empty                   ->  No-OpenSSL
+    Per-library resolution: each library's OpenSSL dependency must be
+    satisfied within the HAP (static linking or bundled .so).  If any
+    library has an unresolved external dependency the HAP is System-Link.
     """
+    from .constants import OPENSSL_LIBRARY_PATTERNS
+
+    pi = result.package_info or {}
+    bundled_basenames = set(pi.get('bundled_openssl_files', []))
+
     static_syms = set()
     dynamic_syms = set()
     dlopen_syms = set()
     has_dynamic = has_static = has_dlopen = False
+    has_unresolved_external = False
 
     for fr in result.files_detail:
         if fr.static_openssl:
@@ -1491,8 +1551,16 @@ def _classify_hap_detection(result):
                 dlopen_syms.update(fr.dlsym_symbols)
                 static_only = set(fr.openssl_symbols) - set(fr.dlsym_symbols)
                 static_syms.update(static_only)
+                if not _dlopen_targets_resolved(
+                        fr.dlopen_libs, bundled_basenames,
+                        OPENSSL_LIBRARY_PATTERNS):
+                    has_unresolved_external = True
             else:
                 static_syms.update(fr.openssl_symbols)
+                if fr.openssl_libs and not _dt_needed_resolved(
+                        fr.openssl_libs, bundled_basenames,
+                        OPENSSL_LIBRARY_PATTERNS):
+                    has_unresolved_external = True
         elif fr.uses_dlopen:
             has_dlopen = True
             dlopen_syms.update(fr.dlsym_symbols)
@@ -1500,9 +1568,17 @@ def _classify_hap_detection(result):
             if non_dlsym:
                 has_dynamic = True
                 dynamic_syms.update(non_dlsym)
+            if not _dlopen_targets_resolved(
+                    fr.dlopen_libs, bundled_basenames,
+                    OPENSSL_LIBRARY_PATTERNS):
+                has_unresolved_external = True
         elif fr.openssl_symbols:
             has_dynamic = True
             dynamic_syms.update(fr.openssl_symbols)
+            if not _dt_needed_resolved(
+                    fr.openssl_libs, bundled_basenames,
+                    OPENSSL_LIBRARY_PATTERNS):
+                has_unresolved_external = True
 
     methods = []
     if has_dynamic:
@@ -1519,11 +1595,10 @@ def _classify_hap_detection(result):
     else:
         method = 'Mixed'
 
-    external_count = len(dynamic_syms | dlopen_syms)
-    static_count = len(static_syms)
-    if static_count == 0 and external_count == 0:
+    total = static_syms | dynamic_syms | dlopen_syms
+    if not total:
         ossl_type = 'No-OpenSSL'
-    elif static_count > external_count:
+    elif not has_unresolved_external:
         ossl_type = 'Self-Contained'
     else:
         ossl_type = 'System-Link'

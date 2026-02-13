@@ -1102,6 +1102,35 @@ class TestDlopenDetection:
             finally:
                 os.unlink(path)
 
+    def test_strict_mode_filters_raw_matches(self):
+        """Strict mode should ignore raw matches that aren't clustered or resolved."""
+        # Isolated matches, not clustered
+        rodata = b'SSL_CTX_new\x00' + b'\x00' * 500 + b'EVP_sha256\x00'
+        
+        mock_elf = _make_mock_elf(
+            undefined_symbols=[('dlopen', 'SHN_UNDEF'), ('dlsym', 'SHN_UNDEF')],
+            section_data={'.rodata': rodata},
+        )
+
+        with patch('elftools.elf.elffile.ELFFile', return_value=mock_elf):
+            fd, path = tempfile.mkstemp()
+            try:
+                os.write(fd, b'\x7fELF' + b'\x00' * 60)
+                os.close(fd)
+                
+                # Normal mode: returns inferred
+                result_normal = detect_dlopen_openssl(path, OSSL_EXPORTS, strict_mode=False)
+                assert result_normal.confidence == 'inferred'
+                assert len(result_normal.dlsym_symbols) == 2
+                
+                # Strict mode: returns empty if only raw matches
+                result_strict = detect_dlopen_openssl(path, OSSL_EXPORTS, strict_mode=True)
+                assert result_strict.confidence == 'low' # Or whatever confidence logic returns for empty
+                assert result_strict.dlsym_symbols == []
+                
+            finally:
+                os.unlink(path)
+
 
 class TestLayerAExcludeSymbols:
     """Test Layer A: .dynsym exclusion via exclude_symbols parameter."""

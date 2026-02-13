@@ -419,6 +419,7 @@ def detect_dlopen_openssl(elf_path: str,
                           openssl_exports: Set[str],
                           lib_patterns: Optional[List[str]] = None,
                           exclude_symbols: Optional[Set[str]] = None,
+                          strict_mode: bool = False,
                           ) -> Optional[DlopenResult]:
     """
     Analyze an ELF binary for dlopen/dlsym-based OpenSSL usage.
@@ -437,6 +438,8 @@ def detect_dlopen_openssl(elf_path: str,
         lib_patterns: Library name prefixes (default: OPENSSL_LIBRARY_PATTERNS)
         exclude_symbols: Symbols to exclude from .rodata matching
                          (typically .dynsym UND + DEF OpenSSL symbols)
+        strict_mode: If True, require high confidence (clustering or resolution)
+                     and ignore isolated string matches.
 
     Returns:
         DlopenResult with detected symbols and libraries, or None on error.
@@ -534,15 +537,16 @@ def detect_dlopen_openssl(elf_path: str,
             clustered = _cluster_symbols(all_with_offsets, candidates)
 
             high_conf = resolved | clustered
+            
             if high_conf:
                 dlsym_symbols = sorted(high_conf)
                 confidence = 'high'
-            elif raw_matches:
+            elif raw_matches and not strict_mode:
                 dlsym_symbols = sorted(raw_matches)
                 confidence = 'inferred'
             else:
                 dlsym_symbols = []
-                confidence = 'high'
+                confidence = 'high' if not raw_matches else 'low'
 
             return DlopenResult(
                 uses_dlopen=has_dlopen,

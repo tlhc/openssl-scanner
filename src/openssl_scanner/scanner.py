@@ -8,17 +8,60 @@ import os
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .elf_analyzer import ELFAnalyzer, ELFInfo
 from .dependency_resolver import DependencyResolver, DependencyNode
 from .dependency_graph import DependencyGraph, ImportChain, DepthInfo
 from .openssl_matcher import OpenSSLMatcher
+from .static_detector import detect_static_openssl, detect_static_ssl, scan_hidden_static_symbols
 from .constants import OPENSSL_LIBRARY_PATTERNS
 from . import __version__
 
 logger = logging.getLogger(__name__)
+
+def _shutdown_executor(executor):
+    """Shutdown executor immediately without waiting for workers."""
+    executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _run_parallel_analysis(
+    work_items: list,
+    workers: int,
+) -> Tuple[List['FileResult'], List[dict]]:
+    """Run _analyze_file_worker in parallel with proper Ctrl+C handling.
+
+    Returns (file_results, errors) where errors are dicts with
+    'file', 'error', 'severity' keys.
+    """
+    results = []
+    errors = []
+
+    executor = ProcessPoolExecutor(max_workers=workers)
+    try:
+        future_to_path = {
+            executor.submit(_analyze_file_worker, item): item[0]
+            for item in work_items
+        }
+        for future in as_completed(future_to_path):
+            path = future_to_path[future]
+            try:
+                results.append(future.result())
+            except Exception as e:
+                logger.error("Error scanning %s: %s", path, e)
+                errors.append({
+                    'file': path,
+                    'error': str(e),
+                    'severity': 'error',
+                })
+        executor.shutdown(wait=True)
+    except KeyboardInterrupt:
+        logger.info("Scan interrupted, shutting down workers...")
+        _shutdown_executor(executor)
+        raise
+
+    return results, errors
 
 
 def _analyze_file_worker(args: tuple) -> 'FileResult':
@@ -66,39 +109,83 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
     openssl_libs = [lib for lib in info.needed_libs
                     if any(lib.lower().startswith(p)
                            for p in OPENSSL_LIBRARY_PATTERNS)]
+    return _build_file_result(path, info, openssl_symbols, openssl_defined,
+                              openssl_libs, openssl_exports)
+
+
+def _build_file_result(path, info, openssl_symbols, openssl_defined,
+                       openssl_libs, openssl_exports):
+    """
+    Shared classification logic for ELF file analysis.
+
+    Both _analyze_file_worker and Scanner.scan_file() prepare the initial
+    symbol/library lists differently (raw set ops vs matcher methods),
+    then delegate here for identical detection, dlopen analysis, and
+    FileResult construction.
+
+    Args:
+        path: ELF file path.
+        info: ELFInfo from analyzer.
+        openssl_symbols: OpenSSL symbols from .dynsym UND (mutable list).
+        openssl_defined: OpenSSL symbols from .dynsym DEF (list).
+        openssl_libs: OpenSSL libs from DT_NEEDED (list).
+        openssl_exports: Full set of known OpenSSL export names.
+
+    Returns:
+        FileResult with detection results.
+    """
     openssl_direct = len(openssl_libs) > 0
 
     static_openssl = False
-    # Check if we define OpenSSL symbols that we don't import (implies implementation)
+    static_openssl_version = None
+    static_ssl_library = ''
+
     implemented_openssl = set(openssl_defined) - set(openssl_symbols)
     if implemented_openssl:
         logger.debug(
             "static OpenSSL %s: implemented=%d needed=%s",
             os.path.basename(path), len(implemented_openssl), info.needed_libs)
-        
-        # We consider it static OpenSSL if it implements symbols, even if it also imports some
+
         if not openssl_symbols:
             openssl_symbols = openssl_defined
         else:
-            # Hybrid case: add implemented symbols to the list of "used" symbols
             for s in openssl_defined:
                 if s not in openssl_symbols:
                     openssl_symbols.append(s)
-        
+
         openssl_direct = True
         static_openssl = True
+
+    ssl_result = detect_static_ssl(path)
+    hidden_static = False
+    if ssl_result.detected:
+        static_openssl = True
+        static_openssl_version = ssl_result.version
+        static_ssl_library = ssl_result.library
+        if not openssl_defined and not openssl_libs:
+            hidden_static = True
+            openssl_direct = True
+            if openssl_exports:
+                hidden_syms = scan_hidden_static_symbols(path, openssl_exports)
+                if hidden_syms:
+                    openssl_symbols = hidden_syms
+        logger.debug(
+            "Static %s signature in %s: %s (signals=%s, hidden=%s)",
+            ssl_result.library, os.path.basename(path),
+            ssl_result.version, ssl_result.signals, hidden_static)
 
     uses_dlopen = False
     dlsym_symbols = []
     dlopen_libs = []
     dlopen_confidence = 'high'
 
-    if info.has_dlopen or info.has_dlsym:
+    if (info.has_dlopen or info.has_dlsym) and not hidden_static:
         from .dlopen_analyzer import detect_dlopen_openssl
         exclude_ossl = set(openssl_symbols) | set(openssl_defined)
         dlopen_result = detect_dlopen_openssl(path, openssl_exports,
                                                OPENSSL_LIBRARY_PATTERNS,
-                                               exclude_symbols=exclude_ossl)
+                                               exclude_symbols=exclude_ossl,
+                                               strict_mode=True)
         if dlopen_result:
             dlopen_libs = dlopen_result.dlopen_libs
             if not openssl_direct or dlopen_libs:
@@ -122,6 +209,11 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
                     "patterns in .rodata, ignoring %d matches",
                     os.path.basename(path),
                     len(dlopen_result.dlsym_symbols))
+    elif hidden_static and (info.has_dlopen or info.has_dlsym):
+        logger.debug(
+            "dlopen skip %s: hidden-static %s detected, "
+            ".rodata strings are internal OpenSSL data",
+            os.path.basename(path), ssl_result.library)
 
     return FileResult(
         path=path,
@@ -133,6 +225,9 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
         openssl_libs=openssl_libs,
         openssl_symbols=openssl_symbols,
         static_openssl=static_openssl,
+        static_openssl_version=static_openssl_version,
+        static_ssl_library=static_ssl_library,
+        openssl_exported=openssl_defined,
         uses_dlopen=uses_dlopen,
         dlsym_symbols=dlsym_symbols,
         dlopen_libs=dlopen_libs,
@@ -153,6 +248,9 @@ class FileResult:
     openssl_symbols: List[str]
     error: Optional[str] = None
     static_openssl: bool = False
+    static_openssl_version: Optional[str] = None
+    static_ssl_library: str = ''
+    openssl_exported: List[str] = field(default_factory=list)
     uses_dlopen: bool = False
     dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs: List[str] = field(default_factory=list)
@@ -315,79 +413,10 @@ class Scanner:
 
         openssl_libs = [lib for lib in info.needed_libs
                         if self._matcher.is_openssl_library(lib)]
-        openssl_direct = len(openssl_libs) > 0
 
-        static_openssl = False
-        # Check if we define OpenSSL symbols that we don't import (implies implementation)
-        implemented_openssl = set(openssl_defined) - set(openssl_symbols)
-        if implemented_openssl:
-            logger.debug(
-                "static OpenSSL %s: implemented=%d needed=%s",
-                os.path.basename(path), len(implemented_openssl), info.needed_libs)
-            
-            # We consider it static OpenSSL if it implements symbols, even if it also imports some
-            if not openssl_symbols:
-                openssl_symbols = openssl_defined
-            else:
-                # Hybrid case: add implemented symbols to the list of "used" symbols
-                for s in openssl_defined:
-                    if s not in openssl_symbols:
-                        openssl_symbols.append(s)
-            
-            openssl_direct = True
-            static_openssl = True
-
-        uses_dlopen = False
-        dlsym_symbols = []
-        dlopen_libs = []
-        dlopen_confidence = 'high'
-
-        if info.has_dlopen or info.has_dlsym:
-            from .dlopen_analyzer import detect_dlopen_openssl
-            openssl_exports = self._matcher.get_openssl_exports()
-            exclude_ossl = set(openssl_symbols) | set(openssl_defined)
-            dlopen_result = detect_dlopen_openssl(path, openssl_exports,
-                                                   OPENSSL_LIBRARY_PATTERNS,
-                                                   exclude_symbols=exclude_ossl)
-            if dlopen_result:
-                dlopen_libs = dlopen_result.dlopen_libs
-                if not openssl_direct or dlopen_libs:
-                    uses_dlopen = True
-                    dlopen_confidence = dlopen_result.confidence
-                    direct_set = set(openssl_symbols)
-                    dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
-                                     if s not in direct_set]
-                    overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
-                    logger.debug(
-                        "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
-                        "overlap=%d dlopen_only=%d direct=%s libs=%s conf=%s",
-                        os.path.basename(path), len(openssl_symbols),
-                        len(dlopen_result.dlsym_symbols), overlap,
-                        len(dlsym_symbols), openssl_direct, dlopen_libs,
-                        dlopen_confidence)
-                    openssl_symbols.extend(dlsym_symbols)
-                elif dlopen_result.dlsym_symbols:
-                    logger.debug(
-                        "dlopen skip %s: direct OpenSSL link + no lib "
-                        "patterns in .rodata, ignoring %d matches",
-                        os.path.basename(path),
-                        len(dlopen_result.dlsym_symbols))
-
-        return FileResult(
-            path=path,
-            file_type=info.elf_type,
-            arch=info.arch,
-            direct_deps=info.needed_libs,
-            openssl_direct=openssl_direct,
-            openssl_transitive=False,
-            openssl_libs=openssl_libs,
-            openssl_symbols=openssl_symbols,
-            static_openssl=static_openssl,
-            uses_dlopen=uses_dlopen,
-            dlsym_symbols=dlsym_symbols,
-            dlopen_libs=dlopen_libs,
-            dlopen_confidence=dlopen_confidence,
-        )
+        openssl_exports = self._matcher.get_openssl_exports()
+        return _build_file_result(path, info, openssl_symbols, openssl_defined,
+                                  openssl_libs, openssl_exports)
 
     def scan_tree(self, root_path: str) -> ScanResult:
         """
@@ -407,46 +436,28 @@ class Scanner:
         all_paths = self._collect_tree_paths(tree)
         result.total_files_scanned = len(all_paths)
 
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in all_paths if p]
+
+        files, scan_errors = _run_parallel_analysis(
+            work_items, self._workers)
+        result.errors.extend(scan_errors)
+
         arch = None
-        files: List[FileResult] = []
         all_symbols: Set[str] = set()
         symbols_by_file: Dict[str, List[str]] = {}
         openssl_libs: Set[str] = set()
 
-        openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in all_paths if p]
-
-        with ProcessPoolExecutor(max_workers=self._workers) as executor:
-            future_to_path = {
-                executor.submit(_analyze_file_worker, item): item[0]
-                for item in work_items
-            }
-
-            for future in as_completed(future_to_path):
-                path = future_to_path[future]
-                try:
-                    file_result = future.result()
-                    files.append(file_result)
-
-                    if file_result.arch != 'unknown' and not arch:
-                        arch = file_result.arch
-
-                    if file_result.openssl_symbols:
-                        symbols_by_file[file_result.path] = file_result.openssl_symbols
-                        all_symbols.update(file_result.openssl_symbols)
-
-                    for lib in file_result.openssl_libs:
-                        resolved = self._resolver.resolve_library(lib)
-                        if resolved:
-                            openssl_libs.add(resolved)
-
-                except Exception as e:
-                    logger.error(f"Error scanning {path}: {e}")
-                    result.errors.append({
-                        'file': path,
-                        'error': str(e),
-                        'severity': 'error'
-                    })
+        for file_result in files:
+            if file_result.arch != 'unknown' and not arch:
+                arch = file_result.arch
+            if file_result.openssl_symbols:
+                symbols_by_file[file_result.path] = file_result.openssl_symbols
+                all_symbols.update(file_result.openssl_symbols)
+            for lib in file_result.openssl_libs:
+                resolved = self._resolver.resolve_library(lib)
+                if resolved:
+                    openssl_libs.add(resolved)
 
         result.total_elf_files = len([f for f in files if f.file_type != 'unknown'])
         result.files_with_openssl = len([f for f in files if f.openssl_symbols])
@@ -495,48 +506,30 @@ class Scanner:
 
         result.total_files_scanned = total_files
 
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in elf_files]
+
+        file_results, scan_errors = _run_parallel_analysis(
+            work_items, self._workers)
+        result.errors.extend(scan_errors)
+
         arch = None
-        file_results: List[FileResult] = []
         all_symbols: Set[str] = set()
         symbols_by_file: Dict[str, List[str]] = {}
         openssl_libs: Set[str] = set()
 
-        openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in elf_files]
-
-        with ProcessPoolExecutor(max_workers=self._workers) as executor:
-            future_to_path = {
-                executor.submit(_analyze_file_worker, item): item[0]
-                for item in work_items
-            }
-
-            for future in as_completed(future_to_path):
-                path = future_to_path[future]
-                try:
-                    file_result = future.result()
-                    file_results.append(file_result)
-
-                    if file_result.arch != 'unknown' and not arch:
-                        arch = file_result.arch
-
-                    if file_result.openssl_symbols:
-                        symbols_by_file[file_result.path] = file_result.openssl_symbols
-                        all_symbols.update(file_result.openssl_symbols)
-
-                    for lib in file_result.openssl_libs:
-                        resolved = self._resolver.resolve_library(lib)
-                        if resolved:
-                            openssl_libs.add(resolved)
-                        else:
-                            openssl_libs.add(lib)
-
-                except Exception as e:
-                    logger.error(f"Error scanning {path}: {e}")
-                    result.errors.append({
-                        'file': path,
-                        'error': str(e),
-                        'severity': 'error'
-                    })
+        for file_result in file_results:
+            if file_result.arch != 'unknown' and not arch:
+                arch = file_result.arch
+            if file_result.openssl_symbols:
+                symbols_by_file[file_result.path] = file_result.openssl_symbols
+                all_symbols.update(file_result.openssl_symbols)
+            for lib in file_result.openssl_libs:
+                resolved = self._resolver.resolve_library(lib)
+                if resolved:
+                    openssl_libs.add(resolved)
+                else:
+                    openssl_libs.add(lib)
 
         result.total_elf_files = len(file_results)
         result.files_with_openssl = len([f for f in file_results if f.openssl_symbols])
@@ -609,46 +602,28 @@ class Scanner:
         result.dependency_tree = dependency_tree
         result.total_files_scanned = len(scan_paths)
 
+        openssl_exports = self._matcher.get_openssl_exports()
+        work_items = [(p, openssl_exports) for p in scan_paths]
+
+        files, scan_errors = _run_parallel_analysis(
+            work_items, self._workers)
+        result.errors.extend(scan_errors)
+
         arch = None
-        files: List[FileResult] = []
         all_symbols: Set[str] = set()
         symbols_by_file: Dict[str, List[str]] = {}
         openssl_libs: Set[str] = set()
 
-        openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in scan_paths]
-
-        with ProcessPoolExecutor(max_workers=self._workers) as executor:
-            future_to_path = {
-                executor.submit(_analyze_file_worker, item): item[0]
-                for item in work_items
-            }
-
-            for future in as_completed(future_to_path):
-                path = future_to_path[future]
-                try:
-                    file_result = future.result()
-                    files.append(file_result)
-
-                    if file_result.arch != 'unknown' and not arch:
-                        arch = file_result.arch
-
-                    if file_result.openssl_symbols:
-                        symbols_by_file[file_result.path] = file_result.openssl_symbols
-                        all_symbols.update(file_result.openssl_symbols)
-
-                    for lib in file_result.openssl_libs:
-                        resolved = self._resolver.resolve_library(lib)
-                        if resolved:
-                            openssl_libs.add(resolved)
-
-                except Exception as e:
-                    logger.error("Error scanning %s: %s", path, e)
-                    result.errors.append({
-                        'file': path,
-                        'error': str(e),
-                        'severity': 'error'
-                    })
+        for file_result in files:
+            if file_result.arch != 'unknown' and not arch:
+                arch = file_result.arch
+            if file_result.openssl_symbols:
+                symbols_by_file[file_result.path] = file_result.openssl_symbols
+                all_symbols.update(file_result.openssl_symbols)
+            for lib in file_result.openssl_libs:
+                resolved = self._resolver.resolve_library(lib)
+                if resolved:
+                    openssl_libs.add(resolved)
 
         result.total_elf_files = len([f for f in files if f.file_type != 'unknown'])
         result.files_with_openssl = len([f for f in files if f.openssl_symbols])
