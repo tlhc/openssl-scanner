@@ -95,6 +95,11 @@ class TestOpenSSLMatcherStrict:
         assert self.matcher.is_openssl_library("libssl.so.3")
         assert self.matcher.is_openssl_library("libcrypto_openssl.so")
         assert self.matcher.is_openssl_library("libssl_openssl.so")
+        assert self.matcher.is_openssl_library("libopenssl.so")
+        assert self.matcher.is_openssl_library("libopenssl.so.1.1")
+        assert self.matcher.is_openssl_library("libboringssl.so")
+        assert self.matcher.is_openssl_library("libboringssl.so.1")
+        assert self.matcher.is_openssl_library("libboringcrypto.so")
 
     def test_is_not_openssl_library(self):
         """Test non-OpenSSL library names."""

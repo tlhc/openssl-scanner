@@ -63,9 +63,9 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
     defined_names = [s.name for s in info.defined_symbols]
     openssl_defined = [s for s in defined_names if s in openssl_exports]
 
-    openssl_lib_patterns = ('libcrypto', 'libssl', 'libopenssl')
     openssl_libs = [lib for lib in info.needed_libs
-                    if any(lib.lower().startswith(p) for p in openssl_lib_patterns)]
+                    if any(lib.lower().startswith(p)
+                           for p in OPENSSL_LIBRARY_PATTERNS)]
     openssl_direct = len(openssl_libs) > 0
 
     static_openssl = False
