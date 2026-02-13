@@ -101,6 +101,9 @@ class TestOpenSSLMatcherStrict:
         assert not self.matcher.is_openssl_library("libc.so.6")
         assert not self.matcher.is_openssl_library("libstdc++.so.6")
         assert not self.matcher.is_openssl_library("libcurl.so")
+        # Regression test for Codex Finding 1: non-so files should not match
+        assert not self.matcher.is_openssl_library("libcrypto.txt")
+        assert not self.matcher.is_openssl_library("libssl_readme.md")
 
     def test_categorize_symbol_ssl(self):
         """Test SSL symbol categorization."""

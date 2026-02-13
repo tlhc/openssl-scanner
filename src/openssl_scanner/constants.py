@@ -9,6 +9,7 @@ OPENSSL_LIBRARY_PATTERNS: List[str] = [
     "libssl",
     "libcrypto_openssl",
     "libssl_openssl",
+    "libopenssl",
 ]
 
 DLOPEN_FUNCTION_NAMES = frozenset({'dlopen', '__libc_dlopen_mode'})

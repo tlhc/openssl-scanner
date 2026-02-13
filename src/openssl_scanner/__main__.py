@@ -1130,7 +1130,9 @@ def cmd_hap(args) -> int:
                     'scanned_abi': meta.abis_found,
                     'abis_available': meta.abis_found,
                     'native_libs_count': len(extract_result.so_files),
-                    'bundled_openssl': removed > 0 or extract_result.openssl_lib is not None,
+                    'bundled_openssl': (removed > 0
+                                        or extract_result.openssl_lib is not None
+                                        or extract_result.openssl_ssl is not None),
                 }
 
                 all_results.append(result)
@@ -1553,6 +1555,8 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
     if cat_counts:
         top_cat = max(cat_counts, key=cat_counts.get)
 
+    bundled_str = 'Yes' if pi.get('bundled_openssl') else 'No'
+
     return {
         'pkg_name': pi.get('bundle_name') or os.path.splitext(
             os.path.basename(pkg_path))[0],
@@ -1562,7 +1566,7 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         'so_files': pi.get('native_libs_count', 0),
         'ossl_type': ossl_type,
         'detection': method,
-        'bundled_openssl': 'Yes' if pi.get('bundled_openssl') else 'No',
+        'bundled_openssl': bundled_str,
         'static_syms': len(s_syms),
         'dynamic_syms': len(d_syms),
         'dlopen_syms': len(dl_syms),

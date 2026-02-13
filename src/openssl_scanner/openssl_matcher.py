@@ -165,6 +165,8 @@ class OpenSSLMatcher:
         Returns:
             True if this is an OpenSSL library
         """
+        if '.so' not in lib_name:
+            return False
         base = lib_name.lower()
         for pattern in self._lib_patterns:
             if base.startswith(pattern):

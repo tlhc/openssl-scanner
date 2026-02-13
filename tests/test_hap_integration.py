@@ -715,5 +715,147 @@ class TestClassifyHapDetection:
         assert len(s_set | d_set | dl_set) == 5
 
 
+class TestBundledOpenSSLDetection:
+    """Tests for bundled_openssl field correctness."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_bundled_openssl_yes_for_separate_so(self):
+        """HAP with libcrypto.so.3 should have bundled_openssl=True in JSON."""
+        hap_path = os.path.join(self.tmpdir, "bundled.hap")
+        _create_test_hap(hap_path, include_openssl=True)
+
+        output = os.path.join(self.tmpdir, "report.json")
+        ret = main(['hap', hap_path, '-o', output, '--json-only'])
+        assert ret == 0
+
+        with open(output) as f:
+            data = json.load(f)
+        assert data['meta']['package']['bundled_openssl'] is True
+
+    def test_bundled_openssl_no_without_openssl(self):
+        """HAP without OpenSSL libs should have bundled_openssl=False."""
+        hap_path = os.path.join(self.tmpdir, "plain.hap")
+        _create_test_hap(hap_path, include_openssl=False)
+
+        output = os.path.join(self.tmpdir, "report.json")
+        ret = main(['hap', hap_path, '-o', output, '--json-only'])
+        assert ret == 0
+
+        with open(output) as f:
+            data = json.load(f)
+        assert data['meta']['package']['bundled_openssl'] is False
+
+    def test_bundled_summary_row_static_no_so_file(self):
+        """Static OpenSSL without bundled .so -> bundled_openssl='No'.
+
+        bundled_openssl answers 'does the package ship OpenSSL .so files?'
+        Static linkage is captured by ossl_type=Self-Contained instead.
+        """
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import (
+            _classify_hap_detection, _build_hap_summary_row
+        )
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/libapp.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256", "SSL_connect"],
+                       static_openssl=True),
+        ]
+        result.files_with_static_openssl = 1
+        result.package_info = {
+            'bundle_name': 'com.test.static',
+            'package_type': 'hap',
+            'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'],
+            'native_libs_count': 1,
+            'bundled_openssl': False,
+        }
+        method, s, d, dl, ossl_type = _classify_hap_detection(result)
+        row = _build_hap_summary_row(result, "/t.hap", method, s, d, dl,
+                                     ossl_type)
+        assert row['bundled_openssl'] == 'No'
+        assert row['ossl_type'] == 'Self-Contained'
+
+    def test_bundled_summary_row_no_static_no_file(self):
+        """No OpenSSL .so and no static -> bundled_openssl='No'."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        from openssl_scanner.__main__ import (
+            _classify_hap_detection, _build_hap_summary_row
+        )
+
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/libapp.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[]),
+        ]
+        result.package_info = {
+            'bundle_name': 'com.test.plain',
+            'package_type': 'hap',
+            'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'],
+            'native_libs_count': 1,
+            'bundled_openssl': False,
+        }
+        method, s, d, dl, ossl_type = _classify_hap_detection(result)
+        row = _build_hap_summary_row(result, "/t.hap", method, s, d, dl,
+                                     ossl_type)
+        assert row['bundled_openssl'] == 'No'
+
+    def test_libopenssl_pattern_detected(self):
+        """libopenssl.so should be recognized as an OpenSSL library."""
+        from openssl_scanner.openssl_matcher import OpenSSLMatcher
+
+        matcher = OpenSSLMatcher()
+        assert matcher.is_openssl_library("libopenssl.so") is True
+        assert matcher.is_openssl_library("libopenssl.so.1.1") is True
+
+    def test_bundled_summary_column_with_openssl_hap(self):
+        """Batch scan with one bundled HAP -> column H shows 'Yes'."""
+        pkg_dir = os.path.join(self.tmpdir, "packages")
+        os.makedirs(pkg_dir)
+        _create_test_hap(
+            os.path.join(pkg_dir, "bundled.hap"),
+            bundle_name="com.test.bundled",
+            include_openssl=True,
+        )
+        _create_test_hap(
+            os.path.join(pkg_dir, "plain.hap"),
+            bundle_name="com.test.plain",
+            include_openssl=False,
+        )
+        out_dir = os.path.join(self.tmpdir, "output")
+        ret = main(['hap', pkg_dir, '-o', out_dir, '--json-only'])
+        assert ret == 0
+
+        summary = os.path.join(out_dir, "summary.xlsx")
+        assert os.path.isfile(summary)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary)
+        ws = wb.active
+        bundled_vals = {}
+        for r in range(2, ws.max_row):
+            name = ws.cell(row=r, column=1).value
+            bundled = ws.cell(row=r, column=8).value
+            if name and name != "TOTAL":
+                bundled_vals[name] = bundled
+        assert bundled_vals.get("com.test.bundled") == "Yes"
+        assert bundled_vals.get("com.test.plain") == "No"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

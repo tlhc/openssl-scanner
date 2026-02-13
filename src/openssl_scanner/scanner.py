@@ -65,15 +65,26 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
 
     openssl_lib_patterns = ('libcrypto', 'libssl', 'libopenssl')
     openssl_libs = [lib for lib in info.needed_libs
-                    if any(p in lib.lower() for p in openssl_lib_patterns)]
+                    if any(lib.lower().startswith(p) for p in openssl_lib_patterns)]
     openssl_direct = len(openssl_libs) > 0
 
     static_openssl = False
-    if not openssl_symbols and openssl_defined:
+    # Check if we define OpenSSL symbols that we don't import (implies implementation)
+    implemented_openssl = set(openssl_defined) - set(openssl_symbols)
+    if implemented_openssl:
         logger.debug(
-            "static OpenSSL %s: UND_ossl=0 DEF_ossl=%d needed=%s",
-            os.path.basename(path), len(openssl_defined), info.needed_libs)
-        openssl_symbols = openssl_defined
+            "static OpenSSL %s: implemented=%d needed=%s",
+            os.path.basename(path), len(implemented_openssl), info.needed_libs)
+        
+        # We consider it static OpenSSL if it implements symbols, even if it also imports some
+        if not openssl_symbols:
+            openssl_symbols = openssl_defined
+        else:
+            # Hybrid case: add implemented symbols to the list of "used" symbols
+            for s in openssl_defined:
+                if s not in openssl_symbols:
+                    openssl_symbols.append(s)
+        
         openssl_direct = True
         static_openssl = True
 
@@ -307,11 +318,22 @@ class Scanner:
         openssl_direct = len(openssl_libs) > 0
 
         static_openssl = False
-        if not openssl_symbols and openssl_defined:
+        # Check if we define OpenSSL symbols that we don't import (implies implementation)
+        implemented_openssl = set(openssl_defined) - set(openssl_symbols)
+        if implemented_openssl:
             logger.debug(
-                "static OpenSSL %s: UND_ossl=0 DEF_ossl=%d needed=%s",
-                os.path.basename(path), len(openssl_defined), info.needed_libs)
-            openssl_symbols = openssl_defined
+                "static OpenSSL %s: implemented=%d needed=%s",
+                os.path.basename(path), len(implemented_openssl), info.needed_libs)
+            
+            # We consider it static OpenSSL if it implements symbols, even if it also imports some
+            if not openssl_symbols:
+                openssl_symbols = openssl_defined
+            else:
+                # Hybrid case: add implemented symbols to the list of "used" symbols
+                for s in openssl_defined:
+                    if s not in openssl_symbols:
+                        openssl_symbols.append(s)
+            
             openssl_direct = True
             static_openssl = True
 
