@@ -13,8 +13,10 @@ Detects dynamically loaded OpenSSL usage by:
 4. Filtering via exclude set, clustering, and disassembly confirmation
 """
 
+import array
 import logging
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import List, Optional, Set, Tuple
@@ -34,6 +36,8 @@ MAX_TEXT_SIZE = 64 * 1024 * 1024
 
 CLUSTER_MAX_GAP = 256
 CLUSTER_MIN_SIZE = 3
+
+_PRINTABLE_ASCII_RE = re.compile(rb'[\x20-\x7e]{4,}')
 
 _AARCH64_PLT_HEADER_SIZE = 32
 _AARCH64_PLT_ENTRY_SIZE = 16
@@ -65,46 +69,34 @@ class DlopenResult:
 
 def extract_c_strings(data: bytes, min_len: int = MIN_STRING_LEN) -> Set[str]:
     """
-    Extract NULL-terminated printable ASCII strings from raw bytes.
+    Extract printable ASCII strings from raw bytes.
 
-    Splits on NULL bytes, keeps chunks where all bytes are printable
-    ASCII (0x20-0x7e) and length >= min_len.
+    Uses compiled regex to scan for runs of printable ASCII (0x20-0x7e)
+    with length >= min_len. Runs in C via the re engine, avoiding
+    Python-level NUL-split + per-chunk decode + isprintable overhead.
     """
-    strings = set()
-    for chunk in data.split(b'\x00'):
-        if len(chunk) < min_len:
-            continue
-        try:
-            s = chunk.decode('ascii')
-        except UnicodeDecodeError:
-            continue
-        if s.isprintable():
-            strings.add(s)
-    return strings
+    if min_len == MIN_STRING_LEN:
+        return {m.group().decode('ascii')
+                for m in _PRINTABLE_ASCII_RE.finditer(data)}
+    pat = re.compile(rb'[\x20-\x7e]{%d,}' % min_len)
+    return {m.group().decode('ascii') for m in pat.finditer(data)}
 
 
 def extract_c_strings_with_offsets(
     data: bytes, min_len: int = MIN_STRING_LEN,
 ) -> List[Tuple[int, str]]:
     """
-    Extract NULL-terminated printable ASCII strings with byte offsets.
+    Extract printable ASCII strings with byte offsets.
 
     Returns list of (byte_offset, string) tuples, ordered by offset.
-    The offset is relative to the start of the data buffer.
+    Uses compiled regex for C-level scanning performance.
     """
-    results = []
-    offset = 0
-    for chunk in data.split(b'\x00'):
-        if len(chunk) >= min_len:
-            try:
-                s = chunk.decode('ascii')
-            except UnicodeDecodeError:
-                pass
-            else:
-                if s.isprintable():
-                    results.append((offset, s))
-        offset += len(chunk) + 1
-    return results
+    if min_len == MIN_STRING_LEN:
+        return [(m.start(), m.group().decode('ascii'))
+                for m in _PRINTABLE_ASCII_RE.finditer(data)]
+    pat = re.compile(rb'[\x20-\x7e]{%d,}' % min_len)
+    return [(m.start(), m.group().decode('ascii'))
+            for m in pat.finditer(data)]
 
 
 def _cluster_symbols(
@@ -244,15 +236,28 @@ def _resolve_aarch64_dlsym_addrs(
     ARM64 calling convention: X0=arg1, X1=arg2.
     Pattern: ADRP X1, #page; ADD X1, X1, #lo12; BL dlsym@plt
 
+    Uses array.array for C-level bulk decode instead of per-instruction
+    struct.unpack_from calls.
+
     Returns set of resolved virtual addresses pointing into .rodata.
     """
     resolved = set()
-    n_instrs = len(text_data) // 4
 
-    for i in range(n_instrs):
-        insn = struct.unpack_from('<I', text_data, i * 4)[0]
+    instrs = array.array('I')
+    instrs.frombytes(text_data)
+    n = len(instrs)
 
-        if (insn & _AARCH64_BL_MASK) != _AARCH64_BL_OPCODE:
+    bl_mask = _AARCH64_BL_MASK
+    bl_opcode = _AARCH64_BL_OPCODE
+    add_mask = _AARCH64_ADD_IMM_MASK
+    add_opcode = _AARCH64_ADD_IMM_OPCODE
+    adrp_mask = _AARCH64_ADRP_MASK
+    adrp_opcode = _AARCH64_ADRP_OPCODE
+
+    for i in range(n):
+        insn = instrs[i]
+
+        if (insn & bl_mask) != bl_opcode:
             continue
 
         imm26 = insn & 0x03FFFFFF
@@ -270,14 +275,14 @@ def _resolve_aarch64_dlsym_addrs(
         scan_start = max(0, i - _MAX_BACKWARD_INSTRS)
 
         for j in range(i - 1, scan_start - 1, -1):
-            prev = struct.unpack_from('<I', text_data, j * 4)[0]
+            prev = instrs[j]
             rd = prev & 0x1F
 
             if rd != 1:
                 continue
 
             if add_imm is None and \
-               (prev & _AARCH64_ADD_IMM_MASK) == _AARCH64_ADD_IMM_OPCODE:
+               (prev & add_mask) == add_opcode:
                 rn = (prev >> 5) & 0x1F
                 if rn == 1:
                     shift = (prev >> 22) & 0x3
@@ -285,7 +290,7 @@ def _resolve_aarch64_dlsym_addrs(
                     add_imm = imm12 << (12 if shift == 1 else 0)
 
             if adrp_val is None and \
-               (prev & _AARCH64_ADRP_MASK) == _AARCH64_ADRP_OPCODE:
+               (prev & adrp_mask) == adrp_opcode:
                 immlo = (prev >> 29) & 0x3
                 immhi = (prev >> 5) & 0x7FFFF
                 imm21 = (immhi << 2) | immlo
@@ -529,12 +534,19 @@ def detect_dlopen_openssl(elf_path: str,
             raw_matches = {s for s in all_strings if s in candidates}
 
             resolved = set()
-            try:
-                resolved = _resolve_dlsym_strings(elf, candidates, section_ranges)
-            except (struct.error, ValueError, TypeError, KeyError, IndexError) as e:
-                logger.warning("Layer C failed for %s: %s", elf_path, e)
+            clustered = set()
 
-            clustered = _cluster_symbols(all_with_offsets, candidates)
+            if raw_matches:
+                clustered = _cluster_symbols(all_with_offsets, candidates)
+
+                if clustered or len(raw_matches) >= 5:
+                    try:
+                        resolved = _resolve_dlsym_strings(
+                            elf, candidates, section_ranges)
+                    except (struct.error, ValueError, TypeError,
+                            KeyError, IndexError) as e:
+                        logger.warning(
+                            "Layer C failed for %s: %s", elf_path, e)
 
             high_conf = resolved | clustered
             
