@@ -21,6 +21,7 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 _MAX_SCAN_SIZE = 128 * 1024 * 1024
+_NUL_CHUNK_RE = re.compile(rb'[^\x00]{4,}')
 
 OPENSSL_STRICT_PATTERN = re.compile(
     rb"OpenSSL\s+(\d+\.\d+\.\d+[a-z]*"
@@ -272,12 +273,13 @@ def _load_probe_symbols():
     try:
         import json
         import os
+
         from .constants import SYMBOL_CATEGORIES
 
         data_dir = os.path.join(os.path.dirname(__file__), 'data')
         sym_path = os.path.join(data_dir, 'openssl_symbols.json')
 
-        with open(sym_path, 'r') as f:
+        with open(sym_path) as f:
             data = json.load(f)
         all_symbols = data.get('symbols', [])
 
@@ -323,35 +325,46 @@ def _load_probe_symbols():
 def _count_corroborating(data):
     """Count and return corroborating symbol strings present in data.
 
-    Uses single-pass NUL-split + set intersection: O(file_size + |symbols|)
-    instead of O(|symbols| * file_size) from per-symbol bytes.__contains__.
+    Uses regex-based string extraction + set intersection: O(file_size + |symbols|).
+    Works on both bytes and mmap.mmap objects.
     """
     _load_probe_symbols()
+    assert CORROBORATING_SYMBOLS is not None
     probe_strs = set()
     for sym in CORROBORATING_SYMBOLS:
         probe_strs.add(sym.decode('ascii') if isinstance(sym, bytes) else sym)
 
+    strings = _extract_printable_strings(data)
+
+    found = sorted(strings & probe_strs)
+    return len(found), found
+
+
+def _extract_printable_strings(data):
+    """Extract printable ASCII strings (>=4 chars) from NUL-delimited binary data.
+
+    Uses re.finditer on a pre-compiled pattern that matches sequences of 4+
+    non-NUL bytes. Works on both bytes and mmap.mmap objects, avoiding the
+    AttributeError from mmap.split() for files > _MAX_SCAN_SIZE.
+    """
     strings = set()
-    for chunk in data.split(b'\x00'):
-        if len(chunk) < 4:
-            continue
+    for m in _NUL_CHUNK_RE.finditer(data):
+        chunk = m.group()
         try:
             s = chunk.decode('ascii')
         except UnicodeDecodeError:
             continue
         if s.isprintable():
             strings.add(s)
-
-    found = sorted(strings & probe_strs)
-    return len(found), found
+    return strings
 
 
 def scan_hidden_static_symbols(file_path, openssl_exports):
     """Scan binary for all OpenSSL symbol name strings.
 
-    Single-pass extraction: split on NUL bytes, decode printable ASCII
-    chunks, then intersect with openssl_exports via hash set lookup.
-    Complexity: O(file_size + |exports|) instead of O(|exports| * file_size).
+    Single-pass extraction: regex-iterate non-NUL chunks, decode printable
+    ASCII, then intersect with openssl_exports via hash set lookup.
+    Uses mmap for files > _MAX_SCAN_SIZE to avoid excessive memory usage.
 
     Args:
         file_path: Path to the binary file.
@@ -362,20 +375,23 @@ def scan_hidden_static_symbols(file_path, openssl_exports):
     """
     try:
         with open(file_path, 'rb') as f:
-            data = f.read()
+            file_size = f.seek(0, 2)
+            f.seek(0)
+
+            if file_size == 0:
+                return []
+
+            if file_size > _MAX_SCAN_SIZE:
+                try:
+                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                        strings = _extract_printable_strings(data)
+                except ValueError:
+                    return []
+            else:
+                data = f.read()
+                strings = _extract_printable_strings(data)
     except (IOError, OSError):
         return []
-
-    strings = set()
-    for chunk in data.split(b'\x00'):
-        if len(chunk) < 4:
-            continue
-        try:
-            s = chunk.decode('ascii')
-        except UnicodeDecodeError:
-            continue
-        if s.isprintable():
-            strings.add(s)
 
     found = strings & set(openssl_exports)
     return sorted(found)
