@@ -684,6 +684,18 @@ class Scanner:
 
         logger.info(f"Graph stats: {graph.get_stats()}")
 
+        transitive_count = 0
+        for fr in file_results:
+            if fr.error or fr.openssl_direct:
+                continue
+            paths = graph.find_all_paths_to_openssl(fr.path)
+            if paths:
+                fr.openssl_transitive = True
+                transitive_count += 1
+        if transitive_count:
+            logger.info("Marked %d files with transitive OpenSSL dependencies",
+                        transitive_count)
+
         logger.info("Computing import chains...")
         result.import_chains_detail = graph.compute_import_chains()
 
@@ -785,7 +797,30 @@ class Scanner:
                                  openssl_paths: Set[str],
                                  tree: DependencyNode) -> bool:
         """Check if path has transitive OpenSSL dependency."""
-        return len(openssl_paths) > 0
+        node = self._find_node(tree, path)
+        if node is None:
+            return False
+        return self._subtree_has_openssl(node, openssl_paths)
+
+    def _find_node(self, node: DependencyNode, path: str) -> Optional[DependencyNode]:
+        """Find the node in the tree whose path matches the given path."""
+        if node.path == path:
+            return node
+        for child in node.children:
+            found = self._find_node(child, path)
+            if found is not None:
+                return found
+        return None
+
+    def _subtree_has_openssl(self, node: DependencyNode,
+                              openssl_paths: Set[str]) -> bool:
+        """Check if any child (or deeper descendant) has a path in openssl_paths."""
+        for child in node.children:
+            if child.path in openssl_paths:
+                return True
+            if self._subtree_has_openssl(child, openssl_paths):
+                return True
+        return False
 
     def _compute_symbols_by_depth(self, result: ScanResult) -> None:
         """

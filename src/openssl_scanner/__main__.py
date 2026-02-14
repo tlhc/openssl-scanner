@@ -3239,8 +3239,11 @@ def cmd_vendor_tree_sitter(args) -> int:
         import importlib
         for mod_name in pkg_names:
             mod = importlib.import_module(mod_name)
-            assert os.path.abspath(mod.__file__).startswith(
-                os.path.abspath(vendor_dir))
+            mod_path = os.path.abspath(mod.__file__)
+            if not mod_path.startswith(os.path.abspath(vendor_dir)):
+                raise RuntimeError(
+                    f"{mod_name} loaded from {mod_path}, "
+                    f"expected under {vendor_dir}")
             print(f"  {mod_name:20s} OK")
 
         sys.path[:] = old_path

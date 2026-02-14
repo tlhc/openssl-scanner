@@ -328,8 +328,10 @@ def _count_corroborating(data):
     Uses regex-based string extraction + set intersection: O(file_size + |symbols|).
     Works on both bytes and mmap.mmap objects.
     """
+    global CORROBORATING_SYMBOLS
     _load_probe_symbols()
-    assert CORROBORATING_SYMBOLS is not None
+    if CORROBORATING_SYMBOLS is None:
+        CORROBORATING_SYMBOLS = _FALLBACK_SYMBOLS
     probe_strs = set()
     for sym in CORROBORATING_SYMBOLS:
         probe_strs.add(sym.decode('ascii') if isinstance(sym, bytes) else sym)

@@ -333,3 +333,59 @@ class TestReporterStaticVersion:
         d = reporter._file_result_to_dict(fr)
         assert d['static_openssl'] is False
         assert d['static_openssl_version'] is None
+
+
+class TestCountCorroboratingFallback:
+    """Verify _count_corroborating falls back gracefully when CORROBORATING_SYMBOLS is None."""
+
+    def test_none_symbols_falls_back(self):
+        from openssl_scanner import static_detector
+        from openssl_scanner.static_detector import _count_corroborating, _FALLBACK_SYMBOLS
+
+        orig_symbols = static_detector.CORROBORATING_SYMBOLS
+        orig_loaded = static_detector._CORROBORATING_LOADED
+        try:
+            static_detector.CORROBORATING_SYMBOLS = None
+            static_detector._CORROBORATING_LOADED = True
+
+            data = b"\x00SSL_CTX_new\x00EVP_EncryptInit\x00SHA256_Update\x00random junk\x00"
+            count, found = _count_corroborating(data)
+
+            assert static_detector.CORROBORATING_SYMBOLS is _FALLBACK_SYMBOLS
+            assert count == 3
+            assert "SSL_CTX_new" in found
+            assert "EVP_EncryptInit" in found
+            assert "SHA256_Update" in found
+        finally:
+            static_detector.CORROBORATING_SYMBOLS = orig_symbols
+            static_detector._CORROBORATING_LOADED = orig_loaded
+
+    def test_no_matching_symbols(self):
+        """Data with no OpenSSL symbols returns zero count."""
+        from openssl_scanner.static_detector import _count_corroborating
+
+        data = b"\x00printf\x00malloc\x00free\x00strncpy\x00"
+        count, found = _count_corroborating(data)
+        assert count == 0
+        assert found == []
+
+    def test_normal_load_path(self):
+        """Normal case: _load_probe_symbols succeeds, symbols are populated."""
+        from openssl_scanner import static_detector
+        from openssl_scanner.static_detector import _count_corroborating
+
+        orig_symbols = static_detector.CORROBORATING_SYMBOLS
+        orig_loaded = static_detector._CORROBORATING_LOADED
+        try:
+            static_detector.CORROBORATING_SYMBOLS = None
+            static_detector._CORROBORATING_LOADED = False
+
+            data = b"\x00SSL_CTX_new\x00EVP_EncryptInit\x00SHA256_Update\x00"
+            count, found = _count_corroborating(data)
+
+            assert static_detector.CORROBORATING_SYMBOLS is not None
+            assert len(static_detector.CORROBORATING_SYMBOLS) >= 10
+            assert count >= 3
+        finally:
+            static_detector.CORROBORATING_SYMBOLS = orig_symbols
+            static_detector._CORROBORATING_LOADED = orig_loaded
