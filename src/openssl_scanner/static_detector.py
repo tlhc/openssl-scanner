@@ -143,17 +143,19 @@ def detect_static_ssl(file_path: str) -> StaticSSLResult:
 
 
 def _scan_data(data) -> StaticSSLResult:
-    """Scan bytes for SSL library signatures."""
+    """Scan bytes for SSL library signatures.
 
-    has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
-    has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
-    has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
-
-    sym_count, found_syms = _count_corroborating(data)
+    Reordered for early exit: check cheap banner regexes first, only run
+    expensive corroboration if a banner is found.
+    """
 
     match = OPENSSL_STRICT_PATTERN.search(data)
     if match:
         version = match.group(1).decode('ascii')
+        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+        has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
+        has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
+        sym_count, found_syms = _count_corroborating(data)
         signals = ['version_banner_strict']
         if has_fvisibility:
             signals.append('fvisibility_hidden')
@@ -169,7 +171,22 @@ def _scan_data(data) -> StaticSSLResult:
             found_symbols=found_syms,
         )
 
-    if BORINGSSL_COMPAT_PATTERN.search(data) or BORINGSSL_BARE_PATTERN.search(data):
+    is_boringssl = (BORINGSSL_COMPAT_PATTERN.search(data)
+                    or BORINGSSL_BARE_PATTERN.search(data))
+
+    libre_match = LIBRESSL_PATTERN.search(data)
+
+    loose_match = OPENSSL_LOOSE_PATTERN.search(data)
+
+    if not is_boringssl and not libre_match and not loose_match:
+        return StaticSSLResult()
+
+    has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+    has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
+    has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
+    sym_count, found_syms = _count_corroborating(data)
+
+    if is_boringssl:
         if sym_count >= MIN_CORROBORATING_COUNT or has_fvisibility:
             signals = ['boringssl_banner']
             if has_fvisibility:
@@ -182,9 +199,8 @@ def _scan_data(data) -> StaticSSLResult:
                 found_symbols=found_syms,
             )
 
-    match = LIBRESSL_PATTERN.search(data)
-    if match:
-        version = match.group(1).decode('ascii')
+    if libre_match:
+        version = libre_match.group(1).decode('ascii')
         if sym_count >= MIN_CORROBORATING_COUNT or has_fvisibility:
             signals = ['libressl_banner']
             if has_fvisibility:
@@ -197,9 +213,8 @@ def _scan_data(data) -> StaticSSLResult:
                 found_symbols=found_syms,
             )
 
-    match = OPENSSL_LOOSE_PATTERN.search(data)
-    if match:
-        version = match.group(1).decode('ascii')
+    if loose_match:
+        version = loose_match.group(1).decode('ascii')
 
         if sym_count >= MIN_CORROBORATING_COUNT:
             signals = ['version_banner_loose',
@@ -306,12 +321,28 @@ def _load_probe_symbols():
 
 
 def _count_corroborating(data):
-    """Count and return corroborating symbol strings present in data."""
+    """Count and return corroborating symbol strings present in data.
+
+    Uses single-pass NUL-split + set intersection: O(file_size + |symbols|)
+    instead of O(|symbols| * file_size) from per-symbol bytes.__contains__.
+    """
     _load_probe_symbols()
-    found = []
+    probe_strs = set()
     for sym in CORROBORATING_SYMBOLS:
-        if sym in data:
-            found.append(sym.decode('ascii') if isinstance(sym, bytes) else sym)
+        probe_strs.add(sym.decode('ascii') if isinstance(sym, bytes) else sym)
+
+    strings = set()
+    for chunk in data.split(b'\x00'):
+        if len(chunk) < 4:
+            continue
+        try:
+            s = chunk.decode('ascii')
+        except UnicodeDecodeError:
+            continue
+        if s.isprintable():
+            strings.add(s)
+
+    found = sorted(strings & probe_strs)
     return len(found), found
 
 

@@ -33,10 +33,10 @@ class TestDetectStaticOpenssl:
             os.unlink(path)
 
     def test_loose_pattern_with_evidence(self):
-        content = (b"OpenSSL 3.0.0 "
-                   b"SSL_CTX_new "
-                   b"EVP_EncryptInit "
-                   b"SHA256_Update ")
+        content = (b"\x00OpenSSL 3.0.0\x00"
+                   b"SSL_CTX_new\x00"
+                   b"EVP_EncryptInit\x00"
+                   b"SHA256_Update\x00")
         with tempfile.NamedTemporaryFile(delete=False) as f:
             f.write(content)
             path = f.name
