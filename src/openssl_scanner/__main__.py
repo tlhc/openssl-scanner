@@ -1116,6 +1116,7 @@ def cmd_hap(args) -> int:
                 )
 
                 result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
+                result.files_detail.sort(key=lambda fr: fr.path)
                 result.report_type = 'package'
 
                 meta = extract_result.metadata
@@ -1129,8 +1130,8 @@ def cmd_hap(args) -> int:
                     'version_code': meta.version_code,
                     'min_api_version': meta.min_api_version,
                     'device_types': meta.device_types,
-                    'scanned_abi': meta.abis_found,
-                    'abis_available': meta.abis_found,
+                    'scanned_abi': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
+                    'abis_available': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
                     'native_libs_count': len(extract_result.so_files),
                     'bundled_openssl': (removed > 0
                                         or extract_result.openssl_lib is not None
@@ -1499,7 +1500,7 @@ def _dlopen_targets_resolved(dlopen_libs, bundled_basenames, patterns):
     if not dlopen_libs or not bundled_basenames:
         return False
     ossl_targets = [lib for lib in dlopen_libs
-                    if any(_lib_stem(lib).lower().startswith(p)
+                    if any(os.path.basename(lib).lower().startswith(p)
                            for p in patterns)]
     if not ossl_targets:
         return False
@@ -1514,7 +1515,7 @@ def _dt_needed_resolved(openssl_libs, bundled_basenames, patterns):
     OpenSSL lib lacks a matching bundled lib.
     """
     needed = [lib for lib in openssl_libs
-              if any(_lib_stem(lib).lower().startswith(p)
+              if any(os.path.basename(lib).lower().startswith(p)
                      for p in patterns)]
     if not needed or not bundled_basenames:
         return False
@@ -1734,16 +1735,16 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
         'ossl_type': type_summary,
         'detection': '',
         'bundled_openssl': '',
-        'static_syms': len(all_static),
-        'dynamic_syms': len(all_dynamic),
-        'dlopen_syms': len(all_dlopen),
-        'total_syms': len(all_static | all_dynamic | all_dlopen),
+        'static_syms': sum(r.get('static_syms', 0) for r in rows),
+        'dynamic_syms': sum(r.get('dynamic_syms', 0) for r in rows),
+        'dlopen_syms': sum(r.get('dlopen_syms', 0) for r in rows),
+        'total_syms': sum(r.get('total_syms', 0) for r in rows),
         'top_category': top_cat_total,
-        'other_cats': other_union,
+        'other_cats': sum(r.get('other_cats', 0) for r in rows),
         'dlopen_libs': '',
     }
     for cat in _HAP_HIGHLIGHT_CATS:
-        total_data[cat] = len(cat_union.get(cat, set()))
+        total_data[cat] = sum(r.get(cat, 0) for r in rows)
 
     for col_idx, key in enumerate(col_keys, 1):
         cell = ws.cell(row=total_row, column=col_idx, value=total_data.get(key, ''))

@@ -122,7 +122,7 @@ class TestDetectStaticSSL:
             r = detect_static_ssl(path)
             assert r.detected is True
             assert r.library == 'BoringSSL'
-            assert r.version == 'unknown'
+            assert r.version is None
             assert 'boringssl_banner' in r.signals
         finally:
             os.unlink(path)

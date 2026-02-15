@@ -283,7 +283,7 @@ class HapExtractor:
 
     NESTED_EXTENSIONS = {'.hap', '.har', '.hsp', '.zip'}
 
-    MAX_ZIP_DEPTH = 5
+    MAX_ZIP_DEPTH = 20
 
     def _extract_zip(self, zip_path: str, abi: Optional[str],
                      extract_dir: Optional[str],

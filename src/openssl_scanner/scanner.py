@@ -64,6 +64,67 @@ def _run_parallel_analysis(
     return results, errors
 
 
+def _categorize_for_tier(symbol_name: str) -> str:
+    """Categorize a symbol name using SYMBOL_CATEGORIES prefixes."""
+    from .constants import SYMBOL_CATEGORIES
+    for cat, prefixes in SYMBOL_CATEGORIES.items():
+        if any(symbol_name.startswith(p) for p in prefixes):
+            return cat
+    return 'other'
+
+
+def _compute_static_confidence(implemented_symbols, ssl_result):
+    """Compute confidence for static OpenSSL detection based on symbol tiers.
+
+    Returns (level, reason) where level is 'high', 'medium', 'low', or 'none'.
+
+    Strategy:
+    - Version banner -> 'high' confidence
+    - Any tier1 symbol -> at least 'low' confidence (legitimate API usage)
+    - Only single-category tier3 primitives with small count -> 'none' (FP filter)
+    - Mixed categories or large count -> at least 'low' confidence
+    """
+    from .constants import TIER1_CATEGORIES, TIER3_CATEGORIES
+
+    t1 = t2 = t3 = 0
+    categories_seen = set()
+    for sym in implemented_symbols:
+        cat = _categorize_for_tier(sym)
+        categories_seen.add(cat)
+        if cat in TIER1_CATEGORIES:
+            t1 += 1
+        elif cat in TIER3_CATEGORIES:
+            t3 += 1
+        else:
+            t2 += 1
+
+    total = t1 + t2 + t3
+
+    if ssl_result.detected and ssl_result.version:
+        return ('high', f'version_banner: {ssl_result.version} ({total} exported)')
+    if t1 >= 5:
+        return ('high', f'tier1_symbols: {t1} tier1, {total} total')
+    if total >= 50 and t1 >= 1:
+        return ('high', f'large_surface: {total} total, {t1} tier1')
+    if ssl_result.detected:
+        return ('medium', f'ssl_detected: {ssl_result.library} ({total} exported)')
+    if t1 >= 2 and total >= 5:
+        return ('medium', f'moderate_tier1: {t1} tier1, {total} total')
+    if t2 >= 5 and total >= 20:
+        return ('medium', f'strong_tier2: {t2} tier2, {total} total')
+    if t1 >= 1:
+        return ('low', f'minimal_tier1: {t1} tier1, {total} total')
+    if t2 >= 1 and total >= 5:
+        return ('low', f'weak_tier2: {t2} tier2, {total} total')
+    if total >= 10:
+        return ('low', f'large_count: {total} total (t1={t1} t2={t2} t3={t3})')
+    if len(categories_seen) > 1:
+        return ('low', f'mixed_categories: {len(categories_seen)} categories, {total} total')
+    if 3 <= total <= 5 and t1 == 0 and t2 == 0 and len(categories_seen) == 1:
+        return ('none', f'single_primitive: {list(categories_seen)[0]} only, {t3} symbols')
+    return ('low', f'default: {t1} tier1, {t2} tier2, {t3} tier3, {total} total')
+
+
 def _analyze_file_worker(args: tuple) -> 'FileResult':
     """
     Worker function for parallel file analysis.
@@ -139,24 +200,56 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
     static_openssl = False
     static_openssl_version = None
     static_ssl_library = ''
+    static_openssl_confidence = ''
+    static_openssl_confidence_reason = ''
+
+    ssl_result = detect_static_ssl(path)
+
+    if not ssl_result.detected:
+        try:
+            from .static_detector import detect_boringssl_weak_symbols, StaticSSLResult
+            weak_syms = set()
+            for s in info.undefined_symbols:
+                if hasattr(s, 'name'):
+                    weak_syms.add(s.name)
+                elif isinstance(s, str):
+                    weak_syms.add(s)
+            for s in info.defined_symbols:
+                if hasattr(s, 'name'):
+                    weak_syms.add(s.name)
+                elif isinstance(s, str):
+                    weak_syms.add(s)
+
+            if detect_boringssl_weak_symbols(weak_syms):
+                ssl_result = StaticSSLResult(
+                    detected=True, library='BoringSSL', version=None,
+                    signals=['boringssl_weak_symbols']
+                )
+        except ImportError:
+            pass
 
     implemented_openssl = set(openssl_defined) - set(openssl_symbols)
     if implemented_openssl:
+        confidence, reason = _compute_static_confidence(
+            implemented_openssl, ssl_result)
+
         logger.debug(
-            "static OpenSSL %s: implemented=%d needed=%s",
-            os.path.basename(path), len(implemented_openssl), info.needed_libs)
+            "static OpenSSL %s: implemented=%d confidence=%s reason=%s",
+            os.path.basename(path), len(implemented_openssl), confidence, reason)
 
-        if not openssl_symbols:
-            openssl_symbols = openssl_defined
-        else:
-            for s in openssl_defined:
-                if s not in openssl_symbols:
-                    openssl_symbols.append(s)
+        if confidence != 'none':
+            if not openssl_symbols:
+                openssl_symbols = openssl_defined
+            else:
+                for s in openssl_defined:
+                    if s not in openssl_symbols:
+                        openssl_symbols.append(s)
 
-        openssl_direct = True
-        static_openssl = True
+            openssl_direct = True
+            static_openssl = True
+            static_openssl_confidence = confidence
+            static_openssl_confidence_reason = reason
 
-    ssl_result = detect_static_ssl(path)
     hidden_static = False
     if ssl_result.detected:
         static_openssl = True
@@ -227,6 +320,8 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
         static_openssl=static_openssl,
         static_openssl_version=static_openssl_version,
         static_ssl_library=static_ssl_library,
+        static_openssl_confidence=static_openssl_confidence,
+        static_openssl_confidence_reason=static_openssl_confidence_reason,
         openssl_exported=openssl_defined,
         uses_dlopen=uses_dlopen,
         dlsym_symbols=dlsym_symbols,
@@ -250,6 +345,8 @@ class FileResult:
     static_openssl: bool = False
     static_openssl_version: Optional[str] = None
     static_ssl_library: str = ''
+    static_openssl_confidence: str = ''
+    static_openssl_confidence_reason: str = ''
     openssl_exported: List[str] = field(default_factory=list)
     uses_dlopen: bool = False
     dlsym_symbols: List[str] = field(default_factory=list)

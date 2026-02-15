@@ -1,5 +1,5 @@
-os=darwin
+os=linux
 arch=aarch64
-cc=gcc
+cc=elf_builder.py
 built=7
 failed=0

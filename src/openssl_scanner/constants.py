@@ -5,8 +5,12 @@ OpenSSL library patterns and symbol categorization.
 from typing import Dict, List
 
 OPENSSL_LIBRARY_PATTERNS: List[str] = [
-    "libcrypto",
-    "libssl",
+    "libcrypto.",
+    "libcrypto-",
+    "libcrypto_",
+    "libssl.",
+    "libssl-",
+    "libssl_",
     "libcrypto_openssl",
     "libssl_openssl",
     "libopenssl",
@@ -115,6 +119,18 @@ DEFAULT_SEARCH_PATHS: List[str] = [
     "/usr/lib/aarch64-linux-gnu",
     "/usr/lib/arm-linux-gnueabihf",
 ]
+
+TIER1_CATEGORIES = frozenset({
+    'ssl_core', 'ssl_tls', 'crypto_evp', 'crypto_bio', 'crypto_pem',
+    'crypto_x509', 'crypto_x509_ext', 'crypto_pkcs', 'crypto_cms',
+    'crypto_ocsp', 'crypto_ct', 'crypto_engine', 'crypto_provider',
+    'openssl_util',
+})
+
+TIER3_CATEGORIES = frozenset({
+    'crypto_aes', 'crypto_des', 'crypto_chacha', 'crypto_hash',
+    'crypto_hmac', 'crypto_bn', 'crypto_rand', 'crypto_legacy',
+})
 
 CATEGORY_DISPLAY_ORDER: List[str] = [
     "ssl_core",

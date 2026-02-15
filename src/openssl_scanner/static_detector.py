@@ -46,6 +46,9 @@ FVISIBILITY_HIDDEN_PATTERN = re.compile(rb"-fvisibility=hidden")
 OPENSSLDIR_PATTERN = re.compile(rb"OPENSSLDIR:")
 ENGINESDIR_PATTERN = re.compile(rb"ENGINESDIR:")
 
+BORINGSSL_SRC_PATTERN = re.compile(rb'boringssl/src/(?:crypto|ssl)/')
+BORINGSSL_UNIQUE_ERRORS = [b'ECH_REJECTED', b'CHANNEL_ID_NOT_P256', b'WRONG_SIGNATURE_TYPE', b'NO_COMMON_SIGNATURE_ALGORITHMS']
+
 CORROBORATING_SYMBOLS = None
 _CORROBORATING_LOADED = False
 
@@ -100,6 +103,18 @@ def detect_static_openssl(file_path: str) -> Optional[str]:
     if result.detected:
         return result.version
     return None
+
+
+def detect_boringssl_weak_symbols(symbol_names):
+    """Check for BoringSSL OPENSSL_memory_* weak symbols.
+
+    Args:
+        symbol_names: iterable of symbol name strings from .dynsym
+    Returns:
+        bool: True if BoringSSL weak symbols detected
+    """
+    BORINGSSL_WEAK = {'OPENSSL_memory_alloc', 'OPENSSL_memory_free', 'OPENSSL_memory_get_size'}
+    return len(BORINGSSL_WEAK & set(symbol_names)) >= 2
 
 
 def detect_static_ssl(file_path: str) -> StaticSSLResult:
@@ -172,8 +187,41 @@ def _scan_data(data) -> StaticSSLResult:
             found_symbols=found_syms,
         )
 
+    boringssl_src_paths = len(BORINGSSL_SRC_PATTERN.findall(data))
+    boringssl_unique_errors = sum(1 for err in BORINGSSL_UNIQUE_ERRORS if err in data)
+
     is_boringssl = (BORINGSSL_COMPAT_PATTERN.search(data)
                     or BORINGSSL_BARE_PATTERN.search(data))
+
+    if boringssl_src_paths >= 3:
+        is_boringssl = True
+        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+        sym_count, found_syms = _count_corroborating(data)
+        signals = ['boringssl_src_paths']
+        if has_fvisibility:
+            signals.append('fvisibility_hidden')
+        if sym_count > 0:
+            signals.append('corroborating_symbols_%d' % sym_count)
+        return StaticSSLResult(
+            detected=True, library='BoringSSL', version=None,
+            signals=signals, fvisibility_hidden=has_fvisibility,
+            found_symbols=found_syms,
+        )
+
+    if boringssl_unique_errors >= 2:
+        is_boringssl = True
+        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+        sym_count, found_syms = _count_corroborating(data)
+        signals = ['boringssl_unique_errors']
+        if has_fvisibility:
+            signals.append('fvisibility_hidden')
+        if sym_count > 0:
+            signals.append('corroborating_symbols_%d' % sym_count)
+        return StaticSSLResult(
+            detected=True, library='BoringSSL', version=None,
+            signals=signals, fvisibility_hidden=has_fvisibility,
+            found_symbols=found_syms,
+        )
 
     libre_match = LIBRESSL_PATTERN.search(data)
 
@@ -195,7 +243,7 @@ def _scan_data(data) -> StaticSSLResult:
             if sym_count > 0:
                 signals.append('corroborating_symbols_%d' % sym_count)
             return StaticSSLResult(
-                detected=True, library='BoringSSL', version='unknown',
+                detected=True, library='BoringSSL', version=None,
                 signals=signals, fvisibility_hidden=has_fvisibility,
                 found_symbols=found_syms,
             )

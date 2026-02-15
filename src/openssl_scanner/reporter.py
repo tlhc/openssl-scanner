@@ -281,6 +281,8 @@ class Reporter:
             'static_openssl': file_result.static_openssl,
             'static_openssl_version': file_result.static_openssl_version,
             'static_ssl_library': file_result.static_ssl_library,
+            'static_openssl_confidence': file_result.static_openssl_confidence,
+            'static_openssl_confidence_reason': file_result.static_openssl_confidence_reason,
             'openssl_exported': file_result.openssl_exported,
             'error': file_result.error,
         }
