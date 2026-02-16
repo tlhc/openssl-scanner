@@ -79,3 +79,4 @@ Thumbs.db
 !src/openssl_scanner/data/*.json
 *.xlsx
 *.html
+hap_test_packages/

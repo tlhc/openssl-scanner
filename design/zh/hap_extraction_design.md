@@ -1,0 +1,377 @@
+# HAP 提取与扫描设计
+
+**模块**: `hap_extractor.py` + `__main__.cmd_hap()`
+
+---
+
+## 1. 概述
+
+从 OpenHarmony 包 (HAP/HAR/HSP/APP/ZIP) 中提取 native `.so`，扫描 OpenSSL
+依赖，输出报告。
+
+```
+                               +------------------+
+*.hap / *.har / *.hsp -+------>| _extract_single  |--+
+                       |       +------------------+  |
+*.app -----------------+------>| _extract_app     |--+---> Scanner.scan_directory()
+                       |       +------------------+  |        |
+*.zip -----------------+------>| _extract_zip     |--+        v
+                       |       +------------------+       ScanResult
+directory of packages -+                                      |
+                                                              v
+                                                    JSON / XLSX / summary.xlsx
+```
+
+## 2. 包格式
+
+```
+APP 应用包
+  +-- entry.hap
+  +-- feature.hap
+  +-- shared.hsp
+  |
+  每个 HAP/HSP:
+    +-- module.json           (元数据)
+    +-- libs/
+    |   +-- arm64-v8a/        (ABI 目录)
+    |   |   +-- libentry.so
+    |   |   +-- libcrypto.so.3  (内置 OpenSSL, 可选)
+    |   +-- armeabi-v7a/
+    +-- resources/
+    +-- ets/
+```
+
+| 扩展名 | 说明 |
+|--------|------|
+| `.hap` | Harmony Ability Package (能力包) |
+| `.har` | Harmony Archive (共享库归档) |
+| `.hsp` | Harmony Shared Package (共享包) |
+| `.app` | 应用包, 内含 HAP/HSP |
+| `.zip` | 通用容器, 可嵌套包 |
+
+支持的 ABI (优先级顺序):
+
+| ABI | e_machine | 说明 |
+|-----|-----------|------|
+| `arm64-v8a` | 0xB7 EM_AARCH64 | 主要架构 |
+| `armeabi-v7a` | 0x28 EM_ARM | |
+| `armeabi` | 0x28 EM_ARM | 遗留架构 |
+| `x86_64` | 0x3E EM_X86_64 | 模拟器 |
+| `x86` | 0x03 EM_386 | 模拟器 |
+
+未指定 ABI 时提取全部; `ABI_PRIORITY` 仅影响 metadata 中的排列顺序。
+
+## 3. 数据结构
+
+### HapMetadata
+
+```python
+@dataclass
+class HapMetadata:
+    package_path: str
+    package_type: str          # "hap" / "har" / "hsp" / "app" / "zip"
+    bundle_name: str           # app.bundleName
+    module_name: str           # module.name
+    module_type: str           # "entry" / "feature" / "shared"
+    version_name: str
+    version_code: int
+    min_api_version: int
+    device_types: List[str]
+    abis_found: List[str]
+    native_libs: Dict[str, List[str]]   # ABI -> [filenames]
+```
+
+`module.json` 缺失或格式错误时，各字段回退为空值，提取和扫描正常进行。
+
+### HapExtractResult
+
+```python
+@dataclass
+class HapExtractResult:
+    metadata: HapMetadata
+    extract_dir: str
+    so_files: List[str]
+    openssl_lib: Optional[str]      # 内置 libcrypto 路径
+    openssl_ssl: Optional[str]      # 内置 libssl 路径
+    sub_packages: List[HapExtractResult]
+```
+
+APP 包形成树状结构:
+
+```
+HapExtractResult (APP)
+  +-- so_files: [all .so merged]
+  +-- sub_packages:
+       +-- HapExtractResult (entry.hap)
+       +-- HapExtractResult (feature.hap)
+```
+
+## 4. 提取流水线
+
+### 4.1 分发
+
+```
+extract(package_path, abi, extract_dir)
+  +-- .app  --> _extract_app()
+  +-- .zip  --> _extract_zip()
+  +-- other --> _extract_single()
+```
+
+### 4.2 _extract_single (HAP/HAR/HSP)
+
+```
+打开 ZipFile
+  -> 读取 module.json
+  -> 发现 libs/<abi>/ (ELF magic 校验)
+  -> 构建 HapMetadata
+  -> 提取 ELF 文件到 <extract_dir>/<abi>/
+  -> _detect_openssl() 检测内置 libcrypto/libssl
+```
+
+未指定 ABI 时提取所有 ABI; 指定不存在的 ABI 抛出 ValueError。
+
+### 4.3 _extract_app (APP 应用包)
+
+```
+打开 ZipFile
+  -> 构建 APP 级元数据
+  -> 遍历每个 .hap/.hsp 条目:
+       路径穿越检查
+       _safe_extract_member() 提取到临时位置
+       _extract_single() 处理子包
+  -> 合并所有 so_files
+```
+
+### 4.4 _extract_zip (递归处理)
+
+ZIP 可能是:
+- 扁平包 (含 libs/ 目录)
+- 容器 (嵌套 .hap/.har/.hsp/.zip)
+- 两者兼有
+
+```
+扫描嵌套包
+  -> 未发现嵌套:       回退到 _extract_single()
+  -> 深度 >= 20:       警告, 回退到 _extract_single()
+  -> 存在嵌套:
+       提取外层 libs/ (如有)
+       遍历每个嵌套条目:
+         名称去重 (entry_2.hap)
+         路径穿越检查
+         创建 sub_extract_dir/<stem>/
+         .zip -> 递归 _extract_zip(_depth+1)
+         其他 -> _extract_single()
+       合并所有 so_files
+```
+
+设计要点:
+- `MAX_ZIP_DEPTH = 20` 防止 zip 炸弹
+- 每个嵌套包提取到独立子目录，避免同名 `.so` 覆盖
+- 外层 libs/ 和嵌套包同时处理
+
+## 5. 安全性
+
+**路径穿越防护**: 每个提取路径通过 `os.path.realpath()` 做目录限制检查。
+
+**大小限制**: `MAX_EXTRACT_SIZE = 20 GB`, 逐块写入, 超限立即删除部分文件。
+
+**ELF 识别**: 通过 magic bytes `\x7fELF` 识别, 不依赖文件扩展名。
+同时校验 `e_machine` 是否匹配声明的 ABI。
+
+## 6. CLI 集成
+
+### 6.1 规划阶段
+
+```
+cmd_hap(args)
+  -> 收集目标 (文件 + 目录)
+  -> _plan_packages() -> List[_PkgEntry]
+```
+
+`_plan_packages()` 将容器 (.zip/.app) 展开为内部条目，但不执行提取:
+
+```python
+class _PkgEntry:
+    path: str           # 独立包路径, 或 None
+    container: str      # 容器路径, 或 None
+    zip_entry: str      # 容器内条目名
+    display_name: str   # 例如 "bundle_entry.hap"
+```
+
+### 6.2 即时提取 (JIT)
+
+`_extract_pkg_entry()` 按需提取，每次只处理一个包:
+- 独立包: 直接返回路径
+- 容器条目: 提取到临时文件, finally 中清理
+
+### 6.3 扫描流程
+
+```
+遍历每个 _PkgEntry:
+  1. 增量检查: 若 JSON+XLSX 缓存存在且比源文件新则跳过
+  2. 提取包 -> HapExtractResult
+  3. 移除内置 OpenSSL 库 (防止扫描 OpenSSL 自身)
+  4. Scanner.scan_directory() 使用 ProcessPoolExecutor 并行分析
+  5. 将 package_info 附加到 ScanResult
+  6. per-package 模式: 立即写入报告
+  7. 输出进度行
+```
+
+### 6.4 输出模式
+
+| 参数 | 行为 |
+|------|------|
+| `-o report.xlsx` | 合并为单个报告 |
+| `-o /tmp/reports/` | 每包独立 JSON + XLSX + summary.xlsx |
+| `--json-only` | 不生成 XLSX |
+| `--force` | 忽略缓存, 重新扫描 |
+
+### 6.5 增量扫描
+
+per-package 模式下, 通过 mtime 比较跳过已扫描的包:
+
+```
+cached = (json 存在 AND json_mtime >= source_mtime)
+         AND (json_only OR xlsx 存在)
+```
+
+支持可恢复的批量扫描。
+
+## 7. 汇总报告
+
+### 7.1 分类 (`_classify_hap_detection`)
+
+逐文件分析, 聚合为包级别分类:
+
+```
+检测方式: Dynamic / Static / dlopen / Mixed / None
+
+ossl_type:
+  Self-Contained  -- 所有依赖在包内解决
+  System-Link     -- 存在未解析的外部 OpenSSL 依赖
+  No-OpenSSL      -- 无 OpenSSL 符号
+```
+
+逐库解析: 每个 `.so` 的依赖独立评估; 任一文件有未解析的
+外部依赖即标记为 System-Link。
+
+辅助函数:
+- `_dt_needed_resolved(openssl_libs, bundled_basenames, patterns)`:
+  检查 DT_NEEDED 中的 OpenSSL 库是否全部由包内 bundled 库满足。
+  对原始 basename 做 pattern 匹配 (非 stem), 再用 stem 比较 bundled 集合。
+- `_dlopen_targets_resolved(dlopen_libs, bundled_basenames, patterns)`:
+  检查 dlopen 加载的 OpenSSL 目标是否全部由包内 bundled 库满足。
+  逻辑同上。
+
+### 7.2 汇总 XLSX
+
+`_generate_hap_summary()` 输出:
+
+| 列名 | 内容 |
+|------|------|
+| Package Name | bundle_name 或文件名 |
+| Type | hap/har/hsp/app/zip |
+| Version | version_name |
+| ABI | 逗号分隔 |
+| .so Files | native 库数量 |
+| OpenSSL Type | Self-Contained / System-Link / No-OpenSSL |
+| Detection | Dynamic / Static / dlopen / Mixed |
+| Bundled OpenSSL | Yes / No |
+| Static Symbols | 每包静态符号数 |
+| Dynamic Symbols | 每包动态符号数 |
+| dlopen Symbols | 每包 dlopen 符号数 |
+| Total Symbols | 每包总符号数 |
+| Top Category | 最多使用的分类 |
+| ssl_core | ssl_core 分类符号数 |
+| crypto_evp | crypto_evp 分类符号数 |
+| crypto_x509 | crypto_x509 分类符号数 |
+| crypto_ec | crypto_ec 分类符号数 |
+| crypto_hash | crypto_hash 分类符号数 |
+| crypto_sm | crypto_sm 分类符号数 |
+| crypto_bio | crypto_bio 分类符号数 |
+| Other Cats | 其余分类合计 |
+| dlopen Libs | 检测到的库名 |
+
+TOTAL 行使用算术求和 (每列 = 各包对应值之和), 使 Excel 用户看到
+TOTAL = SUM(可见行), 符合电子表格直觉。
+
+### 7.3 `hap-summary` 子命令
+
+从已有 JSON 报告重新生成 summary.xlsx, 无需重新扫描:
+
+```
+收集 *.json -> _load_scan_result_from_json() -> _generate_hap_summary()
+```
+
+## 8. 文件名冲突
+
+三层去重:
+
+1. **嵌套包名**: 同一 ZIP 内同名条目自动加后缀 (`entry_2.hap`)
+2. **输出文件**: `_resolve_hap_output_names()` 确保输出路径唯一
+3. **容器展开**: `_plan_packages()` 为内部包添加容器前缀 (`bundle_entry.hap`)
+
+## 9. OpenSSL 检测
+
+### 内置库检测
+
+匹配 `OPENSSL_LIBRARY_PATTERNS` (basename 前缀):
+`libcrypto.`, `libcrypto-`, `libcrypto_`, `libssl.`, `libssl-`, `libssl_`,
+`libcrypto_openssl`, `libssl_openssl`, `libopenssl`,
+`libboringssl`, `libboringcrypto`
+
+扫描前从提取目录中**删除**匹配的库, 避免扫描 OpenSSL 本身产生大量自引用符号。
+
+### 三种检测方式
+
+| 方式 | 机制 |
+|------|------|
+| Dynamic | `.dynsym` UND 符号 vs OpenSSL 导出表 |
+| Static | 版本字符串 + 佐证符号 + `-fvisibility=hidden` |
+| dlopen | 字符串聚类 + 反汇编交叉验证 |
+
+## 10. 错误处理
+
+| 场景 | 行为 |
+|------|------|
+| module.json 缺失/格式错误 | 空元数据, 继续处理 |
+| 无效 ZIP 条目 / BadZipFile | 警告, 跳过 |
+| 架构不匹配 | 警告, 仍然提取 |
+| 超出大小限制 | 删除部分文件, 抛出异常 |
+| 无 native 库 | 返回空结果 |
+| 路径穿越 | 警告, 跳过 |
+| 超出最大嵌套深度 | 警告, 按扁平包处理 |
+
+清理: `HapExtractor.cleanup()` 递归删除临时目录;
+`cmd_hap()` 在 finally 中清理容器临时文件。
+
+## 11. 性能
+
+- **即时提取 (JIT)**: 每次只提取一个包, 避免内存膨胀
+- **包间串行, 文件并行**: 包间串行控制内存;
+  包内 `.so` 通过 `ProcessPoolExecutor` 并行分析
+- **内置库移除**: 跳过 libcrypto/libssl 避免无效扫描
+- **分析提前退出**: 无 dlopen/dlsym 则跳过 dlopen 分析;
+  无原始匹配则跳过聚类 + 反汇编
+
+## 12. 文件映射
+
+```
+src/openssl_scanner/
+  hap_extractor.py          extract / _extract_single / _extract_app / _extract_zip
+                            _safe_extract_member / _detect_openssl / find_packages
+                            cleanup / parse_metadata
+  __main__.py               cmd_hap / cmd_hap_summary / _plan_packages
+                            _extract_pkg_entry / _classify_hap_detection
+                            _generate_hap_summary / _load_scan_result_from_json
+                            _resolve_hap_output_names / _hap_write_single_report
+                            _merge_hap_results / _build_hap_summary_row
+                            _collect_bundled_names / _lib_stem
+                            _dt_needed_resolved / _dlopen_targets_resolved
+  constants.py              OPENSSL_LIBRARY_PATTERNS
+  scanner.py                Scanner.scan_directory / _build_file_result
+
+tests/
+  test_hap_extractor.py
+  test_hap_integration.py
+```
