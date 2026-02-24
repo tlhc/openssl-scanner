@@ -1633,9 +1633,17 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
 
     bundled_str = 'Yes' if pi.get('bundled_openssl') else 'No'
 
+    bundle = pi.get('bundle_name', '')
+    module = pi.get('module_name', '')
+    if bundle and module:
+        pkg_name = f'{bundle}/{module}'
+    elif bundle:
+        pkg_name = bundle
+    else:
+        pkg_name = os.path.splitext(os.path.basename(pkg_path))[0]
+
     return {
-        'pkg_name': pi.get('bundle_name') or os.path.splitext(
-            os.path.basename(pkg_path))[0],
+        'pkg_name': pkg_name,
         'pkg_type': pi.get('package_type', ''),
         'version': pi.get('version_name', ''),
         'abi': abi,

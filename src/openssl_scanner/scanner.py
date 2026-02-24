@@ -102,6 +102,9 @@ def _compute_static_confidence(implemented_symbols, ssl_result):
 
     if ssl_result.detected and ssl_result.version:
         return ('high', f'version_banner: {ssl_result.version} ({total} exported)')
+    # BoringSSL has no version string; corroborate with tier1 exported symbols.
+    if ssl_result.detected and not ssl_result.version and t1 >= 2:
+        return ('high', f'{ssl_result.library}_detected: {t1} tier1, {total} total')
     if t1 >= 5:
         return ('high', f'tier1_symbols: {t1} tier1, {total} total')
     if total >= 50 and t1 >= 1:
@@ -118,6 +121,8 @@ def _compute_static_confidence(implemented_symbols, ssl_result):
         return ('low', f'weak_tier2: {t2} tier2, {total} total')
     if total >= 10:
         return ('low', f'large_count: {total} total (t1={t1} t2={t2} t3={t3})')
+    if total <= 2 and t1 == 0 and t2 == 0:
+        return ('none', f'insufficient: {total} total, all tier3')
     if len(categories_seen) > 1:
         return ('low', f'mixed_categories: {len(categories_seen)} categories, {total} total')
     if 3 <= total <= 5 and t1 == 0 and t2 == 0 and len(categories_seen) == 1:

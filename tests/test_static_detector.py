@@ -389,3 +389,115 @@ class TestCountCorroboratingFallback:
         finally:
             static_detector.CORROBORATING_SYMBOLS = orig_symbols
             static_detector._CORROBORATING_LOADED = orig_loaded
+
+
+class TestBoringSSLUniqueErrors:
+    """Verify BORINGSSL_UNIQUE_ERRORS contains genuine BoringSSL-only fingerprints.
+
+    Channel ID and ALPS are Google-proprietary TLS extensions never implemented
+    in OpenSSL, so they are reliable BoringSSL fingerprints.
+    WRONG_SIGNATURE_TYPE was removed (also in OpenSSL as SSL_R_WRONG_SIGNATURE_TYPE).
+    NO_COMMON_SIGNATURE_ALGORITHMS is kept (OpenSSL uses the different string
+    NO_SUITABLE_SIGNATURE_ALGORITHM).
+    """
+
+    def _write_file(self, content):
+        import tempfile
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.write(content)
+        f.close()
+        return f.name
+
+    def test_channel_id_strings_detect_boringssl(self):
+        """Two TLS Channel ID strings trigger BoringSSL detection via unique_errors signal."""
+        content = b"CHANNEL_ID_NOT_P256\x00CHANNEL_ID_SIGNATURE_INVALID\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+            assert 'boringssl_unique_errors' in r.signals
+        finally:
+            os.unlink(path)
+
+    def test_alps_strings_detect_boringssl(self):
+        """Two ALPS extension strings trigger BoringSSL detection."""
+        content = b"ALPS_MISMATCH_ON_EARLY_DATA\x00INVALID_ALPS_CODEPOINT\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+            assert 'boringssl_unique_errors' in r.signals
+        finally:
+            os.unlink(path)
+
+    def test_wrong_signature_type_plus_no_common_insufficient(self):
+        """WRONG_SIGNATURE_TYPE is in OpenSSL (correctly excluded from our list).
+        NO_COMMON_SIGNATURE_ALGORITHMS is BoringSSL-only (re-added to list).
+        The combination yields only 1 unique-error match, below the >= 2 threshold."""
+        content = b"WRONG_SIGNATURE_TYPE\x00NO_COMMON_SIGNATURE_ALGORITHMS\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is False
+        finally:
+            os.unlink(path)
+
+    def test_no_common_signature_algorithms_with_channel_id_detects_boringssl(self):
+        """NO_COMMON_SIGNATURE_ALGORITHMS (BoringSSL-only) + CHANNEL_ID_NOT_P256 = 2 unique -> detected."""
+        content = b"NO_COMMON_SIGNATURE_ALGORITHMS\x00CHANNEL_ID_NOT_P256\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+            assert 'boringssl_unique_errors' in r.signals
+        finally:
+            os.unlink(path)
+
+    def test_new_unique_errors_detect_boringssl(self):
+        """Three newly added unique errors trigger BoringSSL detection when two are present."""
+        content = (
+            b"NEGOTIATED_ALPS_WITHOUT_ALPN\x00"
+            b"ECH_SERVER_WOULD_HAVE_NO_RETRY_CONFIGS\x00"
+        )
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+        finally:
+            os.unlink(path)
+
+    def test_could_not_parse_hints_with_alps_detects_boringssl(self):
+        """COULD_NOT_PARSE_HINTS + ALPS_MISMATCH_ON_EARLY_DATA = 2 unique -> detected."""
+        content = b"COULD_NOT_PARSE_HINTS\x00ALPS_MISMATCH_ON_EARLY_DATA\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+        finally:
+            os.unlink(path)
+
+    def test_single_unique_error_insufficient(self):
+        """One unique error string alone is below the >= 2 threshold."""
+        content = b"CHANNEL_ID_NOT_P256\x00other_data\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is False
+        finally:
+            os.unlink(path)
+
+    def test_ech_with_channel_id_detect_boringssl(self):
+        """ECH_REJECTED + CHANNEL_ID_NOT_P256 combination also triggers detection."""
+        content = b"ECH_REJECTED\x00CHANNEL_ID_NOT_P256\x00"
+        path = self._write_file(content)
+        try:
+            r = detect_static_ssl(path)
+            assert r.detected is True
+            assert r.library == 'BoringSSL'
+        finally:
+            os.unlink(path)

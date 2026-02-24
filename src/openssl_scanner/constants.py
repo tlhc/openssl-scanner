@@ -16,10 +16,18 @@ OPENSSL_LIBRARY_PATTERNS: List[str] = [
     "libopenssl",
     "libboringssl",
     "libboringcrypto",
+    "libhissl.",
+    "libhissl_",
+    "libssl_openssl_ohos",
 ]
 
-DLOPEN_FUNCTION_NAMES = frozenset({'dlopen', '__libc_dlopen_mode'})
-DLSYM_FUNCTION_NAMES = frozenset({'dlsym', '__libc_dlsym'})
+DLOPEN_FUNCTION_NAMES = frozenset({
+    'dlopen',
+    '__libc_dlopen_mode',
+    'android_dlopen_ext',   # Android/OHOS extended dlopen with namespace support
+    'dlopen_ns',            # OpenHarmony musl extended dlopen (dlfcn_ext.h)
+})
+DLSYM_FUNCTION_NAMES = frozenset({'dlsym', '__libc_dlsym', 'dlvsym'})
 
 SYMBOL_CATEGORIES: Dict[str, List[str]] = {
     "ssl_core": ["SSL_"],

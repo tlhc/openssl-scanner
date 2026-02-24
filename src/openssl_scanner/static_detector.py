@@ -47,7 +47,22 @@ OPENSSLDIR_PATTERN = re.compile(rb"OPENSSLDIR:")
 ENGINESDIR_PATTERN = re.compile(rb"ENGINESDIR:")
 
 BORINGSSL_SRC_PATTERN = re.compile(rb'boringssl/src/(?:crypto|ssl)/')
-BORINGSSL_UNIQUE_ERRORS = [b'ECH_REJECTED', b'CHANNEL_ID_NOT_P256', b'WRONG_SIGNATURE_TYPE', b'NO_COMMON_SIGNATURE_ALGORITHMS']
+
+# BoringSSL-unique TLS error reason strings. Verified against:
+#   BoringSSL: crypto/err/ssl.errordata (Feb 2026)
+#   OpenSSL master/3.5/3.4/3.2/1.1.1w: crypto/err/openssl.txt + include/openssl/sslerr.h
+# WRONG_SIGNATURE_TYPE excluded: also in OpenSSL as SSL_R_WRONG_SIGNATURE_TYPE (code 370).
+BORINGSSL_UNIQUE_ERRORS = [
+    b'ECH_REJECTED',                          # BoringSSL SSL,319 -- OpenSSL uses ECH_REQUIRED (different string)
+    b'NO_COMMON_SIGNATURE_ALGORITHMS',        # BoringSSL SSL,253 -- OpenSSL uses NO_SUITABLE_SIGNATURE_ALGORITHM
+    b'CHANNEL_ID_NOT_P256',                   # TLS Channel ID: Google extension, never in OpenSSL
+    b'CHANNEL_ID_SIGNATURE_INVALID',          # TLS Channel ID: Google extension, never in OpenSSL
+    b'ALPS_MISMATCH_ON_EARLY_DATA',           # ALPS extension: BoringSSL/Google only
+    b'INVALID_ALPS_CODEPOINT',                # ALPS extension: BoringSSL/Google only
+    b'NEGOTIATED_ALPS_WITHOUT_ALPN',          # ALPS extension: BoringSSL/Google only
+    b'ECH_SERVER_WOULD_HAVE_NO_RETRY_CONFIGS', # ECH: BoringSSL-specific variant, not in OpenSSL
+    b'COULD_NOT_PARSE_HINTS',                 # Split-handshake hints: BoringSSL only
+]
 
 CORROBORATING_SYMBOLS = None
 _CORROBORATING_LOADED = False
@@ -396,6 +411,12 @@ def _extract_printable_strings(data):
     Uses re.finditer on a pre-compiled pattern that matches sequences of 4+
     non-NUL bytes. Works on both bytes and mmap.mmap objects, avoiding the
     AttributeError from mmap.split() for files > _MAX_SCAN_SIZE.
+
+    Relies on the ELF convention that symbol names and error-reason strings
+    embedded by the OpenSSL toolchain (e.g. ERR_STRING_DATA entries, __FILE__
+    macros) are NUL-terminated.  Multi-word sentences that happen to contain
+    a symbol name as a substring are therefore NOT matched, which keeps the
+    false-positive rate low.
     """
     strings = set()
     for m in _NUL_CHUNK_RE.finditer(data):

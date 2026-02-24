@@ -1171,8 +1171,36 @@ class TestBundledOpenSSLDetection:
             bundled = ws.cell(row=r, column=8).value
             if name and name != "TOTAL":
                 bundled_vals[name] = bundled
-        assert bundled_vals.get("com.test.bundled") == "Yes"
-        assert bundled_vals.get("com.test.plain") == "No"
+        assert bundled_vals.get("com.test.bundled/entry") == "Yes"
+        assert bundled_vals.get("com.test.plain/entry") == "No"
+
+
+    def test_app_summary_distinguishes_modules(self):
+        """APP with multiple HAPs -> summary rows use bundle_name/module_name."""
+        pkg_dir = os.path.join(self.tmpdir, "packages")
+        os.makedirs(pkg_dir)
+        _create_test_app(os.path.join(pkg_dir, "multi.app"), hap_count=3)
+
+        out_dir = os.path.join(self.tmpdir, "output")
+        ret = main(['hap', pkg_dir, '-o', out_dir, '--json-only'])
+        assert ret == 0
+
+        summary = os.path.join(out_dir, "summary.xlsx")
+        assert os.path.isfile(summary)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary)
+        ws = wb.active
+        pkg_names = []
+        for r in range(2, ws.max_row):
+            name = ws.cell(row=r, column=1).value
+            if name and name != "TOTAL":
+                pkg_names.append(name)
+
+        assert len(pkg_names) == 3
+        assert "com.test.app/module0" in pkg_names
+        assert "com.test.app/module1" in pkg_names
+        assert "com.test.app/module2" in pkg_names
 
 
 if __name__ == "__main__":
