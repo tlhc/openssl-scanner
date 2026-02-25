@@ -257,20 +257,26 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
 
     hidden_static = False
     if ssl_result.detected:
-        static_openssl = True
-        static_openssl_version = ssl_result.version
-        static_ssl_library = ssl_result.library
-        if not openssl_defined and not openssl_libs:
-            hidden_static = True
-            openssl_direct = True
-            if openssl_exports:
-                hidden_syms = scan_hidden_static_symbols(path, openssl_exports)
-                if hidden_syms:
-                    openssl_symbols = hidden_syms
-        logger.debug(
-            "Static %s signature in %s: %s (signals=%s, hidden=%s)",
-            ssl_result.library, os.path.basename(path),
-            ssl_result.version, ssl_result.signals, hidden_static)
+        if openssl_libs:
+            logger.debug(
+                "Suppressed static %s in %s: DT_NEEDED %s overrides banner",
+                ssl_result.library, os.path.basename(path), openssl_libs)
+        else:
+            static_openssl = True
+            static_openssl_version = ssl_result.version
+            static_ssl_library = ssl_result.library
+            if not openssl_defined:
+                hidden_static = True
+                openssl_direct = True
+                if openssl_exports:
+                    hidden_syms = scan_hidden_static_symbols(
+                        path, openssl_exports)
+                    if hidden_syms:
+                        openssl_symbols = hidden_syms
+            logger.debug(
+                "Static %s signature in %s: %s (signals=%s, hidden=%s)",
+                ssl_result.library, os.path.basename(path),
+                ssl_result.version, ssl_result.signals, hidden_static)
 
     # Confidence floor: when ssl_result.detected sets static_openssl=True
     # but no implemented_openssl symbols were found (e.g. BoringSSL with
