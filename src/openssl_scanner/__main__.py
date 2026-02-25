@@ -1702,12 +1702,10 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         openssl_usage = f'Bundled {detail}' if detail else 'Bundled'
     elif bundled_raw is True:
         openssl_usage = 'Bundled'
-    elif ossl_type == 'No-OpenSSL':
-        openssl_usage = 'None'
     elif ossl_type == 'System-Link':
         openssl_usage = 'System-Link'
     else:
-        openssl_usage = 'Self-Contained'
+        openssl_usage = 'None'
 
     bundle = pi.get('bundle_name', '')
     module = pi.get('module_name', '')

@@ -264,7 +264,7 @@ bundled_openssl (字符串 "Yes ...")  ->  Bundled (static) / Bundled (static, s
 bundled_openssl (True)              ->  Bundled
 ossl_type == No-OpenSSL             ->  None
 ossl_type == System-Link            ->  System-Link
-其他                                ->  Self-Contained
+其他                                ->  None
 ```
 
 优先级: 打包的 .so 文件 > 静态提供者 > 依赖解析分类。
@@ -292,7 +292,7 @@ ossl_type == System-Link            ->  System-Link
 | Version | version_name |
 | ABI | 逗号分隔 |
 | .so Files | native 库数量 |
-| OpenSSL Usage | None / System-Link / Self-Contained / Bundled / Bundled (static) / Bundled (static, shared) |
+| OpenSSL Usage | None / System-Link / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
 | Static Symbols | 每包静态符号数 |
 | Dynamic Symbols | 每包动态符号数 |

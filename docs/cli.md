@@ -961,9 +961,8 @@ ZIP 文件可能是：
 
 | OpenSSL Usage | 条件 | 说明 |
 |---------------|------|------|
-| **None** | 无任何 OpenSSL 符号 | 不使用 OpenSSL |
+| **None** | 未检测到 OpenSSL（含低置信度检测） | 不使用 OpenSSL 或证据不足 |
 | **System-Link** | 依赖系统 OpenSSL（动态链接或 dlopen），未打包 | 依赖平台提供的 libcrypto/libssl |
-| **Self-Contained** | 低置信度静态链接，无外部依赖 | 可能包含 OpenSSL 但置信度不足 |
 | **Bundled** | 包内包含 libcrypto.so / libssl.so | 打包了独立的 OpenSSL 共享库 |
 | **Bundled (static)** | 静态编译 OpenSSL 到 .so 中（高/中置信度） | 如 Flutter/BoringSSL、FFmpeg 等 |
 | **Bundled (static, shared)** | 同上，且其他 .so 通过 DT_NEEDED 消费该库 | 静态提供者被其他库依赖 |

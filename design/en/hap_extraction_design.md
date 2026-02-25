@@ -271,7 +271,7 @@ bundled_openssl (str "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
 bundled_openssl (True)           ->  Bundled
 ossl_type == No-OpenSSL          ->  None
 ossl_type == System-Link         ->  System-Link
-otherwise                        ->  Self-Contained
+otherwise                        ->  None
 ```
 
 Priority: standalone .so > static providers > dependency resolution.
@@ -300,7 +300,7 @@ Helper functions:
 | Version | version_name |
 | ABI | comma-separated |
 | .so Files | native lib count |
-| OpenSSL Usage | None / System-Link / Self-Contained / Bundled / Bundled (static) / Bundled (static, shared) |
+| OpenSSL Usage | None / System-Link / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
 | Static Symbols | per-package static symbol count |
 | Dynamic Symbols | per-package dynamic symbol count |

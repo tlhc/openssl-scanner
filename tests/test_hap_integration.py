@@ -1064,11 +1064,11 @@ class TestBundledOpenSSLDetection:
         assert data['meta']['package']['bundled_openssl'] is False
 
     def test_summary_row_static_no_so_file(self):
-        """Static OpenSSL without bundled .so -> openssl_usage='Self-Contained'.
+        """Static OpenSSL without bundled .so -> openssl_usage='None'.
 
         No standalone .so, no high/medium confidence providers ->
-        bundled_openssl=False.  Static linkage still classified as
-        Self-Contained in the merged OpenSSL Usage column.
+        bundled_openssl=False.  Low-confidence static detection is
+        insufficient evidence; maps to None in OpenSSL Usage column.
         """
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
@@ -1092,7 +1092,7 @@ class TestBundledOpenSSLDetection:
         method, s, d, dl, ossl_type = _classify_hap_detection(result)
         row = _build_hap_summary_row(result, "/t.hap", method, s, d, dl,
                                      ossl_type)
-        assert row['openssl_usage'] == 'Self-Contained'
+        assert row['openssl_usage'] == 'None'
 
     def test_summary_row_no_openssl(self):
         """No OpenSSL .so and no static -> openssl_usage='None'."""
@@ -1196,7 +1196,7 @@ class TestLoadScanResultFromJson:
 
         Fix #1 from agent team review: _load_scan_result_from_json was not
         reading back static_openssl_confidence, causing hap-summary to
-        misclassify Bundled (static) as Self-Contained.
+        misclassify Bundled (static) as None.
         """
         report_json = {
             "meta": {
@@ -1783,12 +1783,12 @@ class TestOpenSSLUsageScenarios:
         row, *_ = self._classify_and_build(result)
         assert row['openssl_usage'] == 'Bundled (static)'
 
-    def test_s20_self_contained_static(self):
-        """Static only, low confidence filtered -> usage='Self-Contained'.
+    def test_s20_low_confidence_static_is_none(self):
+        """Static only, low confidence filtered -> usage='None'.
 
         Library has static_openssl=True but confidence is empty (below
         high/medium threshold), so _detect_static_providers() skips it.
-        bundled_openssl=False, no unresolved external -> Self-Contained.
+        Low-confidence detection is insufficient for any Bundled label.
         """
         result = self._make_result(
             files_detail=[
@@ -1802,7 +1802,7 @@ class TestOpenSSLUsageScenarios:
             package_info=self._make_pkg_info(bundled=False),
         )
         row, *_ = self._classify_and_build(result)
-        assert row['openssl_usage'] == 'Self-Contained'
+        assert row['openssl_usage'] == 'None'
         assert row['detection'] == 'Static'
 
     def test_s21_empty_files_detail(self):
