@@ -14,6 +14,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from openssl_scanner.__main__ import main
+from openssl_scanner.__main__ import (
+    _classify_hap_detection, _build_hap_summary_row, _HAP_SUMMARY_COLUMNS,
+    _load_scan_result_from_json, _detect_static_providers,
+)
+from openssl_scanner.scanner import ScanResult, FileResult
 
 
 def _minimal_elf64():
@@ -236,7 +241,6 @@ class TestHapReportMetadata:
 
     def test_reporter_package_info_in_json(self):
         """Verify Reporter correctly serializes package_info to JSON."""
-        from openssl_scanner.scanner import ScanResult
         from openssl_scanner.reporter import Reporter
 
         result = ScanResult(
@@ -271,7 +275,6 @@ class TestHapReportMetadata:
 
     def test_reporter_summary_includes_package_info(self):
         """Verify console summary includes package metadata."""
-        from openssl_scanner.scanner import ScanResult
         from openssl_scanner.reporter import Reporter
 
         result = ScanResult(
@@ -332,7 +335,7 @@ class TestHapSummaryReport:
         assert os.path.isfile(summary)
 
     def test_summary_has_correct_columns(self):
-        """Header row should have all 22 columns."""
+        """Header row should have all 21 columns."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
         summary = os.path.join(out_dir, "summary.xlsx")
@@ -341,18 +344,17 @@ class TestHapSummaryReport:
         wb = load_workbook(summary)
         ws = wb.active
         assert ws.title == "Package Summary"
-        headers = [ws.cell(row=1, column=c).value for c in range(1, 23)]
+        headers = [ws.cell(row=1, column=c).value for c in range(1, 22)]
         assert headers[0] == "Package Name"
-        assert headers[5] == "OpenSSL Type"
+        assert headers[5] == "OpenSSL Usage"
         assert headers[6] == "Detection"
-        assert headers[7] == "Bundled OpenSSL"
-        assert headers[8] == "Static Symbols"
-        assert headers[9] == "Dynamic Symbols"
-        assert headers[10] == "dlopen Symbols"
-        assert headers[11] == "Total Symbols"
-        assert headers[12] == "Top Category"
-        assert headers[21] == "dlopen Libs"
-        assert len(headers) == 22
+        assert headers[7] == "Static Symbols"
+        assert headers[8] == "Dynamic Symbols"
+        assert headers[9] == "dlopen Symbols"
+        assert headers[10] == "Total Symbols"
+        assert headers[11] == "Top Category"
+        assert headers[20] == "dlopen Libs"
+        assert len(headers) == 21
 
     def test_summary_row_count(self):
         """Should have header + N data rows + TOTAL row."""
@@ -383,8 +385,8 @@ class TestHapSummaryReport:
                      for r in range(2, total_row))
         assert ws.cell(row=total_row, column=5).value == pkg_so
 
-    def test_summary_ossl_type_for_minimal_elf(self):
-        """Minimal ELFs have no OpenSSL -> OpenSSL Type should be No-OpenSSL."""
+    def test_summary_openssl_usage_for_minimal_elf(self):
+        """Minimal ELFs have no OpenSSL -> OpenSSL Usage should be None."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
 
@@ -392,13 +394,13 @@ class TestHapSummaryReport:
         wb = load_workbook(os.path.join(out_dir, "summary.xlsx"))
         ws = wb.active
         for r in range(2, ws.max_row):
-            assert ws.cell(row=r, column=6).value == 'No-OpenSSL'
+            assert ws.cell(row=r, column=6).value == 'None'
         total_row = ws.max_row
         val = ws.cell(row=total_row, column=6).value
-        assert 'No-OpenSSL' in str(val)
+        assert 'None' in str(val)
 
     def test_summary_detection_none_for_minimal_elf(self):
-        """Minimal ELFs have no OpenSSL -> detection should be None."""
+        """Minimal ELFs have no OpenSSL -> Detection should be None."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
 
@@ -409,13 +411,78 @@ class TestHapSummaryReport:
             assert ws.cell(row=r, column=7).value == 'None'
 
 
+class TestSummaryTotalRow:
+    """Tests for TOTAL row aggregation in Package Summary."""
+
+    def test_total_row_mixed_usage_aggregation(self):
+        """TOTAL row should aggregate different openssl_usage values."""
+        results = []
+        pkg_paths = []
+
+        none_result = ScanResult(
+            target="/t", scan_time="", tool_version="0.1", arch="aarch64")
+        none_result.files_detail = [
+            FileResult(path="/a.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[]),
+        ]
+        none_result.symbols_by_category = {}
+        none_result.package_info = {
+            'bundle_name': 'com.test.none', 'module_name': 'entry',
+            'package_type': 'hap', 'version_name': '1.0',
+            'scanned_abi': ['arm64-v8a'], 'native_libs_count': 1,
+            'bundled_openssl': False,
+        }
+        results.append(none_result)
+        pkg_paths.append('/none.hap')
+
+        bundled_result = ScanResult(
+            target="/t", scan_time="", tool_version="0.1", arch="aarch64")
+        bundled_result.files_detail = [
+            FileResult(path="/b.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=["libcrypto.so"],
+                       openssl_direct=True, openssl_transitive=False,
+                       openssl_libs=["libcrypto.so"],
+                       openssl_symbols=["SSL_connect"]),
+        ]
+        bundled_result.symbols_by_category = {'ssl_core': ['SSL_connect']}
+        bundled_result.package_info = {
+            'bundle_name': 'com.test.bundled', 'module_name': 'entry',
+            'package_type': 'hap', 'version_name': '1.0',
+            'scanned_abi': ['arm64-v8a'], 'native_libs_count': 2,
+            'bundled_openssl': True,
+            'bundled_openssl_files': ['libcrypto.so'],
+        }
+        results.append(bundled_result)
+        pkg_paths.append('/bundled.hap')
+
+        rows = []
+        for result, pkg_path in zip(results, pkg_paths):
+            method, s, d, dl, ossl_type = _classify_hap_detection(result)
+            row = _build_hap_summary_row(
+                result, pkg_path, method, s, d, dl, ossl_type)
+            rows.append(row)
+
+        assert rows[0]['openssl_usage'] == 'None'
+        assert rows[1]['openssl_usage'] == 'Bundled'
+
+        usage_counts = {}
+        for r in rows:
+            u = r.get('openssl_usage', '')
+            if u:
+                usage_counts[u] = usage_counts.get(u, 0) + 1
+        usage_summary = ', '.join(
+            f'{v} {k}' for k, v in sorted(usage_counts.items()))
+
+        assert '1 Bundled' in usage_summary
+        assert '1 None' in usage_summary
+
+
 class TestClassifyHapDetection:
     """Unit tests for _classify_hap_detection helper."""
 
     def test_no_openssl(self):
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -431,9 +498,6 @@ class TestClassifyHapDetection:
         assert ossl_type == 'No-OpenSSL'
 
     def test_dynamic_only(self):
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -449,9 +513,6 @@ class TestClassifyHapDetection:
         assert d_set == {"SSL_connect"} and len(s_set) == 0
 
     def test_static_only(self):
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -468,9 +529,6 @@ class TestClassifyHapDetection:
         assert s_set == {"EVP_sha256"}
 
     def test_dlopen_only(self):
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -487,9 +545,6 @@ class TestClassifyHapDetection:
         assert dl_set == {"SSL_read"}
 
     def test_mixed(self):
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -516,9 +571,6 @@ class TestClassifyHapDetection:
         but app.so has dynamic OpenSSL symbols with no bundled .so to satisfy
         them.  The HAP is NOT Self-Contained despite static count > dynamic.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         static_syms = [f"EVP_sym_{i}" for i in range(50)]
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
@@ -540,9 +592,6 @@ class TestClassifyHapDetection:
 
     def test_system_link_dynamic_majority(self):
         """Package with many dynamic symbols and few static -> System-Link."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         dynamic_syms = [f"SSL_sym_{i}" for i in range(30)]
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
@@ -564,9 +613,6 @@ class TestClassifyHapDetection:
 
     def test_equal_static_dynamic_is_system_link(self):
         """Equal static and dynamic counts -> System-Link (not >)."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -587,9 +633,6 @@ class TestClassifyHapDetection:
 
     def test_dlopen_plus_dynamic_system_link(self):
         """Package with both dlopen and dynamic (no static) -> System-Link."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -610,9 +653,6 @@ class TestClassifyHapDetection:
 
     def test_hybrid_dlopen_file_with_direct_und(self):
         """File with both dlopen symbols and direct UND -> split counts."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -639,9 +679,6 @@ class TestClassifyHapDetection:
         Correct: static=1, dlopen=2 -> 1 < 2 -> System-Link.
         Bug:     static=3, dlopen=2 -> 3 > 2 -> Self-Contained (wrong).
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -665,9 +702,6 @@ class TestClassifyHapDetection:
         static_only = openssl_symbols - dlsym_symbols = empty.
         method='Mixed' (has_static + has_dlopen), ossl_type='System-Link'.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -692,9 +726,6 @@ class TestClassifyHapDetection:
         Three dynamic symbols -> external=3 > static=2 -> System-Link.
         Without dedup this would be 4 > 3 -> Self-Contained (wrong).
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         shared_static = ["EVP_sha256", "EVP_md5"]
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
@@ -726,9 +757,6 @@ class TestClassifyHapDetection:
         storing filenames in package_info['bundled_openssl_files'].  app.so
         DT_NEEDs libcrypto.so.3 which matches the bundled lib stem.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -752,9 +780,6 @@ class TestClassifyHapDetection:
 
         lib.so does dlopen("libcrypto.so"), stem matches bundled libcrypto.so.3.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -780,9 +805,6 @@ class TestClassifyHapDetection:
         One lib has static OpenSSL for its own needs but also dlopen-loads
         additional symbols.  Without bundled .so, the dlopen part is unresolved.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -805,9 +827,6 @@ class TestClassifyHapDetection:
         The static portion self-resolves; the dlopen("libcrypto.so") resolves
         via bundled libcrypto.so.3 (stem match).
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -834,9 +853,6 @@ class TestClassifyHapDetection:
         Per-target resolution: ALL OpenSSL dlopen targets must resolve.
         libssl.so is missing -> System-Link.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -861,9 +877,6 @@ class TestClassifyHapDetection:
 
         Basename extraction ensures path prefix does not break matching.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -889,9 +902,6 @@ class TestClassifyHapDetection:
         libssl.so.3 via DT_NEEDED.  Without bundled libssl, the dynamic part
         is unresolved.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -909,9 +919,6 @@ class TestClassifyHapDetection:
 
     def test_hybrid_static_plus_dt_needed_resolved(self):
         """Static OpenSSL lib that DT_NEEDs libssl, bundled -> Self-Contained."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -937,9 +944,6 @@ class TestClassifyHapDetection:
         Tests backward compat: old scan results without bundled_openssl_files
         key produce conservative System-Link (not crash).
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -962,9 +966,6 @@ class TestClassifyHapDetection:
         The HAP is NOT Self-Contained because libreddownload.so needs system
         OpenSSL to resolve its dlopen("libcrypto.so") call.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         static_syms = [f"OSSL_{i}" for i in range(100)]
         dlopen_syms = [f"EVP_{i}" for i in range(50)]
         result = ScanResult(
@@ -988,9 +989,6 @@ class TestClassifyHapDetection:
 
     def test_multiple_static_all_self_sufficient(self):
         """Multiple static-only libs with no external deps -> Self-Contained."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -1015,9 +1013,6 @@ class TestClassifyHapDetection:
         the library is trying to load.  Without a bundled OpenSSL, this is
         conservatively treated as unresolved.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import _classify_hap_detection
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -1068,17 +1063,13 @@ class TestBundledOpenSSLDetection:
             data = json.load(f)
         assert data['meta']['package']['bundled_openssl'] is False
 
-    def test_bundled_summary_row_static_no_so_file(self):
-        """Static OpenSSL without bundled .so -> bundled_openssl='No'.
+    def test_summary_row_static_no_so_file(self):
+        """Static OpenSSL without bundled .so -> openssl_usage='Self-Contained'.
 
-        bundled_openssl answers 'does the package ship OpenSSL .so files?'
-        Static linkage is captured by ossl_type=Self-Contained instead.
+        No standalone .so, no high/medium confidence providers ->
+        bundled_openssl=False.  Static linkage still classified as
+        Self-Contained in the merged OpenSSL Usage column.
         """
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import (
-            _classify_hap_detection, _build_hap_summary_row
-        )
-
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -1101,16 +1092,10 @@ class TestBundledOpenSSLDetection:
         method, s, d, dl, ossl_type = _classify_hap_detection(result)
         row = _build_hap_summary_row(result, "/t.hap", method, s, d, dl,
                                      ossl_type)
-        assert row['bundled_openssl'] == 'No'
-        assert row['ossl_type'] == 'Self-Contained'
+        assert row['openssl_usage'] == 'Self-Contained'
 
-    def test_bundled_summary_row_no_static_no_file(self):
-        """No OpenSSL .so and no static -> bundled_openssl='No'."""
-        from openssl_scanner.scanner import ScanResult, FileResult
-        from openssl_scanner.__main__ import (
-            _classify_hap_detection, _build_hap_summary_row
-        )
-
+    def test_summary_row_no_openssl(self):
+        """No OpenSSL .so and no static -> openssl_usage='None'."""
         result = ScanResult(
             target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
         )
@@ -1131,7 +1116,7 @@ class TestBundledOpenSSLDetection:
         method, s, d, dl, ossl_type = _classify_hap_detection(result)
         row = _build_hap_summary_row(result, "/t.hap", method, s, d, dl,
                                      ossl_type)
-        assert row['bundled_openssl'] == 'No'
+        assert row['openssl_usage'] == 'None'
 
     def test_libopenssl_pattern_detected(self):
         """libopenssl.so should be recognized as an OpenSSL library."""
@@ -1141,8 +1126,8 @@ class TestBundledOpenSSLDetection:
         assert matcher.is_openssl_library("libopenssl.so") is True
         assert matcher.is_openssl_library("libopenssl.so.1.1") is True
 
-    def test_bundled_summary_column_with_openssl_hap(self):
-        """Batch scan with one bundled HAP -> column H shows 'Yes'."""
+    def test_openssl_usage_column_with_bundled_hap(self):
+        """Batch scan with one bundled HAP -> OpenSSL Usage shows 'Bundled'."""
         pkg_dir = os.path.join(self.tmpdir, "packages")
         os.makedirs(pkg_dir)
         _create_test_hap(
@@ -1165,14 +1150,14 @@ class TestBundledOpenSSLDetection:
         from openpyxl import load_workbook
         wb = load_workbook(summary)
         ws = wb.active
-        bundled_vals = {}
+        usage_vals = {}
         for r in range(2, ws.max_row):
             name = ws.cell(row=r, column=1).value
-            bundled = ws.cell(row=r, column=8).value
+            usage = ws.cell(row=r, column=6).value
             if name and name != "TOTAL":
-                bundled_vals[name] = bundled
-        assert bundled_vals.get("com.test.bundled/entry") == "Yes"
-        assert bundled_vals.get("com.test.plain/entry") == "No"
+                usage_vals[name] = usage
+        assert usage_vals.get("com.test.bundled/entry (bundled)") == "Bundled"
+        assert usage_vals.get("com.test.plain/entry (plain)") == "None"
 
 
     def test_app_summary_distinguishes_modules(self):
@@ -1198,9 +1183,862 @@ class TestBundledOpenSSLDetection:
                 pkg_names.append(name)
 
         assert len(pkg_names) == 3
-        assert "com.test.app/module0" in pkg_names
-        assert "com.test.app/module1" in pkg_names
-        assert "com.test.app/module2" in pkg_names
+        assert "com.test.app/module0 (multi_module0)" in pkg_names
+        assert "com.test.app/module1 (multi_module1)" in pkg_names
+        assert "com.test.app/module2 (multi_module2)" in pkg_names
+
+
+class TestLoadScanResultFromJson:
+    """Tests for _load_scan_result_from_json round-trip fidelity."""
+
+    def test_static_confidence_survives_round_trip(self):
+        """static_openssl_confidence must survive JSON serialize -> deserialize.
+
+        Fix #1 from agent team review: _load_scan_result_from_json was not
+        reading back static_openssl_confidence, causing hap-summary to
+        misclassify Bundled (static) as Self-Contained.
+        """
+        report_json = {
+            "meta": {
+                "report_type": "package",
+                "scan_root": "/t",
+                "scan_time": "",
+                "tool_version": "0.1",
+                "target_arch": "aarch64",
+                "package": {
+                    "bundle_name": "com.test.roundtrip",
+                    "package_type": "hap",
+                    "version_name": "1.0",
+                    "scanned_abi": ["arm64-v8a"],
+                    "native_libs_count": 1,
+                    "bundled_openssl": "Yes (static)",
+                    "bundled_openssl_files": [],
+                    "static_openssl_providers": [{
+                        "file": "libapp.so",
+                        "confidence": "high",
+                        "symbols": 500,
+                        "consumers": [],
+                    }],
+                },
+            },
+            "summary": {
+                "total_files_scanned": 1,
+                "total_elf_files": 1,
+                "files_with_openssl_deps": 1,
+                "total_openssl_symbols": 500,
+                "unique_openssl_symbols": 500,
+            },
+            "openssl_symbols": {
+                "by_category": {"crypto_evp": ["EVP_sha256"]},
+                "by_file": {},
+            },
+            "files_detail": [{
+                "path": "/libapp.so",
+                "type": "shared_library",
+                "arch": "aarch64",
+                "direct_deps": [],
+                "openssl_deps": {"direct": True, "transitive": False,
+                                 "libs": []},
+                "openssl_symbols_used": ["EVP_sha256", "SSL_connect"],
+                "static_openssl": True,
+                "static_openssl_confidence": "high",
+                "static_openssl_confidence_reason": "500 syms exported",
+                "static_ssl_library": "OpenSSL",
+            }],
+        }
+
+        with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.json', delete=False) as f:
+            json.dump(report_json, f)
+            json_path = f.name
+
+        try:
+            result, pkg_path = _load_scan_result_from_json(json_path)
+            assert result is not None
+
+            fr = result.files_detail[0]
+            assert fr.static_openssl is True
+            assert fr.static_openssl_confidence == 'high'
+            assert fr.static_openssl_confidence_reason == '500 syms exported'
+            assert fr.static_ssl_library == 'OpenSSL'
+
+            bundled_str, providers = _detect_static_providers(result)
+            assert bundled_str is not None
+            assert len(providers) == 1
+            assert providers[0]['confidence'] == 'high'
+
+        finally:
+            os.unlink(json_path)
+
+    def test_missing_confidence_defaults_empty(self):
+        """JSON without static_openssl_confidence -> defaults to ''."""
+        report_json = {
+            "meta": {"report_type": "package", "scan_root": "/t",
+                     "scan_time": "", "tool_version": "0.1",
+                     "target_arch": "aarch64", "package": {}},
+            "summary": {},
+            "openssl_symbols": {"by_category": {}, "by_file": {}},
+            "files_detail": [{
+                "path": "/a.so", "type": "shared_library",
+                "arch": "aarch64", "direct_deps": [],
+                "openssl_deps": {"direct": False, "transitive": False,
+                                 "libs": []},
+                "openssl_symbols_used": [],
+                "static_openssl": True,
+            }],
+        }
+
+        with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.json', delete=False) as f:
+            json.dump(report_json, f)
+            json_path = f.name
+
+        try:
+            result, _ = _load_scan_result_from_json(json_path)
+            assert result is not None
+            fr = result.files_detail[0]
+            assert fr.static_openssl is True
+            assert fr.static_openssl_confidence == ''
+            assert fr.static_ssl_library == ''
+        finally:
+            os.unlink(json_path)
+
+
+class TestOpenSSLUsageScenarios:
+    """Tests for openssl_usage classification across all detection scenarios."""
+
+    def _make_result(self, files_detail, package_info, symbols_by_category=None):
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = files_detail
+        result.symbols_by_category = symbols_by_category or {}
+        result.package_info = package_info
+        return result
+
+    def _make_pkg_info(self, bundled=False, bundled_files=None,
+                       static_providers=None, native_count=1):
+        pi = {
+            'bundle_name': 'com.test.pkg',
+            'module_name': 'entry',
+            'package_type': 'hap',
+            'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'],
+            'native_libs_count': native_count,
+            'bundled_openssl': bundled,
+        }
+        if bundled_files is not None:
+            pi['bundled_openssl_files'] = bundled_files
+        if static_providers is not None:
+            pi['static_openssl_providers'] = static_providers
+        return pi
+
+    def _classify_and_build(self, result):
+        method, s, d, dl, ossl_type = _classify_hap_detection(result)
+        row = _build_hap_summary_row(
+            result, "/test.hap", method, s, d, dl, ossl_type
+        )
+        return row, method, s, d, dl, ossl_type
+
+    def test_s1_no_openssl(self):
+        """No .so uses OpenSSL -> usage='None', detection='None'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+        assert row['detection'] == 'None'
+
+    def test_s2_system_link_dynamic(self):
+        """DT_NEED libcrypto.so (not bundled) -> usage='System-Link', detection='Dynamic'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so.3"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so.3"],
+                    openssl_symbols=["SSL_connect"]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'System-Link'
+        assert row['detection'] == 'Dynamic'
+
+    def test_s3_bundled_standalone_so(self):
+        """Bundled libcrypto.so + DT_NEED -> usage='Bundled', detection='Dynamic'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libcrypto.so.3", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[]),
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so.3"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so.3"],
+                    openssl_symbols=["SSL_connect", "EVP_sha256"]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled=True, bundled_files=['libcrypto.so.3']),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled'
+        assert row['detection'] == 'Dynamic'
+
+    def test_s4_bundled_static_no_consumers(self):
+        """Static high confidence, no consumers -> usage='Bundled (static)', detection='Static'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_connect"],
+                    static_openssl=True, static_openssl_confidence='high'),
+            ],
+            package_info=self._make_pkg_info(bundled='Yes (static)'),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static)'
+        assert row['detection'] == 'Static'
+
+    def test_s5_bundled_static_shared(self):
+        """Static high conf + DT_NEED consumer -> usage='Bundled (static, shared)', detection='Static'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libprovider.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_connect"],
+                    static_openssl=True, static_openssl_confidence='high'),
+                FileResult(
+                    path="/libconsumer.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libprovider.so"],
+                    openssl_direct=False, openssl_transitive=True,
+                    openssl_libs=[], openssl_symbols=[]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled='Yes (static, shared)', native_count=2),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static, shared)'
+        assert row['detection'] == 'Static'
+
+    def test_s6_boringssl_static(self):
+        """BoringSSL detected, 0 exported, 2 imported -> usage='Bundled (static)', detection='Static'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["BIO_new_bio_pair", "HMAC"],
+                    static_openssl=True, static_openssl_confidence='medium',
+                    static_ssl_library='BoringSSL'),
+            ],
+            package_info=self._make_pkg_info(bundled='Yes (static)'),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static)'
+        assert row['detection'] == 'Static'
+
+    def test_s7_low_confidence_filtered(self):
+        """Low confidence static (confidence='none') -> usage='None', detection='None'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[],
+                    static_openssl=False),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+        assert row['detection'] == 'None'
+
+    def test_s8_static_plus_dynamic_consumer(self):
+        """Static provider + dynamic consumer -> usage='Bundled (static, shared)', detection='Mixed'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libprovider.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_CTX_new"],
+                    static_openssl=True, static_openssl_confidence='high'),
+                FileResult(
+                    path="/libconsumer.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libprovider.so"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libprovider.so"],
+                    openssl_symbols=["SSL_connect"]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled='Yes (static, shared)', native_count=2),
+        )
+        row, method, s, d, dl, ossl_type = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static, shared)'
+        assert row['detection'] == 'Mixed'
+
+    def test_s9_static_plus_dlopen(self):
+        """Static + dlopen in same package -> bundled_raw takes priority -> usage='Bundled (static)'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libstatic.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_CTX_new"],
+                    static_openssl=True, static_openssl_confidence='high'),
+                FileResult(
+                    path="/libdlopen.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=["libcrypto.so"]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled='Yes (static)', native_count=2),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static)'
+
+    def test_s10_app_multi_hap_mixed_usage(self):
+        """Multiple results: one with OpenSSL, one without -> per-HAP usage correct."""
+        result_ossl = ScanResult(
+            target="/tmp/a", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result_ossl.files_detail = [
+            FileResult(
+                path="/libapp.so", file_type="shared_library",
+                arch="aarch64", direct_deps=["libcrypto.so.3"],
+                openssl_direct=True, openssl_transitive=False,
+                openssl_libs=["libcrypto.so.3"],
+                openssl_symbols=["SSL_connect"]),
+        ]
+        result_ossl.symbols_by_category = {'ssl_core': ['SSL_connect']}
+        result_ossl.package_info = {
+            'bundle_name': 'com.test.ossl', 'module_name': 'entry',
+            'package_type': 'hap', 'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'], 'native_libs_count': 1,
+            'bundled_openssl': False,
+        }
+
+        result_plain = ScanResult(
+            target="/tmp/b", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result_plain.files_detail = [
+            FileResult(
+                path="/libplain.so", file_type="shared_library",
+                arch="aarch64", direct_deps=[], openssl_direct=False,
+                openssl_transitive=False, openssl_libs=[],
+                openssl_symbols=[]),
+        ]
+        result_plain.symbols_by_category = {}
+        result_plain.package_info = {
+            'bundle_name': 'com.test.plain', 'module_name': 'entry',
+            'package_type': 'hap', 'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'], 'native_libs_count': 1,
+            'bundled_openssl': False,
+        }
+
+        m1, s1, d1, dl1, t1 = _classify_hap_detection(result_ossl)
+        row1 = _build_hap_summary_row(result_ossl, "/a.hap", m1, s1, d1, dl1, t1)
+
+        m2, s2, d2, dl2, t2 = _classify_hap_detection(result_plain)
+        row2 = _build_hap_summary_row(result_plain, "/b.hap", m2, s2, d2, dl2, t2)
+
+        assert row1['openssl_usage'] == 'System-Link'
+        assert row1['detection'] == 'Dynamic'
+        assert row2['openssl_usage'] == 'None'
+        assert row2['detection'] == 'None'
+
+    def test_s11_multi_abi_dedup(self):
+        """Multi-ABI: same basename under arm64-v8a/ and x86_64/ deduped in providers."""
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(
+                path="/arm64-v8a/libapp.so", file_type="shared_library",
+                arch="aarch64", direct_deps=[], openssl_direct=True,
+                openssl_transitive=False, openssl_libs=[],
+                openssl_symbols=["EVP_sha256", "SSL_connect"],
+                static_openssl=True, static_openssl_confidence='high'),
+            FileResult(
+                path="/x86_64/libapp.so", file_type="shared_library",
+                arch="x86_64", direct_deps=[], openssl_direct=True,
+                openssl_transitive=False, openssl_libs=[],
+                openssl_symbols=["EVP_sha256"],
+                static_openssl=True, static_openssl_confidence='high'),
+        ]
+        bundled_str, providers = _detect_static_providers(result)
+        assert bundled_str == 'Yes (static)'
+        assert len(providers) == 1
+        assert providers[0]['file'] == 'libapp.so'
+        assert providers[0]['symbols'] == 2
+
+    def test_s12_bundled_so_plus_static(self):
+        """Bundled .so + static in same package -> usage='Bundled', detection='Mixed'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libcrypto.so.3", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[]),
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so.3"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so.3"],
+                    openssl_symbols=["SSL_connect"]),
+                FileResult(
+                    path="/libstatic.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256"],
+                    static_openssl=True, static_openssl_confidence='high'),
+            ],
+            package_info=self._make_pkg_info(
+                bundled=True, bundled_files=['libcrypto.so.3'],
+                native_count=3),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled'
+        assert row['detection'] == 'Mixed'
+
+    def test_s13_dlopen_system(self):
+        """dlopen libcrypto.so, not bundled -> usage='System-Link', detection='dlopen'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=["libcrypto.so"]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'System-Link'
+        assert row['detection'] == 'dlopen'
+
+    def test_s14_dlopen_bundled(self):
+        """dlopen libcrypto.so, bundled in package -> usage='Bundled', detection='dlopen'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libcrypto.so.3", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[]),
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=["libcrypto.so"]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled=True, bundled_files=['libcrypto.so.3'],
+                native_count=2),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled'
+        assert row['detection'] == 'dlopen'
+
+    def test_s15_dlsym_only_no_lib(self):
+        """dlsym resolves OpenSSL symbols but no lib filename -> usage='System-Link', detection='dlopen'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=[]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'System-Link'
+        assert row['detection'] == 'dlopen'
+
+    def test_s16_dlopen_no_openssl_symbols(self):
+        """dlopen exists but 0 OpenSSL symbols -> usage='None', detection='None'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[],
+                    uses_dlopen=True,
+                    dlsym_symbols=[],
+                    dlopen_libs=[]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+        assert row['detection'] == 'None'
+
+    def test_s17_dlopen_non_openssl_filtered(self):
+        """dlopen targets non-OpenSSL libs, 0 OpenSSL symbols -> usage='None', detection='None'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[],
+                    uses_dlopen=True,
+                    dlsym_symbols=[],
+                    dlopen_libs=["libsqlite.so"]),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+        assert row['detection'] == 'None'
+
+    def test_s18_dynamic_plus_dlopen(self):
+        """Dynamic + dlopen in same package -> usage='System-Link', detection='Mixed'."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libdynamic.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so.3"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so.3"],
+                    openssl_symbols=["SSL_connect"]),
+                FileResult(
+                    path="/libdlopen.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=["libcrypto.so"]),
+            ],
+            package_info=self._make_pkg_info(bundled=False, native_count=2),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'System-Link'
+        assert row['detection'] == 'Mixed'
+
+    def test_s19_static_dynamic_dlopen_all(self):
+        """All three mechanisms -> bundled_raw='Yes (static)' takes priority."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libstatic.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_CTX_new"],
+                    static_openssl=True, static_openssl_confidence='high'),
+                FileResult(
+                    path="/libdynamic.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so.3"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so.3"],
+                    openssl_symbols=["SSL_connect"]),
+                FileResult(
+                    path="/libdlopen.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["SSL_read"],
+                    uses_dlopen=True,
+                    dlsym_symbols=["SSL_read"],
+                    dlopen_libs=["libcrypto.so"]),
+            ],
+            package_info=self._make_pkg_info(
+                bundled='Yes (static)', native_count=3),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled (static)'
+
+    def test_s20_self_contained_static(self):
+        """Static only, low confidence filtered -> usage='Self-Contained'.
+
+        Library has static_openssl=True but confidence is empty (below
+        high/medium threshold), so _detect_static_providers() skips it.
+        bundled_openssl=False, no unresolved external -> Self-Contained.
+        """
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=True,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=["EVP_sha256", "SSL_connect"],
+                    static_openssl=True),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Self-Contained'
+        assert row['detection'] == 'Static'
+
+    def test_s21_empty_files_detail(self):
+        """HAP with no .so files -> usage='None', detection='None'."""
+        result = self._make_result(
+            files_detail=[],
+            package_info=self._make_pkg_info(bundled=False, native_count=0),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+        assert row['detection'] == 'None'
+        assert row['total_syms'] == 0
+
+    def test_s22_bundled_yes_bare_no_trailing_space(self):
+        """bundled_openssl='Yes' (bare, no parenthetical) -> 'Bundled' not 'Bundled '.
+
+        Guards against trailing space when _detect_static_providers returns
+        a bare 'Yes' without detail parenthetical.
+        """
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so"],
+                    openssl_symbols=["SSL_connect"]),
+            ],
+            package_info=self._make_pkg_info(bundled='Yes'),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'Bundled'
+        assert not row['openssl_usage'].endswith(' ')
+
+    def test_s23_bundled_none_value(self):
+        """bundled_openssl=None (from JSON null) -> falls through to ossl_type."""
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=[], openssl_direct=False,
+                    openssl_transitive=False, openssl_libs=[],
+                    openssl_symbols=[]),
+            ],
+            package_info=self._make_pkg_info(bundled=None),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'None'
+
+    def test_s24_system_link_via_static_unresolved(self):
+        """Static OpenSSL lib that DT_NEEDs libcrypto.so (not bundled) -> System-Link.
+
+        When static_openssl=True but confidence is empty, _detect_static_providers
+        skips it. The DT_NEEDED libcrypto.so is unresolved -> System-Link.
+        Detection is 'Static' because static_openssl=True routes symbols to
+        the static bucket in _classify_hap_detection.
+        """
+        result = self._make_result(
+            files_detail=[
+                FileResult(
+                    path="/libapp.so", file_type="shared_library",
+                    arch="aarch64", direct_deps=["libcrypto.so"],
+                    openssl_direct=True, openssl_transitive=False,
+                    openssl_libs=["libcrypto.so"],
+                    openssl_symbols=["SSL_connect", "EVP_sha256"],
+                    static_openssl=True),
+            ],
+            package_info=self._make_pkg_info(bundled=False),
+        )
+        row, *_ = self._classify_and_build(result)
+        assert row['openssl_usage'] == 'System-Link'
+        assert row['detection'] == 'Static'
+
+
+HAP_TEST_DIR = os.path.join(
+    os.path.dirname(__file__), '..', 'hap_test_packages')
+
+
+def _hap_path(name):
+    """Return absolute path to a HAP in hap_test_packages/."""
+    return os.path.join(HAP_TEST_DIR, name)
+
+
+def _scan_real_hap(hap_file):
+    """Scan a real HAP file and return (json_report_dict, summary_row)."""
+    with tempfile.TemporaryDirectory() as td:
+        out_json = os.path.join(td, 'report.json')
+        rc = main(['hap', hap_file, '-o', out_json])
+        assert rc is None or rc == 0, f'hap command failed: rc={rc}'
+        with open(out_json) as f:
+            report = json.load(f)
+
+        result = ScanResult(
+            target=hap_file, scan_time="", tool_version="test",
+            arch="aarch64")
+        result.report_type = 'package'
+        result.package_info = report['meta']['package']
+        result.symbols_by_category = report['openssl_symbols'].get(
+            'by_category', {})
+
+        frs = []
+        for fd in report['files_detail']:
+            fr = FileResult(
+                path=fd['path'],
+                file_type=fd.get('type', 'shared_library'),
+                arch=fd.get('arch', 'aarch64'),
+                direct_deps=fd.get('direct_deps', []),
+                openssl_direct=fd['openssl_deps'].get('direct', False),
+                openssl_transitive=fd['openssl_deps'].get(
+                    'transitive', False),
+                openssl_libs=fd['openssl_deps'].get('libs', []),
+                openssl_symbols=fd.get('openssl_symbols_used', []),
+            )
+            fr.static_openssl = fd.get('static_openssl', False)
+            fr.static_openssl_version = fd.get('static_openssl_version')
+            fr.static_ssl_library = fd.get('static_ssl_library', '')
+            fr.static_openssl_confidence = fd.get(
+                'static_openssl_confidence', '')
+            fr.openssl_exported = fd.get('openssl_exported', [])
+            dl = fd.get('dlopen_detection', {})
+            if dl:
+                fr.uses_dlopen = dl.get('uses_dlopen', False)
+                fr.dlsym_symbols = dl.get('dlopen_symbols', [])
+                fr.dlopen_libs = dl.get('dlopen_libs', [])
+            frs.append(fr)
+        result.files_detail = frs
+
+        method, s, d, dl, ossl_type = _classify_hap_detection(result)
+        row = _build_hap_summary_row(
+            result, hap_file, method, s, d, dl, ossl_type)
+        return report, row
+
+
+@pytest.mark.skipif(
+    not os.path.isdir(HAP_TEST_DIR),
+    reason="hap_test_packages directory not found")
+class TestRealHAPOpenSSLUsage:
+    """Integration tests using real HAP packages with genuine ELF binaries.
+
+    These tests verify the full pipeline: extraction, symbol analysis,
+    static detection, and openssl_usage classification using:
+    - Real prebuilt OpenSSL .so files from ohos-rs/ohos-openssl
+    - Real OpenSSL engine binaries (loader_attic.so)
+    - Real third-party app HAP packages
+    """
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('bundled_openssl_test.hap')),
+        reason="bundled_openssl_test.hap not available")
+    def test_bundled_usage_with_real_libcrypto(self):
+        """HAP bundling real libcrypto.so (ohos-openssl) -> usage='Bundled'.
+
+        The test HAP contains:
+          - libcrypto.so (6.5MB, real OpenSSL 3.x for aarch64)
+          - libmytls.so  (renamed libssl.so, DT_NEEDs libcrypto.so)
+          - libc++_shared.so
+        libcrypto.so matches OPENSSL_LIBRARY_PATTERNS so has_standalone=True.
+        """
+        _, row = _scan_real_hap(_hap_path('bundled_openssl_test.hap'))
+        assert row['openssl_usage'] == 'Bundled', (
+            f"Expected 'Bundled', got '{row['openssl_usage']}'")
+        assert row['detection'] in ('Static', 'Dynamic', 'Mixed')
+        assert row['total_syms'] > 0
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('syslink_openssl_test.hap')),
+        reason="syslink_openssl_test.hap not available")
+    def test_system_link_usage_with_real_engine(self):
+        """HAP with real OpenSSL engine that DT_NEEDs libcrypto.so (not bundled).
+
+        The test HAP contains:
+          - libengine_attic.so (renamed loader_attic.so from ohos-openssl)
+            DT_NEEDED: libcrypto.so, libc.so
+            Imports 130+ OpenSSL symbols, exports 0 OpenSSL symbols
+          - libc++_shared.so
+        libcrypto.so is NOT bundled -> unresolved external -> System-Link.
+        """
+        _, row = _scan_real_hap(_hap_path('syslink_openssl_test.hap'))
+        assert row['openssl_usage'] == 'System-Link', (
+            f"Expected 'System-Link', got '{row['openssl_usage']}'")
+        assert row['detection'] == 'Dynamic'
+        assert row['total_syms'] > 100
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('aloesend-1.17.2-sideloaded.hap')),
+        reason="aloesend HAP not available")
+    def test_bundled_static_with_real_flutter_boringssl(self):
+        """AloeSend (Flutter app) with statically linked BoringSSL.
+
+        libflutter.so has BoringSSL compiled in (medium confidence).
+        No standalone libcrypto.so/libssl.so -> Bundled (static).
+        """
+        _, row = _scan_real_hap(
+            _hap_path('aloesend-1.17.2-sideloaded.hap'))
+        assert row['openssl_usage'] == 'Bundled (static)', (
+            f"Expected 'Bundled (static)', got '{row['openssl_usage']}'")
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('FinVideo-1.0.0.hap')),
+        reason="FinVideo HAP not available")
+    def test_bundled_static_shared_with_real_ffmpeg(self):
+        """FinVideo (Jellyfin player) with FFmpeg statically linking OpenSSL.
+
+        libwlffmpeg.so has OpenSSL compiled in (high confidence, 6000+ syms).
+        Other libs (libwlmediautil, libwlplayer) consume it via DT_NEEDED
+        -> Bundled (static, shared).
+        """
+        _, row = _scan_real_hap(_hap_path('FinVideo-1.0.0.hap'))
+        assert row['openssl_usage'] == 'Bundled (static, shared)', (
+            f"Expected 'Bundled (static, shared)', got "
+            f"'{row['openssl_usage']}'")
+        assert row['total_syms'] > 5000
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('ppsspp.hap')),
+        reason="ppsspp HAP not available")
+    def test_none_usage_with_real_gameemu(self):
+        """PPSSPP (game emulator) has no OpenSSL usage -> usage='None'.
+
+        libppsspp_jni.so exports AES_encrypt/AES_decrypt (own impl),
+        but imports zero OpenSSL symbols.
+        """
+        _, row = _scan_real_hap(_hap_path('ppsspp.hap'))
+        assert row['openssl_usage'] == 'None', (
+            f"Expected 'None', got '{row['openssl_usage']}'")
+        assert row['detection'] == 'None'
+        assert row['total_syms'] == 0
+
+    @pytest.mark.skipif(
+        not os.path.isfile(_hap_path('ClashForHarmonyOS.hap')),
+        reason="Clash HAP not available")
+    def test_none_usage_with_real_vpn_app(self):
+        """Clash (VPN proxy) uses Go crypto, no OpenSSL -> usage='None'."""
+        _, row = _scan_real_hap(_hap_path('ClashForHarmonyOS.hap'))
+        assert row['openssl_usage'] == 'None'
+        assert row['total_syms'] == 0
 
 
 if __name__ == "__main__":

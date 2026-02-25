@@ -90,7 +90,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | **Combo Scan** | `./scan combo-scan /root -o r.xlsx` | 一键完成 probe+scan+merge 流水线 |
 | **Process Scan** | `./scan proc --pid 1234` | 分析运行进程的已加载库 |
 | **Package Scan** | `./scan hap MyApp.hap` | 从 HAP/HAR/HSP/APP/ZIP 包提取并分析 native .so |
-| **Package Summary** | `./scan hap-summary /reports/` | 从已有 JSON 报告生成汇总 XLSX（含 OpenSSL Type 分类） |
+| **Package Summary** | `./scan hap-summary /reports/` | 从已有 JSON 报告生成汇总 XLSX（含 OpenSSL Usage 分类） |
 
 ## 源码扫描
 

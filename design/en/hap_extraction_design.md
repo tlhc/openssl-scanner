@@ -260,9 +260,27 @@ ossl_type:
 
 Per-library resolution: each `.so` file's dependencies are evaluated
 independently. If any file has an unresolved external dependency, the
-package is marked as System-Link.
+package is marked as System-Link. Static providers with high/medium
+confidence are added to the bundled set for dependency resolution.
+
+The internal `ossl_type` is then combined with `bundled_openssl` in
+`_build_hap_summary_row()` to produce the final `openssl_usage` column:
+
+```
+bundled_openssl (str "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
+bundled_openssl (True)           ->  Bundled
+ossl_type == No-OpenSSL          ->  None
+ossl_type == System-Link         ->  System-Link
+otherwise                        ->  Self-Contained
+```
+
+Priority: standalone .so > static providers > dependency resolution.
 
 Helper functions:
+- `_detect_static_providers(scan_result)`:
+  Identifies .so files with statically linked OpenSSL (high/medium confidence).
+  Deduplicates by basename across ABIs, keeping the highest symbol count.
+  Returns `(bundled_str, providers_list)`.
 - `_dt_needed_resolved(openssl_libs, bundled_basenames, patterns)`:
   Checks whether all DT_NEEDED OpenSSL libraries are satisfied by bundled
   libraries within the package. Pattern matching uses the original basename
@@ -282,9 +300,8 @@ Helper functions:
 | Version | version_name |
 | ABI | comma-separated |
 | .so Files | native lib count |
-| OpenSSL Type | Self-Contained / System-Link / No-OpenSSL |
+| OpenSSL Usage | None / System-Link / Self-Contained / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
-| Bundled OpenSSL | Yes / No |
 | Static Symbols | per-package static symbol count |
 | Dynamic Symbols | per-package dynamic symbol count |
 | dlopen Symbols | per-package dlopen symbol count |
@@ -380,6 +397,7 @@ src/openssl_scanner/
                             _resolve_hap_output_names / _hap_write_single_report
                             _merge_hap_results / _build_hap_summary_row
                             _collect_bundled_names / _lib_stem
+                            _detect_static_providers
                             _dt_needed_resolved / _dlopen_targets_resolved
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result

@@ -953,17 +953,22 @@ ZIP 文件可能是：
 
 ### 背景
 
-`hap` 命令在批量扫描时为每个包生成独立的 JSON + XLSX 报告。`hap-summary` 读取这些 JSON 报告，生成包含所有包的汇总 XLSX（含 Summary、File-Symbol、分类统计等工作表），并对每个包进行 **OpenSSL Type 分类**。
+`hap` 命令在批量扫描时为每个包生成独立的 JSON + XLSX 报告。`hap-summary` 读取这些 JSON 报告，生成包含所有包的汇总 XLSX（含 Summary、File-Symbol、分类统计等工作表），并对每个包进行 **OpenSSL Usage 分类**。
 
-### OpenSSL Type 分类
+### OpenSSL Usage 分类
 
-基于符号去重后的统计，自动判断每个包的 OpenSSL 使用类型：
+基于符号去重与依赖解析，自动判断每个包的 OpenSSL 使用方式：
 
-| OpenSSL Type | 条件 | 说明 |
-|--------------|------|------|
-| **Self-Contained** | `unique_static_symbols > unique_external_symbols` | 包内自带 OpenSSL 库（静态链接为主） |
-| **System-Link** | `unique_external_symbols >= unique_static_symbols` | 依赖系统 OpenSSL（动态链接或 dlopen） |
-| **No-OpenSSL** | 无任何 OpenSSL 符号 | 不使用 OpenSSL |
+| OpenSSL Usage | 条件 | 说明 |
+|---------------|------|------|
+| **None** | 无任何 OpenSSL 符号 | 不使用 OpenSSL |
+| **System-Link** | 依赖系统 OpenSSL（动态链接或 dlopen），未打包 | 依赖平台提供的 libcrypto/libssl |
+| **Self-Contained** | 低置信度静态链接，无外部依赖 | 可能包含 OpenSSL 但置信度不足 |
+| **Bundled** | 包内包含 libcrypto.so / libssl.so | 打包了独立的 OpenSSL 共享库 |
+| **Bundled (static)** | 静态编译 OpenSSL 到 .so 中（高/中置信度） | 如 Flutter/BoringSSL、FFmpeg 等 |
+| **Bundled (static, shared)** | 同上，且其他 .so 通过 DT_NEEDED 消费该库 | 静态提供者被其他库依赖 |
+
+优先级规则：打包的 .so 文件 > 静态提供者 > 依赖解析分类。
 
 符号去重规则：
 - 同一符号出现在多个 static .so 文件中，仅计一次
@@ -1002,7 +1007,7 @@ ZIP 文件可能是：
 
 ### 输出 XLSX 结构
 
-汇总 XLSX 与 `hap` 命令的合并报告格式一致（Summary + File-Symbol + By Category + Errors 等工作表），额外包含 OpenSSL Type 分类信息。
+汇总 XLSX 为单工作表 "Package Summary"，包含 21 列（Package Name、Type、Version、ABI、.so Files、OpenSSL Usage、Detection、Static/Dynamic/dlopen/Total Symbols、Top Category、各分类符号数、dlopen Libs），末尾附 TOTAL 汇总行。
 
 ### 典型工作流
 

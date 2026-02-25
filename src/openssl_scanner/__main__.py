@@ -1120,6 +1120,19 @@ def cmd_hap(args) -> int:
                 result.report_type = 'package'
 
                 meta = extract_result.metadata
+
+                has_standalone = (removed > 0
+                                  or extract_result.openssl_lib is not None
+                                  or extract_result.openssl_ssl is not None)
+                static_bundled, static_providers = _detect_static_providers(result)
+
+                if has_standalone:
+                    bundled_val = True
+                elif static_bundled:
+                    bundled_val = static_bundled
+                else:
+                    bundled_val = False
+
                 result.package_info = {
                     'package_path': entry.container or meta.package_path,
                     'package_type': meta.package_type,
@@ -1133,11 +1146,10 @@ def cmd_hap(args) -> int:
                     'scanned_abi': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
                     'abis_available': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
                     'native_libs_count': len(extract_result.so_files),
-                    'bundled_openssl': (removed > 0
-                                        or extract_result.openssl_lib is not None
-                                        or extract_result.openssl_ssl is not None),
+                    'bundled_openssl': bundled_val,
                     'bundled_openssl_files': _collect_bundled_names(
                         removed_libs, extract_result),
+                    'static_openssl_providers': static_providers,
                 }
 
                 all_results.append(result)
@@ -1441,14 +1453,13 @@ def _hap_write_single_report(result, pkg_path, out_path, reporter, json_only):
 
 
 _HAP_SUMMARY_COLUMNS = [
-    ('pkg_name',        30, 'Package Name'),
+    ('pkg_name',        55, 'Package Name'),
     ('pkg_type',         8, 'Type'),
     ('version',         12, 'Version'),
     ('abi',             15, 'ABI'),
     ('so_files',        10, '.so Files'),
-    ('ossl_type',       16, 'OpenSSL Type'),
+    ('openssl_usage',   22, 'OpenSSL Usage'),
     ('detection',       14, 'Detection'),
-    ('bundled_openssl', 14, 'Bundled OpenSSL'),
     ('static_syms',     14, 'Static Symbols'),
     ('dynamic_syms',    14, 'Dynamic Symbols'),
     ('dlopen_syms',     14, 'dlopen Symbols'),
@@ -1483,6 +1494,50 @@ def _collect_bundled_names(removed_libs, extract_result):
         if bn not in names:
             names.append(bn)
     return names
+
+
+def _detect_static_providers(scan_result):
+    """Identify .so files with statically linked OpenSSL and their consumers.
+
+    Multi-ABI packages may contain the same library under arm64-v8a/ and
+    x86_64/ etc.  We deduplicate by basename, keeping the entry with the
+    highest symbol count.
+
+    Returns (bundled_str, providers_list):
+        bundled_str:    'Yes (static, shared)' | 'Yes (static)' | None
+        providers_list: [{file, confidence, symbols, consumers}, ...]
+    """
+    best = {}
+    for fr in scan_result.files_detail:
+        if not fr.static_openssl:
+            continue
+        if fr.static_openssl_confidence not in ('high', 'medium'):
+            continue
+        basename = os.path.basename(fr.path)
+        sym_count = len(fr.openssl_symbols)
+        prev = best.get(basename)
+        if prev is None or sym_count > prev[1]:
+            best[basename] = (fr, sym_count)
+
+    if not best:
+        return None, []
+
+    providers = []
+    for basename, (fr, sym_count) in best.items():
+        consumers = sorted({os.path.basename(g.path)
+                            for g in scan_result.files_detail
+                            if basename in g.direct_deps
+                            and os.path.basename(g.path) != basename})
+        providers.append({
+            'file': basename,
+            'confidence': fr.static_openssl_confidence,
+            'symbols': sym_count,
+            'consumers': consumers,
+        })
+
+    has_shared = any(p['consumers'] for p in providers)
+    bundled_str = 'Yes (static, shared)' if has_shared else 'Yes (static)'
+    return bundled_str, providers
 
 
 def _lib_stem(name):
@@ -1532,11 +1587,19 @@ def _classify_hap_detection(result):
     Per-library resolution: each library's OpenSSL dependency must be
     satisfied within the HAP (static linking or bundled .so).  If any
     library has an unresolved external dependency the HAP is System-Link.
+
+    Static providers (high/medium confidence) are treated as bundled libs
+    for dependency resolution purposes.
     """
     from .constants import OPENSSL_LIBRARY_PATTERNS
 
     pi = result.package_info or {}
     bundled_basenames = set(pi.get('bundled_openssl_files', []))
+
+    for fr in result.files_detail:
+        if (fr.static_openssl
+                and fr.static_openssl_confidence in ('high', 'medium')):
+            bundled_basenames.add(os.path.basename(fr.path))
 
     static_syms = set()
     dynamic_syms = set()
@@ -1563,6 +1626,8 @@ def _classify_hap_detection(result):
                         OPENSSL_LIBRARY_PATTERNS):
                     has_unresolved_external = True
         elif fr.uses_dlopen:
+            if not fr.dlsym_symbols and not fr.openssl_symbols:
+                continue
             has_dlopen = True
             dlopen_syms.update(fr.dlsym_symbols)
             non_dlsym = set(fr.openssl_symbols) - set(fr.dlsym_symbols)
@@ -1631,16 +1696,28 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
     if cat_counts:
         top_cat = max(cat_counts, key=cat_counts.get)
 
-    bundled_str = 'Yes' if pi.get('bundled_openssl') else 'No'
+    bundled_raw = pi.get('bundled_openssl', False)
+    if isinstance(bundled_raw, str) and bundled_raw.startswith('Yes'):
+        detail = bundled_raw.removeprefix('Yes').strip()
+        openssl_usage = f'Bundled {detail}' if detail else 'Bundled'
+    elif bundled_raw is True:
+        openssl_usage = 'Bundled'
+    elif ossl_type == 'No-OpenSSL':
+        openssl_usage = 'None'
+    elif ossl_type == 'System-Link':
+        openssl_usage = 'System-Link'
+    else:
+        openssl_usage = 'Self-Contained'
 
     bundle = pi.get('bundle_name', '')
     module = pi.get('module_name', '')
+    source = os.path.splitext(os.path.basename(pkg_path))[0]
     if bundle and module:
-        pkg_name = f'{bundle}/{module}'
+        pkg_name = f'{bundle}/{module} ({source})'
     elif bundle:
-        pkg_name = bundle
+        pkg_name = f'{bundle} ({source})'
     else:
-        pkg_name = os.path.splitext(os.path.basename(pkg_path))[0]
+        pkg_name = source
 
     return {
         'pkg_name': pkg_name,
@@ -1648,9 +1725,8 @@ def _build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         'version': pi.get('version_name', ''),
         'abi': abi,
         'so_files': pi.get('native_libs_count', 0),
-        'ossl_type': ossl_type,
+        'openssl_usage': openssl_usage,
         'detection': method,
-        'bundled_openssl': bundled_str,
         'static_syms': len(s_syms),
         'dynamic_syms': len(d_syms),
         'dlopen_syms': len(dl_syms),
@@ -1727,12 +1803,12 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
     if cat_union:
         top_cat_total = max(cat_union, key=lambda c: len(cat_union[c]))
 
-    type_counts = {}
+    usage_counts = {}
     for r in rows:
-        t = r.get('ossl_type', '')
-        if t:
-            type_counts[t] = type_counts.get(t, 0) + 1
-    type_summary = ', '.join(f'{v} {k}' for k, v in sorted(type_counts.items()))
+        u = r.get('openssl_usage', '')
+        if u:
+            usage_counts[u] = usage_counts.get(u, 0) + 1
+    usage_summary = ', '.join(f'{v} {k}' for k, v in sorted(usage_counts.items()))
 
     total_data = {
         'pkg_name': 'TOTAL',
@@ -1740,9 +1816,8 @@ def _generate_hap_summary(all_results, scanned_packages, output_dir):
         'version': '',
         'abi': '',
         'so_files': sum(r['so_files'] for r in rows),
-        'ossl_type': type_summary,
+        'openssl_usage': usage_summary,
         'detection': '',
-        'bundled_openssl': '',
         'static_syms': sum(r.get('static_syms', 0) for r in rows),
         'dynamic_syms': sum(r.get('dynamic_syms', 0) for r in rows),
         'dlopen_syms': sum(r.get('dlopen_syms', 0) for r in rows),
@@ -1803,6 +1878,11 @@ def _load_scan_result_from_json(json_path):
             openssl_libs=fd.get('openssl_deps', {}).get('libs', []),
             openssl_symbols=fd.get('openssl_symbols_used', []),
             static_openssl=fd.get('static_openssl', False),
+            static_openssl_confidence=str(
+                fd.get('static_openssl_confidence') or ''),
+            static_openssl_confidence_reason=fd.get(
+                'static_openssl_confidence_reason', ''),
+            static_ssl_library=fd.get('static_ssl_library', ''),
             uses_dlopen=dlopen_det.get('uses_dlopen', False),
             dlsym_symbols=dlopen_det.get('dlopen_symbols', []),
             dlopen_libs=dlopen_det.get('dlopen_libs', []),

@@ -272,6 +272,21 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
             ssl_result.library, os.path.basename(path),
             ssl_result.version, ssl_result.signals, hidden_static)
 
+    # Confidence floor: when ssl_result.detected sets static_openssl=True
+    # but no implemented_openssl symbols were found (e.g. BoringSSL with
+    # -fvisibility=hidden), the set difference below is empty.
+    # _compute_static_confidence relies on ssl_result.detected / .version
+    # to produce a non-none confidence ('medium' for BoringSSL, 'high'
+    # when a version banner exists).
+    if static_openssl and not static_openssl_confidence:
+        confidence, reason = _compute_static_confidence(
+            set(openssl_defined) - set(openssl_symbols)
+            if openssl_defined else set(),
+            ssl_result)
+        if confidence != 'none':
+            static_openssl_confidence = confidence
+            static_openssl_confidence_reason = reason
+
     uses_dlopen = False
     dlsym_symbols = []
     dlopen_libs = []

@@ -253,9 +253,27 @@ ossl_type:
 ```
 
 逐库解析: 每个 `.so` 的依赖独立评估; 任一文件有未解析的
-外部依赖即标记为 System-Link。
+外部依赖即标记为 System-Link。高/中置信度的静态提供者加入
+bundled 集合参与依赖解析。
+
+内部 `ossl_type` 与 `bundled_openssl` 在 `_build_hap_summary_row()`
+中合并为最终的 `openssl_usage` 列:
+
+```
+bundled_openssl (字符串 "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
+bundled_openssl (True)              ->  Bundled
+ossl_type == No-OpenSSL             ->  None
+ossl_type == System-Link            ->  System-Link
+其他                                ->  Self-Contained
+```
+
+优先级: 打包的 .so 文件 > 静态提供者 > 依赖解析分类。
 
 辅助函数:
+- `_detect_static_providers(scan_result)`:
+  识别包内静态链接 OpenSSL 的 .so 文件 (高/中置信度)。
+  按 basename 跨 ABI 去重, 保留符号数最多的条目。
+  返回 `(bundled_str, providers_list)`。
 - `_dt_needed_resolved(openssl_libs, bundled_basenames, patterns)`:
   检查 DT_NEEDED 中的 OpenSSL 库是否全部由包内 bundled 库满足。
   对原始 basename 做 pattern 匹配 (非 stem), 再用 stem 比较 bundled 集合。
@@ -274,9 +292,8 @@ ossl_type:
 | Version | version_name |
 | ABI | 逗号分隔 |
 | .so Files | native 库数量 |
-| OpenSSL Type | Self-Contained / System-Link / No-OpenSSL |
+| OpenSSL Usage | None / System-Link / Self-Contained / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
-| Bundled OpenSSL | Yes / No |
 | Static Symbols | 每包静态符号数 |
 | Dynamic Symbols | 每包动态符号数 |
 | dlopen Symbols | 每包 dlopen 符号数 |
@@ -367,6 +384,7 @@ src/openssl_scanner/
                             _resolve_hap_output_names / _hap_write_single_report
                             _merge_hap_results / _build_hap_summary_row
                             _collect_bundled_names / _lib_stem
+                            _detect_static_providers
                             _dt_needed_resolved / _dlopen_targets_resolved
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result
