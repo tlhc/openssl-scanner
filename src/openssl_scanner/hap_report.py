@@ -36,6 +36,7 @@ _HAP_SUMMARY_COLUMNS = [
     ('crypto_bio',      10, 'crypto_bio'),
     ('other_cats',      10, 'Other Cats'),
     ('dlopen_libs',     30, 'dlopen Libs'),
+    ('custom_match',    22, 'Custom Match'),
 ]
 
 _HAP_HIGHLIGHT_CATS = [
@@ -440,7 +441,7 @@ def classify_hap_detection(result):
 
 
 def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
-                           ossl_type):
+                           ossl_type, custom_result=None):
     """Build a dict of column values for one package.
 
     All symbol counts derive from the deduped sets returned by
@@ -499,10 +500,13 @@ def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         'top_category': top_cat,
         'other_cats': other_cats,
         'dlopen_libs': ', '.join(result.dlopen_libs_detected),
+        'custom_match': (custom_result.summary_text() if custom_result
+                         else pi.get('custom_match', '')),
     }
 
 
-def generate_hap_summary(all_results, scanned_packages, output_dir):
+def generate_hap_summary(all_results, scanned_packages, output_dir,
+                          custom_results=None):
     """Generate Package Summary XLSX for HAP batch scan.
 
     Returns the output path on success, None on failure.
@@ -536,11 +540,13 @@ def generate_hap_summary(all_results, scanned_packages, output_dir):
     all_static = set()
     all_dynamic = set()
     all_dlopen = set()
-    for result, pkg_path in zip(all_results, scanned_packages):
+    for idx, (result, pkg_path) in enumerate(zip(all_results, scanned_packages)):
         method, s_syms, d_syms, dl_syms, ossl_type = \
             classify_hap_detection(result)
+        cr = custom_results[idx] if custom_results and idx < len(custom_results) else None
         row = build_hap_summary_row(
-            result, pkg_path, method, s_syms, d_syms, dl_syms, ossl_type)
+            result, pkg_path, method, s_syms, d_syms, dl_syms, ossl_type,
+            custom_result=cr)
         for cat in _HAP_HIGHLIGHT_CATS:
             row[cat] = len(result.symbols_by_category.get(cat, []))
         rows.append(row)
@@ -588,6 +594,7 @@ def generate_hap_summary(all_results, scanned_packages, output_dir):
         'top_category': top_cat_total,
         'other_cats': sum(r.get('other_cats', 0) for r in rows),
         'dlopen_libs': '',
+        'custom_match': '',
     }
     for cat in _HAP_HIGHLIGHT_CATS:
         total_data[cat] = sum(r.get(cat, 0) for r in rows)

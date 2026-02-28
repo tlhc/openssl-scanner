@@ -308,6 +308,7 @@ ossl_type == System-Link            ->  System-Link
 | crypto_bio | crypto_bio 分类符号数 |
 | Other Cats | 其余分类合计 |
 | dlopen Libs | 检测到的库名 |
+| Custom Match | 非 OpenSSL 库匹配 (如 "mbedTLS (167)") |
 
 TOTAL 行使用算术求和 (每列 = 各包对应值之和), 使 Excel 用户看到
 TOTAL = SUM(可见行), 符合电子表格直觉。
@@ -387,9 +388,12 @@ src/openssl_scanner/
   __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result
+  custom_matcher.py         CustomMatcher / scan_file / scan_directory
+  elf_analyzer.py           extract_rodata_strings (custom_matcher 共用)
 
 tests/
   test_hap_extractor.py
   test_hap_integration.py
+  test_custom_matcher.py
   test_reporter.py
 ```

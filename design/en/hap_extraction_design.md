@@ -316,6 +316,7 @@ Helper functions:
 | crypto_bio | symbol count in crypto_bio |
 | Other Cats | remaining categories combined |
 | dlopen Libs | detected library names |
+| Custom Match | non-OpenSSL library matches (e.g., "mbedTLS (167)") |
 
 The TOTAL row uses arithmetic summation (each column = sum of per-package
 values), so that Excel users see TOTAL = SUM(visible rows), matching
@@ -400,9 +401,12 @@ src/openssl_scanner/
   __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result
+  custom_matcher.py         CustomMatcher / scan_file / scan_directory
+  elf_analyzer.py           extract_rodata_strings (shared by custom_matcher)
 
 tests/
   test_hap_extractor.py
   test_hap_integration.py
+  test_custom_matcher.py
   test_reporter.py
 ```

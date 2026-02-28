@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 STRING_SECTIONS = ('.rodata', '.data.rel.ro', '.data')
 MIN_STRING_LEN = 4
-MAX_SECTION_SIZE = 64 * 1024 * 1024
-MAX_TEXT_SIZE = 64 * 1024 * 1024
+MAX_SECTION_SIZE = 2 * 1024 * 1024 * 1024
+MAX_TEXT_SIZE = 2 * 1024 * 1024 * 1024
 
 CLUSTER_MAX_GAP = 256
 CLUSTER_MIN_SIZE = 3

@@ -1031,8 +1031,15 @@ def cmd_hap(args) -> int:
         logger.error("No scannable packages found")
         return 1
 
+    from .custom_matcher import CustomMatcher
+    custom_matcher = CustomMatcher()
+    custom_count = custom_matcher.load_patterns()
+    if custom_count:
+        logger.info("Loaded %d custom patterns", custom_count)
+
     reporter = Reporter()
     all_results = []
+    all_custom_results = []
     scanned_packages = []
     start_time = time.time()
     total_packages = len(pkg_plan)
@@ -1146,7 +1153,16 @@ def cmd_hap(args) -> int:
                     'static_openssl_providers': static_providers,
                 }
 
+                custom_result = custom_matcher.scan_directory(extract_result.extract_dir)
+                if custom_result.has_matches:
+                    logger.info("Custom matches: %s", custom_result.summary_text())
+                result.package_info['custom_match'] = custom_result.summary_text()
+                result.package_info['custom_match_groups'] = {
+                    g: sorted(s) for g, s in custom_result.matches.items() if s
+                }
+
                 all_results.append(result)
+                all_custom_results.append(custom_result)
                 scanned_packages.append(entry_key)
 
                 if not args.keep_extracted:
@@ -1192,7 +1208,8 @@ def cmd_hap(args) -> int:
         if per_package:
             if all_results:
                 summary_path = _generate_hap_summary(
-                    all_results, scanned_packages, output_path
+                    all_results, scanned_packages, output_path,
+                    custom_results=all_custom_results
                 )
                 if summary_path:
                     print(f"Summary: {os.path.basename(summary_path)}")

@@ -5,6 +5,7 @@ Extracts symbol information and dependencies from ELF binaries.
 """
 
 import os
+import re
 import logging
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Set
@@ -224,3 +225,50 @@ class ELFAnalyzer:
         if not info:
             return []
         return [s.name for s in info.defined_symbols]
+
+
+_RODATA_SECTIONS = ('.rodata', '.data.rel.ro', '.data')
+_RODATA_MAX_SIZE = 2 * 1024 * 1024 * 1024
+_RODATA_RE = re.compile(rb'[\x20-\x7e]{4,}')
+
+
+def extract_rodata_strings(elf_path, section_names=None, min_len=4):
+    """Extract printable ASCII strings from .rodata and similar ELF sections.
+
+    Args:
+        elf_path: Path to an ELF binary.
+        section_names: Sections to scan (default: .rodata, .data.rel.ro, .data).
+        min_len: Minimum string length (default 4).
+
+    Returns:
+        Set of unique printable strings found across all matching sections.
+    """
+    if section_names is None:
+        section_names = _RODATA_SECTIONS
+
+    try:
+        with open(elf_path, 'rb') as f:
+            magic = f.read(4)
+            if magic != b'\x7fELF':
+                return set()
+            f.seek(0)
+            elf = ELFFile(f)
+
+            result = set()
+            if min_len == 4:
+                pat = _RODATA_RE
+            else:
+                pat = re.compile(rb'[\x20-\x7e]{%d,}' % min_len)
+
+            for name in section_names:
+                section = elf.get_section_by_name(name)
+                if section is None:
+                    continue
+                if section.data_size > _RODATA_MAX_SIZE:
+                    continue
+                data = section.data()
+                for m in pat.finditer(data):
+                    result.add(m.group().decode('ascii'))
+            return result
+    except (ELFError, IOError, OSError):
+        return set()
