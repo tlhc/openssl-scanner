@@ -1437,7 +1437,9 @@ def cmd_source(args) -> int:
         logger.error("No targets specified. Provide paths or use -f/--from-file.")
         return 1
 
-    targets = [os.path.abspath(t) for t in raw_targets]
+    targets = list(dict.fromkeys(os.path.abspath(t) for t in raw_targets))
+    if len(targets) < len(raw_targets):
+        logger.info("Removed %d duplicate path(s)", len(raw_targets) - len(targets))
     for t in targets:
         if not os.path.exists(t):
             logger.error("Target not found: %s", t)

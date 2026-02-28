@@ -172,6 +172,112 @@ class TestResolveOutputNames:
         assert len(set(paths)) == 3
 
 
+class TestDuplicatePathDedup:
+    """Test that duplicate paths in -f list are deduplicated."""
+
+    def test_exact_duplicate_removed(self, tmp_path):
+        d = tmp_path / "proj"
+        d.mkdir()
+        raw = [str(d), str(d), str(d)]
+        targets = list(dict.fromkeys(os.path.abspath(t) for t in raw))
+        assert len(targets) == 1
+        assert targets[0] == os.path.abspath(str(d))
+
+    def test_relative_and_absolute_duplicate(self, tmp_path, monkeypatch):
+        d = tmp_path / "proj"
+        d.mkdir()
+        monkeypatch.chdir(tmp_path)
+        raw = ["proj", str(d)]
+        targets = list(dict.fromkeys(os.path.abspath(t) for t in raw))
+        assert len(targets) == 1
+
+    def test_distinct_paths_preserved(self, tmp_path):
+        a = tmp_path / "alpha"
+        b = tmp_path / "beta"
+        a.mkdir()
+        b.mkdir()
+        raw = [str(a), str(b)]
+        targets = list(dict.fromkeys(os.path.abspath(t) for t in raw))
+        assert len(targets) == 2
+
+    def test_order_preserved(self, tmp_path):
+        a = tmp_path / "alpha"
+        b = tmp_path / "beta"
+        c = tmp_path / "gamma"
+        a.mkdir()
+        b.mkdir()
+        c.mkdir()
+        raw = [str(b), str(a), str(b), str(c), str(a)]
+        targets = list(dict.fromkeys(os.path.abspath(t) for t in raw))
+        assert len(targets) == 3
+        assert targets == [str(b), str(a), str(c)]
+
+
+class TestCmdSourceDuplicatePaths:
+    """Integration test: cmd_source with duplicate paths in -f list.
+
+    Before the fix, duplicate paths caused TypeError because
+    results_ordered had None slots from dict key collision.
+    """
+
+    def test_from_file_with_duplicates(self, tmp_path):
+        from argparse import Namespace
+        from openssl_scanner.__main__ import cmd_source
+
+        src_dir = tmp_path / "proj"
+        src_dir.mkdir()
+        c_file = src_dir / "hello.c"
+        c_file.write_text('#include <stdio.h>\nint main() { return 0; }\n')
+
+        list_file = tmp_path / "list.txt"
+        list_file.write_text(f"{src_dir}\n{src_dir}\n{src_dir}\n")
+
+        out_dir = tmp_path / "out"
+
+        args = Namespace(
+            target=[],
+            from_file=str(list_file),
+            output=str(out_dir),
+            jobs=1,
+            no_recursive=False,
+            json_only=True,
+            verbose=0,
+            log_file=None,
+        )
+
+        rc = cmd_source(args)
+        assert rc == 0
+
+    def test_positional_duplicates(self, tmp_path):
+        from argparse import Namespace
+        from openssl_scanner.__main__ import cmd_source
+
+        a = tmp_path / "alpha"
+        b = tmp_path / "beta"
+        a.mkdir()
+        b.mkdir()
+        (a / "a.c").write_text('int f() { return 0; }\n')
+        (b / "b.c").write_text('int g() { return 0; }\n')
+
+        out_dir = tmp_path / "out"
+
+        args = Namespace(
+            target=[str(a), str(b), str(a)],
+            from_file=None,
+            output=str(out_dir),
+            jobs=1,
+            no_recursive=False,
+            json_only=True,
+            verbose=0,
+            log_file=None,
+        )
+
+        rc = cmd_source(args)
+        assert rc == 0
+        reports = list(out_dir.glob("*.json"))
+        assert len(reports) == 2
+
+
 class TestComboMergeJson:
     """Test _combo_merge_json from __main__.py."""
 
