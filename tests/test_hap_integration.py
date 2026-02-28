@@ -14,9 +14,12 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from openssl_scanner.__main__ import main
-from openssl_scanner.__main__ import (
-    _classify_hap_detection, _build_hap_summary_row, _HAP_SUMMARY_COLUMNS,
-    _load_scan_result_from_json, _detect_static_providers,
+from openssl_scanner.hap_report import (
+    classify_hap_detection as _classify_hap_detection,
+    build_hap_summary_row as _build_hap_summary_row,
+    _HAP_SUMMARY_COLUMNS,
+    load_scan_result_from_json as _load_scan_result_from_json,
+    detect_static_providers as _detect_static_providers,
 )
 from openssl_scanner.scanner import ScanResult, FileResult
 

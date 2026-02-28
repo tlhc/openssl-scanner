@@ -201,6 +201,39 @@ class SourceMergeExporter:
         Returns:
             Dict with per-project stats for console summary.
         """
+        project_data = []
+        for path in input_paths:
+            name, rows = self._read_xlsx(path)
+            project_data.append({
+                'name': name, 'files_scanned': '--',
+                'rows': rows, 'source': path,
+            })
+        return self._merge_to_workbook(project_data, output_path)
+
+    def merge_from_json(self, input_paths: List[str],
+                        output_path: str) -> Dict:
+        """Read JSON reports and write a merged XLSX (or JSON) workbook.
+
+        Unlike merge() which reads XLSX, this reads the faster JSON format
+        and preserves total_files_scanned (not '--').
+        """
+        project_data = []
+        for path in input_paths:
+            name, files_scanned, rows = self._read_json(path)
+            project_data.append({
+                'name': name, 'files_scanned': files_scanned, 'rows': rows,
+            })
+        return self._merge_to_workbook(project_data, output_path)
+
+    def _merge_to_workbook(self, project_data: List[Dict],
+                           output_path: str) -> Dict:
+        """Shared implementation for all XLSX merge paths.
+
+        Args:
+            project_data: List of dicts with keys:
+                name (str), files_scanned (int or '--'), rows (List[List])
+                Optional: source (str) - preserved in stats for merge() callers
+        """
         from . import _vendor  # noqa: F401
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
@@ -213,12 +246,7 @@ class SourceMergeExporter:
             start_color="F0F8E8", end_color="F0F8E8", fill_type="solid"
         )
 
-        sheets = []
-        for path in input_paths:
-            name, rows = self._read_xlsx(path)
-            sheets.append((name, path, rows))
-
-        names = self._resolve_sheet_names([s[0] for s in sheets])
+        names = self._resolve_sheet_names([p['name'] for p in project_data])
 
         wb = Workbook()
         ws_summary = wb.active
@@ -231,8 +259,15 @@ class SourceMergeExporter:
             ws_summary.column_dimensions[chr(64 + col_idx)].width = width
 
         stats = []
-        for idx, (orig_name, path, rows) in enumerate(sheets):
+        all_symbols = set()
+        all_rows: List[List] = []
+        has_files_scanned = any(
+            p['files_scanned'] != '--' for p in project_data)
+
+        for idx, pdata in enumerate(project_data):
             sheet_name = names[idx]
+            rows = pdata['rows']
+            files_scanned = pdata['files_scanned']
 
             ws = wb.create_sheet(title=sheet_name)
             for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
@@ -262,42 +297,42 @@ class SourceMergeExporter:
             for row in rows:
                 symbols.add(row[4])
                 files_with_calls.add(row[0])
+                all_rows.append(list(row) + [sheet_name])
+                all_symbols.add(row[4])
 
             info = {
                 'project': sheet_name,
-                'source': path,
+                'files_scanned': files_scanned,
                 'call_sites': len(rows),
                 'unique_symbols': len(symbols),
                 'files_with_calls': len(files_with_calls),
                 'top_category': top_cat,
                 'top_cat_symbols': top_count,
             }
+            if 'source' in pdata:
+                info['source'] = pdata['source']
             stats.append(info)
 
             row_num = idx + 2
             ws_summary.cell(row=row_num, column=1, value=sheet_name)
-            ws_summary.cell(row=row_num, column=2, value='--')
+            ws_summary.cell(row=row_num, column=2, value=files_scanned)
             ws_summary.cell(row=row_num, column=3, value=len(files_with_calls))
             ws_summary.cell(row=row_num, column=4, value=len(rows))
             ws_summary.cell(row=row_num, column=5, value=len(symbols))
             ws_summary.cell(row=row_num, column=6, value=top_cat)
             ws_summary.cell(row=row_num, column=7, value=top_count)
 
-        total_row = len(sheets) + 2
+        total_row = len(project_data) + 2
         total_font = Font(bold=True)
         ws_summary.cell(row=total_row, column=1, value="TOTAL").font = total_font
+        if has_files_scanned:
+            ws_summary.cell(row=total_row, column=2,
+                            value=sum(s['files_scanned'] for s in stats
+                                      if s['files_scanned'] != '--')).font = total_font
         ws_summary.cell(row=total_row, column=3,
                         value=sum(s['files_with_calls'] for s in stats)).font = total_font
         ws_summary.cell(row=total_row, column=4,
                         value=sum(s['call_sites'] for s in stats)).font = total_font
-
-        all_symbols = set()
-        all_rows: List[List] = []
-        for idx, (_, _, rows) in enumerate(sheets):
-            project = names[idx]
-            for row in rows:
-                all_rows.append(list(row) + [project])
-                all_symbols.add(row[4])
         ws_summary.cell(row=total_row, column=5,
                         value=len(all_symbols)).font = total_font
 
@@ -314,6 +349,7 @@ class SourceMergeExporter:
         Returns:
             (project_name, list_of_row_values)
         """
+        from . import _vendor  # noqa: F401
         from openpyxl import load_workbook
 
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -356,119 +392,6 @@ class SourceMergeExporter:
 
         name = os.path.splitext(os.path.basename(path))[0]
         return name, files_scanned, rows
-
-    def merge_from_json(self, input_paths: List[str],
-                        output_path: str) -> Dict:
-        """Read JSON reports and write a merged XLSX (or JSON) workbook.
-
-        Unlike merge() which reads XLSX, this reads the faster JSON format
-        and preserves total_files_scanned (not '--').
-        """
-        from . import _vendor  # noqa: F401
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-
-        header_font = Font(bold=True)
-        header_fill = PatternFill(
-            start_color="E8F4FC", end_color="E8F4FC", fill_type="solid"
-        )
-        summary_fill = PatternFill(
-            start_color="F0F8E8", end_color="F0F8E8", fill_type="solid"
-        )
-
-        sheets = []
-        for path in input_paths:
-            name, files_scanned, rows = self._read_json(path)
-            sheets.append((name, files_scanned, rows))
-
-        names = self._resolve_sheet_names([s[0] for s in sheets])
-
-        wb = Workbook()
-        ws_summary = wb.active
-        ws_summary.title = "Summary"
-
-        for col_idx, (title, width) in enumerate(SUMMARY_COLUMNS, 1):
-            cell = ws_summary.cell(row=1, column=col_idx, value=title)
-            cell.font = header_font
-            cell.fill = summary_fill
-            ws_summary.column_dimensions[chr(64 + col_idx)].width = width
-
-        stats = []
-        all_symbols = set()
-        all_rows: List[List] = []
-
-        for idx, (orig_name, files_scanned, rows) in enumerate(sheets):
-            sheet_name = names[idx]
-
-            ws = wb.create_sheet(title=sheet_name)
-            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
-                cell = ws.cell(row=1, column=col_idx, value=title)
-                cell.font = header_font
-                cell.fill = header_fill
-                ws.column_dimensions[
-                    chr(64 + col_idx) if col_idx <= 26
-                    else 'A' + chr(64 + col_idx - 26)
-                ].width = width
-
-            for row_idx, row_data in enumerate(rows, 2):
-                for col_idx, value in enumerate(row_data, 1):
-                    ws.cell(row=row_idx, column=col_idx, value=value)
-
-            if rows:
-                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
-
-            cat_counts = self._count_categories(rows)
-            top_cat, top_count = '', 0
-            if cat_counts:
-                top_cat = max(cat_counts, key=cat_counts.get)
-                top_count = cat_counts[top_cat]
-
-            symbols = set()
-            files_with_calls = set()
-            for row in rows:
-                symbols.add(row[4])
-                files_with_calls.add(row[0])
-                all_rows.append(list(row) + [sheet_name])
-                all_symbols.add(row[4])
-
-            info = {
-                'project': sheet_name,
-                'call_sites': len(rows),
-                'unique_symbols': len(symbols),
-                'files_scanned': files_scanned,
-                'files_with_calls': len(files_with_calls),
-                'top_category': top_cat,
-                'top_cat_symbols': top_count,
-            }
-            stats.append(info)
-
-            row_num = idx + 2
-            ws_summary.cell(row=row_num, column=1, value=sheet_name)
-            ws_summary.cell(row=row_num, column=2, value=files_scanned)
-            ws_summary.cell(row=row_num, column=3, value=len(files_with_calls))
-            ws_summary.cell(row=row_num, column=4, value=len(rows))
-            ws_summary.cell(row=row_num, column=5, value=len(symbols))
-            ws_summary.cell(row=row_num, column=6, value=top_cat)
-            ws_summary.cell(row=row_num, column=7, value=top_count)
-
-        total_row = len(sheets) + 2
-        total_font = Font(bold=True)
-        ws_summary.cell(row=total_row, column=1, value="TOTAL").font = total_font
-        ws_summary.cell(row=total_row, column=2,
-                        value=sum(s['files_scanned'] for s in stats)).font = total_font
-        ws_summary.cell(row=total_row, column=3,
-                        value=sum(s['files_with_calls'] for s in stats)).font = total_font
-        ws_summary.cell(row=total_row, column=4,
-                        value=sum(s['call_sites'] for s in stats)).font = total_font
-        ws_summary.cell(row=total_row, column=5,
-                        value=len(all_symbols)).font = total_font
-
-        self._write_symbol_summary_from_rows(
-            wb, "Symbol Summary", all_rows, header_font, header_fill)
-
-        wb.save(output_path)
-        logger.info("Merged XLSX report saved to: %s", output_path)
-        return {'sheets': stats, 'total_symbols': len(all_symbols)}
 
     def _resolve_sheet_names(self, names: List[str]) -> List[str]:
         """Ensure unique sheet names within Excel's 31-char limit."""
@@ -567,7 +490,16 @@ class SourceMergeExporter:
         ext = os.path.splitext(output_path)[1].lower()
         if ext == '.json':
             return self._merge_to_json(named_results, output_path)
-        return self._merge_to_xlsx(named_results, output_path)
+
+        project_data = []
+        for name, result in named_results:
+            rows = self._result_to_rows(result)
+            project_data.append({
+                'name': name,
+                'files_scanned': result.total_files_scanned,
+                'rows': rows,
+            })
+        return self._merge_to_workbook(project_data, output_path)
 
     def _result_to_rows(self, result: 'SourceScanResult') -> List[List]:
         """Convert SourceScanResult.call_sites to row lists."""
@@ -577,117 +509,6 @@ class SourceMergeExporter:
              getattr(cs, 'detection_method', 'dynamic-link')]
             for cs in result.call_sites
         ]
-
-    def _merge_to_xlsx(self, named_results, output_path):
-        from . import _vendor  # noqa: F401
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill
-
-        header_font = Font(bold=True)
-        header_fill = PatternFill(
-            start_color="E8F4FC", end_color="E8F4FC", fill_type="solid"
-        )
-        summary_fill = PatternFill(
-            start_color="F0F8E8", end_color="F0F8E8", fill_type="solid"
-        )
-
-        sheets_data = []
-        for name, result in named_results:
-            rows = self._result_to_rows(result)
-            sheets_data.append((name, result, rows))
-
-        names = self._resolve_sheet_names([s[0] for s in sheets_data])
-
-        wb = Workbook()
-        ws_summary = wb.active
-        ws_summary.title = "Summary"
-
-        for col_idx, (title, width) in enumerate(SUMMARY_COLUMNS, 1):
-            cell = ws_summary.cell(row=1, column=col_idx, value=title)
-            cell.font = header_font
-            cell.fill = summary_fill
-            ws_summary.column_dimensions[chr(64 + col_idx)].width = width
-
-        stats = []
-        for idx, (orig_name, result, rows) in enumerate(sheets_data):
-            sheet_name = names[idx]
-
-            ws = wb.create_sheet(title=sheet_name)
-            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
-                cell = ws.cell(row=1, column=col_idx, value=title)
-                cell.font = header_font
-                cell.fill = header_fill
-                ws.column_dimensions[
-                    chr(64 + col_idx) if col_idx <= 26
-                    else 'A' + chr(64 + col_idx - 26)
-                ].width = width
-
-            for row_idx, row_data in enumerate(rows, 2):
-                for col_idx, value in enumerate(row_data, 1):
-                    ws.cell(row=row_idx, column=col_idx, value=value)
-
-            if rows:
-                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
-
-            cat_counts = self._count_categories(rows)
-            top_cat, top_count = '', 0
-            if cat_counts:
-                top_cat = max(cat_counts, key=cat_counts.get)
-                top_count = cat_counts[top_cat]
-
-            symbols = set()
-            files_with_calls = set()
-            for row in rows:
-                symbols.add(row[4])
-                files_with_calls.add(row[0])
-
-            info = {
-                'project': sheet_name,
-                'files_scanned': result.total_files_scanned,
-                'call_sites': len(rows),
-                'unique_symbols': len(symbols),
-                'files_with_calls': len(files_with_calls),
-                'top_category': top_cat,
-                'top_cat_symbols': top_count,
-            }
-            stats.append(info)
-
-            row_num = idx + 2
-            ws_summary.cell(row=row_num, column=1, value=sheet_name)
-            ws_summary.cell(row=row_num, column=2,
-                            value=result.total_files_scanned)
-            ws_summary.cell(row=row_num, column=3, value=len(files_with_calls))
-            ws_summary.cell(row=row_num, column=4, value=len(rows))
-            ws_summary.cell(row=row_num, column=5, value=len(symbols))
-            ws_summary.cell(row=row_num, column=6, value=top_cat)
-            ws_summary.cell(row=row_num, column=7, value=top_count)
-
-        total_row = len(sheets_data) + 2
-        total_font = Font(bold=True)
-        ws_summary.cell(row=total_row, column=1, value="TOTAL").font = total_font
-        ws_summary.cell(row=total_row, column=2,
-                        value=sum(s['files_scanned'] for s in stats)).font = total_font
-        ws_summary.cell(row=total_row, column=3,
-                        value=sum(s['files_with_calls'] for s in stats)).font = total_font
-        ws_summary.cell(row=total_row, column=4,
-                        value=sum(s['call_sites'] for s in stats)).font = total_font
-
-        all_symbols = set()
-        all_rows: List[List] = []
-        for idx, (_, _, rows) in enumerate(sheets_data):
-            project = names[idx]
-            for row in rows:
-                all_rows.append(list(row) + [project])
-                all_symbols.add(row[4])
-        ws_summary.cell(row=total_row, column=5,
-                        value=len(all_symbols)).font = total_font
-
-        self._write_symbol_summary_from_rows(
-            wb, "Symbol Summary", all_rows, header_font, header_fill)
-
-        wb.save(output_path)
-        logger.info("Merged XLSX report saved to: %s", output_path)
-        return {'sheets': stats, 'total_symbols': len(all_symbols)}
 
     def _merge_to_json(self, named_results, output_path):
         """Merge results to a single JSON file."""

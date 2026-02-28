@@ -66,11 +66,8 @@ def _run_parallel_analysis(
 
 def _categorize_for_tier(symbol_name: str) -> str:
     """Categorize a symbol name using SYMBOL_CATEGORIES prefixes."""
-    from .constants import SYMBOL_CATEGORIES
-    for cat, prefixes in SYMBOL_CATEGORIES.items():
-        if any(symbol_name.startswith(p) for p in prefixes):
-            return cat
-    return 'other'
+    from .openssl_matcher import categorize_symbol
+    return categorize_symbol(symbol_name)
 
 
 def _compute_static_confidence(implemented_symbols, ssl_result):
@@ -179,35 +176,41 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
                               openssl_libs, openssl_exports)
 
 
-def _build_file_result(path, info, openssl_symbols, openssl_defined,
-                       openssl_libs, openssl_exports):
-    """
-    Shared classification logic for ELF file analysis.
+@dataclass
+class _StaticDetection:
+    """Result of static OpenSSL/BoringSSL detection phase."""
+    detected: bool = False
+    version: Optional[str] = None
+    library: str = ''
+    confidence: str = ''
+    confidence_reason: str = ''
+    hidden_static: bool = False
+    extra_symbols: List[str] = field(default_factory=list)
+    force_direct: bool = False
 
-    Both _analyze_file_worker and Scanner.scan_file() prepare the initial
-    symbol/library lists differently (raw set ops vs matcher methods),
-    then delegate here for identical detection, dlopen analysis, and
-    FileResult construction.
 
-    Args:
-        path: ELF file path.
-        info: ELFInfo from analyzer.
-        openssl_symbols: OpenSSL symbols from .dynsym UND (mutable list).
-        openssl_defined: OpenSSL symbols from .dynsym DEF (list).
-        openssl_libs: OpenSSL libs from DT_NEEDED (list).
-        openssl_exports: Full set of known OpenSSL export names.
+@dataclass
+class _DlopenDetection:
+    """Result of dlopen/dlsym OpenSSL detection phase."""
+    uses_dlopen: bool = False
+    dlsym_symbols: List[str] = field(default_factory=list)
+    dlopen_libs: List[str] = field(default_factory=list)
+    confidence: str = 'high'
+
+
+def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
+                          openssl_libs, openssl_exports):
+    """Detect statically linked OpenSSL/BoringSSL.
+
+    Runs banner detection, BoringSSL weak-symbol fallback,
+    implemented-symbol analysis, and DT_NEEDED suppression.
+
+    Does NOT mutate openssl_symbols or openssl_defined.
 
     Returns:
-        FileResult with detection results.
+        _StaticDetection with results.
     """
-    openssl_direct = len(openssl_libs) > 0
-
-    static_openssl = False
-    static_openssl_version = None
-    static_ssl_library = ''
-    static_openssl_confidence = ''
-    static_openssl_confidence_reason = ''
-
+    result = _StaticDetection()
     ssl_result = detect_static_ssl(path)
 
     if not ssl_result.detected:
@@ -243,60 +246,62 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
             os.path.basename(path), len(implemented_openssl), confidence, reason)
 
         if confidence != 'none':
-            if not openssl_symbols:
-                openssl_symbols = openssl_defined
-            else:
-                for s in openssl_defined:
-                    if s not in openssl_symbols:
-                        openssl_symbols.append(s)
+            merged = list(openssl_symbols)
+            for s in openssl_defined:
+                if s not in merged:
+                    merged.append(s)
+            result.extra_symbols = merged
+            result.force_direct = True
+            result.detected = True
+            result.confidence = confidence
+            result.confidence_reason = reason
 
-            openssl_direct = True
-            static_openssl = True
-            static_openssl_confidence = confidence
-            static_openssl_confidence_reason = reason
-
-    hidden_static = False
     if ssl_result.detected:
         if openssl_libs:
             logger.debug(
                 "Suppressed static %s in %s: DT_NEEDED %s overrides banner",
                 ssl_result.library, os.path.basename(path), openssl_libs)
         else:
-            static_openssl = True
-            static_openssl_version = ssl_result.version
-            static_ssl_library = ssl_result.library
+            result.detected = True
+            result.version = ssl_result.version
+            result.library = ssl_result.library
             if not openssl_defined:
-                hidden_static = True
-                openssl_direct = True
+                result.hidden_static = True
+                result.force_direct = True
                 if openssl_exports:
                     hidden_syms = scan_hidden_static_symbols(
                         path, openssl_exports)
                     if hidden_syms:
-                        openssl_symbols = hidden_syms
+                        result.extra_symbols = hidden_syms
             logger.debug(
                 "Static %s signature in %s: %s (signals=%s, hidden=%s)",
                 ssl_result.library, os.path.basename(path),
-                ssl_result.version, ssl_result.signals, hidden_static)
+                ssl_result.version, ssl_result.signals, result.hidden_static)
 
-    # Confidence floor: when ssl_result.detected sets static_openssl=True
-    # but no implemented_openssl symbols were found (e.g. BoringSSL with
-    # -fvisibility=hidden), the set difference below is empty.
-    # _compute_static_confidence relies on ssl_result.detected / .version
-    # to produce a non-none confidence ('medium' for BoringSSL, 'high'
-    # when a version banner exists).
-    if static_openssl and not static_openssl_confidence:
+    if result.detected and not result.confidence:
         confidence, reason = _compute_static_confidence(
             set(openssl_defined) - set(openssl_symbols)
             if openssl_defined else set(),
             ssl_result)
         if confidence != 'none':
-            static_openssl_confidence = confidence
-            static_openssl_confidence_reason = reason
+            result.confidence = confidence
+            result.confidence_reason = reason
 
-    uses_dlopen = False
-    dlsym_symbols = []
-    dlopen_libs = []
-    dlopen_confidence = 'high'
+    return result
+
+
+def _detect_dlopen_phase(path, info, openssl_symbols, openssl_defined,
+                          openssl_exports, openssl_direct, hidden_static,
+                          static_library=''):
+    """Detect dlopen/dlsym-based OpenSSL loading.
+
+    Runs three-layer detection (string clustering, disassembly cross-ref).
+    Does NOT mutate openssl_symbols.
+
+    Returns:
+        _DlopenDetection with results.
+    """
+    result = _DlopenDetection()
 
     if (info.has_dlopen or info.has_dlsym) and not hidden_static:
         from .dlopen_analyzer import detect_dlopen_openssl
@@ -306,22 +311,23 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
                                                exclude_symbols=exclude_ossl,
                                                strict_mode=True)
         if dlopen_result:
-            dlopen_libs = dlopen_result.dlopen_libs
-            if not openssl_direct or dlopen_libs:
-                uses_dlopen = True
-                dlopen_confidence = dlopen_result.confidence
+            result.dlopen_libs = dlopen_result.dlopen_libs
+            if not openssl_direct or dlopen_result.dlopen_libs:
+                result.uses_dlopen = True
+                result.confidence = dlopen_result.confidence
                 direct_set = set(openssl_symbols)
-                dlsym_symbols = [s for s in dlopen_result.dlsym_symbols
-                                 if s not in direct_set]
-                overlap = len(dlopen_result.dlsym_symbols) - len(dlsym_symbols)
+                result.dlsym_symbols = [
+                    s for s in dlopen_result.dlsym_symbols
+                    if s not in direct_set
+                ]
+                overlap = len(dlopen_result.dlsym_symbols) - len(result.dlsym_symbols)
                 logger.debug(
                     "dlopen classify %s: UND_ossl=%d rodata_ossl=%d "
                     "overlap=%d dlopen_only=%d direct=%s libs=%s conf=%s",
                     os.path.basename(path), len(openssl_symbols),
                     len(dlopen_result.dlsym_symbols), overlap,
-                    len(dlsym_symbols), openssl_direct, dlopen_libs,
-                    dlopen_confidence)
-                openssl_symbols.extend(dlsym_symbols)
+                    len(result.dlsym_symbols), openssl_direct,
+                    result.dlopen_libs, result.confidence)
             elif dlopen_result.dlsym_symbols:
                 logger.debug(
                     "dlopen skip %s: direct OpenSSL link + no lib "
@@ -332,7 +338,50 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
         logger.debug(
             "dlopen skip %s: hidden-static %s detected, "
             ".rodata strings are internal OpenSSL data",
-            os.path.basename(path), ssl_result.library)
+            os.path.basename(path),
+            static_library or 'unknown')
+
+    return result
+
+
+def _build_file_result(path, info, openssl_symbols, openssl_defined,
+                       openssl_libs, openssl_exports):
+    """Shared classification logic for ELF file analysis.
+
+    Orchestrates static and dlopen detection phases, then assembles
+    the final FileResult. Both _analyze_file_worker and Scanner.scan_file()
+    prepare the initial symbol/library lists differently (raw set ops vs
+    matcher methods), then delegate here.
+
+    Args:
+        path: ELF file path.
+        info: ELFInfo from analyzer.
+        openssl_symbols: OpenSSL symbols from .dynsym UND (list).
+        openssl_defined: OpenSSL symbols from .dynsym DEF (list).
+        openssl_libs: OpenSSL libs from DT_NEEDED (list).
+        openssl_exports: Full set of known OpenSSL export names.
+
+    Returns:
+        FileResult with detection results.
+    """
+    openssl_direct = len(openssl_libs) > 0
+
+    static = _detect_static_phase(path, info, openssl_symbols,
+                                   openssl_defined, openssl_libs,
+                                   openssl_exports)
+
+    if static.extra_symbols:
+        openssl_symbols = static.extra_symbols
+    if static.force_direct:
+        openssl_direct = True
+
+    dlopen = _detect_dlopen_phase(path, info, openssl_symbols,
+                                   openssl_defined, openssl_exports,
+                                   openssl_direct, static.hidden_static,
+                                   static.library)
+
+    if dlopen.dlsym_symbols:
+        openssl_symbols = list(openssl_symbols) + dlopen.dlsym_symbols
 
     return FileResult(
         path=path,
@@ -343,16 +392,16 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
         openssl_transitive=False,
         openssl_libs=openssl_libs,
         openssl_symbols=openssl_symbols,
-        static_openssl=static_openssl,
-        static_openssl_version=static_openssl_version,
-        static_ssl_library=static_ssl_library,
-        static_openssl_confidence=static_openssl_confidence,
-        static_openssl_confidence_reason=static_openssl_confidence_reason,
+        static_openssl=static.detected,
+        static_openssl_version=static.version,
+        static_ssl_library=static.library,
+        static_openssl_confidence=static.confidence,
+        static_openssl_confidence_reason=static.confidence_reason,
         openssl_exported=openssl_defined,
-        uses_dlopen=uses_dlopen,
-        dlsym_symbols=dlsym_symbols,
-        dlopen_libs=dlopen_libs,
-        dlopen_confidence=dlopen_confidence,
+        uses_dlopen=dlopen.uses_dlopen,
+        dlsym_symbols=dlopen.dlsym_symbols,
+        dlopen_libs=dlopen.dlopen_libs,
+        dlopen_confidence=dlopen.confidence,
     )
 
 

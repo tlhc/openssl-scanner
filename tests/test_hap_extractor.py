@@ -631,7 +631,7 @@ class TestPerPackageOutput:
     """Tests for per-package directory output helpers."""
 
     def test_resolve_hap_output_names_basic(self):
-        from openssl_scanner.__main__ import _resolve_hap_output_names
+        from openssl_scanner.hap_report import resolve_hap_output_names as _resolve_hap_output_names
 
         packages = ["/a/MyApp.hap", "/b/Plugin.hap"]
         result = _resolve_hap_output_names(packages, "/out", ".xlsx")
@@ -639,7 +639,7 @@ class TestPerPackageOutput:
         assert result["/b/Plugin.hap"] == "/out/Plugin.xlsx"
 
     def test_resolve_hap_output_names_collision(self):
-        from openssl_scanner.__main__ import _resolve_hap_output_names
+        from openssl_scanner.hap_report import resolve_hap_output_names as _resolve_hap_output_names
 
         packages = ["/a/MyApp.hap", "/b/MyApp.hap", "/c/Other.zip"]
         result = _resolve_hap_output_names(packages, "/out", ".xlsx")
@@ -650,7 +650,7 @@ class TestPerPackageOutput:
         assert "/out/Other.xlsx" in values
 
     def test_resolve_hap_output_names_json(self):
-        from openssl_scanner.__main__ import _resolve_hap_output_names
+        from openssl_scanner.hap_report import resolve_hap_output_names as _resolve_hap_output_names
 
         packages = ["/x/test.zip"]
         result = _resolve_hap_output_names(packages, "/out", ".json")
@@ -659,7 +659,7 @@ class TestPerPackageOutput:
 
     def test_resolve_hap_output_names_global_collision(self):
         """Foo.hap + Foo_2.hap should not produce duplicate Foo_2.xlsx."""
-        from openssl_scanner.__main__ import _resolve_hap_output_names
+        from openssl_scanner.hap_report import resolve_hap_output_names as _resolve_hap_output_names
 
         packages = ["/a/Foo.hap", "/b/Foo_2.hap", "/c/Foo.hsp"]
         result = _resolve_hap_output_names(packages, "/out", ".xlsx")

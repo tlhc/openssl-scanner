@@ -1,6 +1,6 @@
 # HAP Extraction and Scanning Design
 
-**Module**: `hap_extractor.py` + `__main__.cmd_hap()`
+**Module**: `hap_extractor.py` + `hap_report.py` + `__main__.cmd_hap()`
 
 ---
 
@@ -189,14 +189,14 @@ Additionally validates that `e_machine` matches the declared ABI.
 ```
 cmd_hap(args)
   -> collect targets (files + directories)
-  -> _plan_packages() -> List[_PkgEntry]
+  -> plan_packages() -> List[PkgEntry]
 ```
 
-`_plan_packages()` expands containers (.zip/.app) into internal entries
+`plan_packages()` expands containers (.zip/.app) into internal entries
 without performing extraction:
 
 ```python
-class _PkgEntry:
+class PkgEntry:
     path: str           # standalone path, or None
     container: str      # container path, or None
     zip_entry: str      # entry name inside container
@@ -205,14 +205,14 @@ class _PkgEntry:
 
 ### 6.2 JIT Extraction
 
-`_extract_pkg_entry()` extracts on demand, one package at a time:
+`extract_pkg_entry()` extracts on demand, one package at a time:
 - Standalone: returns the path directly
 - Container entry: extracts to a temp file, cleaned up in finally block
 
 ### 6.3 Scan Flow
 
 ```
-For each _PkgEntry:
+For each PkgEntry:
   1. incremental check: skip if JSON+XLSX cached and newer than source
   2. extract package -> HapExtractResult
   3. remove bundled OpenSSL libs (prevents scanning OpenSSL itself)
@@ -245,17 +245,17 @@ Supports resumable batch scanning.
 
 ## 7. Summary Report
 
-### 7.1 Classification (`_classify_hap_detection`)
+### 7.1 Classification (`classify_hap_detection`)
 
 Per-file analysis aggregated to package-level classification:
 
 ```
 detection method: Dynamic / Static / dlopen / Mixed / None
 
-ossl_type:
-  Self-Contained  -- all deps resolved within package
+ossl_type (internal):
+  Self-Contained  -- all deps resolved within package (mapped to None in output)
   System-Link     -- has unresolved external OpenSSL dependency
-  No-OpenSSL      -- no OpenSSL symbols
+  No-OpenSSL      -- no OpenSSL symbols (mapped to None in output)
 ```
 
 Per-library resolution: each `.so` file's dependencies are evaluated
@@ -264,7 +264,7 @@ package is marked as System-Link. Static providers with high/medium
 confidence are added to the bundled set for dependency resolution.
 
 The internal `ossl_type` is then combined with `bundled_openssl` in
-`_build_hap_summary_row()` to produce the final `openssl_usage` column:
+`build_hap_summary_row()` to produce the final `openssl_usage` column:
 
 ```
 bundled_openssl (str "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
@@ -277,7 +277,7 @@ otherwise                        ->  None
 Priority: standalone .so > static providers > dependency resolution.
 
 Helper functions:
-- `_detect_static_providers(scan_result)`:
+- `detect_static_providers(scan_result)`:
   Identifies .so files with statically linked OpenSSL (high/medium confidence).
   Deduplicates by basename across ABIs, keeping the highest symbol count.
   Returns `(bundled_str, providers_list)`.
@@ -291,7 +291,7 @@ Helper functions:
 
 ### 7.2 Summary XLSX
 
-`_generate_hap_summary()` output:
+`generate_hap_summary()` output:
 
 | Column | Content |
 |--------|---------|
@@ -326,7 +326,7 @@ spreadsheet conventions.
 Regenerates summary.xlsx from existing JSON reports without re-scanning:
 
 ```
-collect *.json -> _load_scan_result_from_json() -> _generate_hap_summary()
+collect *.json -> load_scan_result_from_json() -> generate_hap_summary()
 ```
 
 ## 8. Filename Collision
@@ -335,8 +335,8 @@ Three layers of deduplication:
 
 1. **Nested package names**: Duplicate names within the same ZIP get
    auto-suffixed (`entry_2.hap`)
-2. **Output files**: `_resolve_hap_output_names()` ensures unique output paths
-3. **Container expansion**: `_plan_packages()` adds container prefix to
+2. **Output files**: `resolve_hap_output_names()` ensures unique output paths
+3. **Container expansion**: `plan_packages()` adds container prefix to
    internal packages (`bundle_entry.hap`)
 
 ## 9. OpenSSL Detection
@@ -391,18 +391,18 @@ src/openssl_scanner/
   hap_extractor.py          extract / _extract_single / _extract_app / _extract_zip
                             _safe_extract_member / _detect_openssl / find_packages
                             cleanup / parse_metadata
-  __main__.py               cmd_hap / cmd_hap_summary / _plan_packages
-                            _extract_pkg_entry / _classify_hap_detection
-                            _generate_hap_summary / _load_scan_result_from_json
-                            _resolve_hap_output_names / _hap_write_single_report
-                            _merge_hap_results / _build_hap_summary_row
-                            _collect_bundled_names / _lib_stem
-                            _detect_static_providers
-                            _dt_needed_resolved / _dlopen_targets_resolved
+  hap_report.py             plan_packages / extract_pkg_entry / merge_hap_results
+                            resolve_hap_output_names / hap_write_single_report
+                            collect_bundled_names / detect_static_providers
+                            classify_hap_detection / build_hap_summary_row
+                            generate_hap_summary / load_scan_result_from_json
+                            _lib_stem / _dt_needed_resolved / _dlopen_targets_resolved
+  __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result
 
 tests/
   test_hap_extractor.py
   test_hap_integration.py
+  test_reporter.py
 ```

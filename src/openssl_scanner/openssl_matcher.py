@@ -14,6 +14,18 @@ from .constants import OPENSSL_LIBRARY_PATTERNS, SYMBOL_CATEGORIES
 logger = logging.getLogger(__name__)
 
 
+def categorize_symbol(symbol: str,
+                      categories: Optional[Dict[str, List[str]]] = None) -> str:
+    """Categorize an OpenSSL symbol by prefix matching against SYMBOL_CATEGORIES."""
+    if categories is None:
+        categories = SYMBOL_CATEGORIES
+    for category, prefixes in categories.items():
+        for prefix in prefixes:
+            if symbol.startswith(prefix):
+                return category
+    return "other"
+
+
 class OpenSSLMatcher:
     """
     Matches symbols against OpenSSL library exports.
@@ -183,11 +195,7 @@ class OpenSSLMatcher:
         Returns:
             Category name or "other" if not matched
         """
-        for category, prefixes in self._categories.items():
-            for prefix in prefixes:
-                if symbol.startswith(prefix):
-                    return category
-        return "other"
+        return categorize_symbol(symbol, self._categories)
 
     def filter_openssl_symbols(self, symbols: List[str]) -> List[str]:
         """

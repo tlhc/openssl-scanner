@@ -1,6 +1,6 @@
 # HAP 提取与扫描设计
 
-**模块**: `hap_extractor.py` + `__main__.cmd_hap()`
+**模块**: `hap_extractor.py` + `hap_report.py` + `__main__.cmd_hap()`
 
 ---
 
@@ -185,13 +185,13 @@ ZIP 可能是:
 ```
 cmd_hap(args)
   -> 收集目标 (文件 + 目录)
-  -> _plan_packages() -> List[_PkgEntry]
+  -> plan_packages() -> List[PkgEntry]
 ```
 
-`_plan_packages()` 将容器 (.zip/.app) 展开为内部条目，但不执行提取:
+`plan_packages()` 将容器 (.zip/.app) 展开为内部条目，但不执行提取:
 
 ```python
-class _PkgEntry:
+class PkgEntry:
     path: str           # 独立包路径, 或 None
     container: str      # 容器路径, 或 None
     zip_entry: str      # 容器内条目名
@@ -200,14 +200,14 @@ class _PkgEntry:
 
 ### 6.2 即时提取 (JIT)
 
-`_extract_pkg_entry()` 按需提取，每次只处理一个包:
+`extract_pkg_entry()` 按需提取，每次只处理一个包:
 - 独立包: 直接返回路径
 - 容器条目: 提取到临时文件, finally 中清理
 
 ### 6.3 扫描流程
 
 ```
-遍历每个 _PkgEntry:
+遍历每个 PkgEntry:
   1. 增量检查: 若 JSON+XLSX 缓存存在且比源文件新则跳过
   2. 提取包 -> HapExtractResult
   3. 移除内置 OpenSSL 库 (防止扫描 OpenSSL 自身)
@@ -239,24 +239,24 @@ cached = (json 存在 AND json_mtime >= source_mtime)
 
 ## 7. 汇总报告
 
-### 7.1 分类 (`_classify_hap_detection`)
+### 7.1 分类 (`classify_hap_detection`)
 
 逐文件分析, 聚合为包级别分类:
 
 ```
 检测方式: Dynamic / Static / dlopen / Mixed / None
 
-ossl_type:
-  Self-Contained  -- 所有依赖在包内解决
+ossl_type (内部分类):
+  Self-Contained  -- 所有依赖在包内解决 (输出时映射为 None)
   System-Link     -- 存在未解析的外部 OpenSSL 依赖
-  No-OpenSSL      -- 无 OpenSSL 符号
+  No-OpenSSL      -- 无 OpenSSL 符号 (输出时映射为 None)
 ```
 
 逐库解析: 每个 `.so` 的依赖独立评估; 任一文件有未解析的
 外部依赖即标记为 System-Link。高/中置信度的静态提供者加入
 bundled 集合参与依赖解析。
 
-内部 `ossl_type` 与 `bundled_openssl` 在 `_build_hap_summary_row()`
+内部 `ossl_type` 与 `bundled_openssl` 在 `build_hap_summary_row()`
 中合并为最终的 `openssl_usage` 列:
 
 ```
@@ -270,7 +270,7 @@ ossl_type == System-Link            ->  System-Link
 优先级: 打包的 .so 文件 > 静态提供者 > 依赖解析分类。
 
 辅助函数:
-- `_detect_static_providers(scan_result)`:
+- `detect_static_providers(scan_result)`:
   识别包内静态链接 OpenSSL 的 .so 文件 (高/中置信度)。
   按 basename 跨 ABI 去重, 保留符号数最多的条目。
   返回 `(bundled_str, providers_list)`。
@@ -283,7 +283,7 @@ ossl_type == System-Link            ->  System-Link
 
 ### 7.2 汇总 XLSX
 
-`_generate_hap_summary()` 输出:
+`generate_hap_summary()` 输出:
 
 | 列名 | 内容 |
 |------|------|
@@ -317,7 +317,7 @@ TOTAL = SUM(可见行), 符合电子表格直觉。
 从已有 JSON 报告重新生成 summary.xlsx, 无需重新扫描:
 
 ```
-收集 *.json -> _load_scan_result_from_json() -> _generate_hap_summary()
+收集 *.json -> load_scan_result_from_json() -> generate_hap_summary()
 ```
 
 ## 8. 文件名冲突
@@ -325,8 +325,8 @@ TOTAL = SUM(可见行), 符合电子表格直觉。
 三层去重:
 
 1. **嵌套包名**: 同一 ZIP 内同名条目自动加后缀 (`entry_2.hap`)
-2. **输出文件**: `_resolve_hap_output_names()` 确保输出路径唯一
-3. **容器展开**: `_plan_packages()` 为内部包添加容器前缀 (`bundle_entry.hap`)
+2. **输出文件**: `resolve_hap_output_names()` 确保输出路径唯一
+3. **容器展开**: `plan_packages()` 为内部包添加容器前缀 (`bundle_entry.hap`)
 
 ## 9. OpenSSL 检测
 
@@ -378,18 +378,18 @@ src/openssl_scanner/
   hap_extractor.py          extract / _extract_single / _extract_app / _extract_zip
                             _safe_extract_member / _detect_openssl / find_packages
                             cleanup / parse_metadata
-  __main__.py               cmd_hap / cmd_hap_summary / _plan_packages
-                            _extract_pkg_entry / _classify_hap_detection
-                            _generate_hap_summary / _load_scan_result_from_json
-                            _resolve_hap_output_names / _hap_write_single_report
-                            _merge_hap_results / _build_hap_summary_row
-                            _collect_bundled_names / _lib_stem
-                            _detect_static_providers
-                            _dt_needed_resolved / _dlopen_targets_resolved
+  hap_report.py             plan_packages / extract_pkg_entry / merge_hap_results
+                            resolve_hap_output_names / hap_write_single_report
+                            collect_bundled_names / detect_static_providers
+                            classify_hap_detection / build_hap_summary_row
+                            generate_hap_summary / load_scan_result_from_json
+                            _lib_stem / _dt_needed_resolved / _dlopen_targets_resolved
+  __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result
 
 tests/
   test_hap_extractor.py
   test_hap_integration.py
+  test_reporter.py
 ```

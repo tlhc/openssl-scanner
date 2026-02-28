@@ -60,10 +60,10 @@ class SourceScanResult:
 def _categorize_symbol(symbol: str,
                        categories: Dict[str, List[str]],
                        macro_symbols: Optional[Set[str]] = None) -> str:
-    for category, prefixes in categories.items():
-        for prefix in prefixes:
-            if symbol.startswith(prefix):
-                return category
+    from .openssl_matcher import categorize_symbol
+    cat = categorize_symbol(symbol, categories)
+    if cat != "other":
+        return cat
     if macro_symbols and symbol in macro_symbols:
         return "macro"
     return "other"
