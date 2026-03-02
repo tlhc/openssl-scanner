@@ -77,7 +77,19 @@ class CustomMatcher:
             return 0
 
         groups = data.get('groups', {})
-        self.groups = {name: set(syms) for name, syms in groups.items()}
+        if not isinstance(groups, dict):
+            logger.warning("Invalid 'groups' in %s: expected dict, got %s",
+                           path, type(groups).__name__)
+            self.groups = {}
+            self.all_patterns = set()
+            return 0
+        self.groups = {}
+        for name, syms in groups.items():
+            if not isinstance(syms, list):
+                logger.warning("Skipping group '%s': expected list, got %s",
+                               name, type(syms).__name__)
+                continue
+            self.groups[name] = set(syms)
         self._rebuild_all_patterns()
         return len(self.all_patterns)
 

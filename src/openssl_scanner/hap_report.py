@@ -375,10 +375,16 @@ def classify_hap_detection(result):
     has_dynamic = has_static = has_dlopen = False
     has_unresolved_external = False
 
+    def _has_ossl_dlopen_evidence(fr):
+        return fr.dlsym_symbols or any(
+            any(os.path.basename(lib).lower().startswith(p)
+                for p in OPENSSL_LIBRARY_PATTERNS)
+            for lib in fr.dlopen_libs)
+
     for fr in result.files_detail:
         if fr.static_openssl:
             has_static = True
-            if fr.uses_dlopen:
+            if fr.uses_dlopen and _has_ossl_dlopen_evidence(fr):
                 has_dlopen = True
                 dlopen_syms.update(fr.dlsym_symbols)
                 static_only = set(fr.openssl_symbols) - set(fr.dlsym_symbols)
@@ -394,7 +400,8 @@ def classify_hap_detection(result):
                         OPENSSL_LIBRARY_PATTERNS):
                     has_unresolved_external = True
         elif fr.uses_dlopen:
-            if not fr.dlsym_symbols and not fr.openssl_symbols:
+            if not fr.dlsym_symbols and not fr.openssl_symbols \
+                    and not _has_ossl_dlopen_evidence(fr):
                 continue
             has_dlopen = True
             dlopen_syms.update(fr.dlsym_symbols)
@@ -430,7 +437,7 @@ def classify_hap_detection(result):
         method = 'Mixed'
 
     total = static_syms | dynamic_syms | dlopen_syms
-    if not total:
+    if not total and not has_dlopen:
         ossl_type = 'No-OpenSSL'
     elif not has_unresolved_external:
         ossl_type = 'Self-Contained'

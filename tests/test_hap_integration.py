@@ -338,7 +338,7 @@ class TestHapSummaryReport:
         assert os.path.isfile(summary)
 
     def test_summary_has_correct_columns(self):
-        """Header row should have all 21 columns."""
+        """Header row should have all 22 columns."""
         ret, out_dir = self._batch_scan(2)
         assert ret == 0
         summary = os.path.join(out_dir, "summary.xlsx")
@@ -347,7 +347,7 @@ class TestHapSummaryReport:
         wb = load_workbook(summary)
         ws = wb.active
         assert ws.title == "Package Summary"
-        headers = [ws.cell(row=1, column=c).value for c in range(1, 22)]
+        headers = [ws.cell(row=1, column=c).value for c in range(1, 23)]
         assert headers[0] == "Package Name"
         assert headers[5] == "OpenSSL Usage"
         assert headers[6] == "Detection"
@@ -357,7 +357,8 @@ class TestHapSummaryReport:
         assert headers[10] == "Total Symbols"
         assert headers[11] == "Top Category"
         assert headers[20] == "dlopen Libs"
-        assert len(headers) == 21
+        assert headers[21] == "Custom Match"
+        assert len(headers) == 22
 
     def test_summary_row_count(self):
         """Should have header + N data rows + TOTAL row."""
@@ -1029,6 +1030,175 @@ class TestClassifyHapDetection:
         ]
         method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
         assert ossl_type == 'System-Link'
+
+    def test_static_dlopen_empty_evidence_ignored(self):
+        """D1: Static file with uses_dlopen=True but zero OpenSSL dlopen evidence.
+
+        The file imports dlopen/dlsym for non-OpenSSL purposes.  Both
+        dlsym_symbols and dlopen_libs are empty -- no OpenSSL signal at all.
+        The dlopen branch should be skipped; detection stays Static-only.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256", "EVP_md5"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=[], dlopen_libs=[]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'Static'
+        assert s_set == {"EVP_sha256", "EVP_md5"}
+        assert dl_set == set()
+        assert ossl_type == 'Self-Contained'
+
+    def test_static_dlopen_non_openssl_libs_ignored(self):
+        """D2: Static file with dlopen_libs targeting non-OpenSSL library.
+
+        The file dlopen-loads libsqlite.so which doesn't match any
+        OPENSSL_LIBRARY_PATTERNS. The dlopen branch should be skipped
+        despite dlopen_libs being non-empty.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=[],
+                       dlopen_libs=["libsqlite.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'Static'
+        assert s_set == {"EVP_sha256"}
+        assert dl_set == set()
+        assert ossl_type == 'Self-Contained'
+
+    def test_static_dlopen_libs_only_preserved(self):
+        """D3: Static file with dlopen_libs but empty dlsym_symbols.
+
+        dlopen_analyzer found library name (e.g., libcrypto.so in .rodata)
+        but disassembly xref failed to resolve individual symbols.
+        The dlopen_libs signal should still activate the dlopen branch.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=[],
+                       dlopen_libs=["libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'Mixed'
+        assert s_set == {"EVP_sha256"}
+        assert dl_set == set()
+        assert ossl_type == 'System-Link'
+
+    def test_nonstat_dlopen_empty_evidence_skipped(self):
+        """D4: Non-static file with uses_dlopen but zero evidence -> skip entirely.
+
+        This tests the existing guard at L397 (non-static branch).
+        File has uses_dlopen=True but no dlsym_symbols and no openssl_symbols.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[],
+                       uses_dlopen=True, dlsym_symbols=[], dlopen_libs=[]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'None'
+        assert ossl_type == 'No-OpenSSL'
+
+    def test_multifile_static_empty_dlopen_plus_dynamic(self):
+        """D7: Multi-file package with one static+empty-dlopen + one dynamic.
+
+        File A: static_openssl + uses_dlopen but empty evidence -> Static only
+        File B: dynamic UND symbols -> Dynamic
+
+        Package should be Mixed(Static+Dynamic), NOT Mixed(Static+Dynamic+dlopen).
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/static.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["EVP_sha256"],
+                       static_openssl=True, uses_dlopen=True,
+                       dlsym_symbols=[], dlopen_libs=[]),
+            FileResult(path="/app.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=True,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=["SSL_connect"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'Mixed'
+        assert s_set == {"EVP_sha256"}
+        assert d_set == {"SSL_connect"}
+        assert dl_set == set()
+        assert ossl_type == 'System-Link'
+
+    def test_nonstat_dlopen_libs_only_system_link(self):
+        """D5: Non-static file with dlopen_libs but no resolved symbols.
+
+        dlopen_analyzer found 'libcrypto.so' in .rodata but xref failed.
+        The file should NOT be skipped; method=dlopen, type=System-Link.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[],
+                       uses_dlopen=True, dlsym_symbols=[],
+                       dlopen_libs=["libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'dlopen'
+        assert dl_set == set()
+        assert ossl_type == 'System-Link'
+
+    def test_nonstat_dlopen_libs_only_bundled_self_contained(self):
+        """D6: Non-static dlopen_libs only, bundled lib resolves target.
+
+        Same as D5 but with bundled libcrypto.so.3 -> Self-Contained.
+        """
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.package_info = {
+            'bundled_openssl_files': ['libcrypto.so.3'],
+        }
+        result.files_detail = [
+            FileResult(path="/lib.so", file_type="shared_library",
+                       arch="aarch64", direct_deps=[], openssl_direct=False,
+                       openssl_transitive=False, openssl_libs=[],
+                       openssl_symbols=[],
+                       uses_dlopen=True, dlsym_symbols=[],
+                       dlopen_libs=["libcrypto.so"]),
+        ]
+        method, s_set, d_set, dl_set, ossl_type = _classify_hap_detection(result)
+        assert method == 'dlopen'
+        assert ossl_type == 'Self-Contained'
 
 
 class TestBundledOpenSSLDetection:
@@ -2042,6 +2212,411 @@ class TestRealHAPOpenSSLUsage:
         _, row = _scan_real_hap(_hap_path('ClashForHarmonyOS.hap'))
         assert row['openssl_usage'] == 'None'
         assert row['total_syms'] == 0
+
+
+HITLS_SYMS = ['HITLS_Connect', 'HITLS_Read', 'HITLS_Write', 'HITLS_Close',
+              'HITLS_Accept', 'BSL_ERR_GetError', 'CRYPT_EAL_CipherInit']
+WOLF_SYMS = ['wolfSSL_Init', 'wolfSSL_CTX_new', 'wolfSSL_new']
+
+
+def _create_hap_with_elfs(path, bundle_name, module_name, elf_entries,
+                          include_openssl=False):
+    """Build a HAP ZIP with module.json and custom ELF .so files.
+
+    Args:
+        path: Output HAP file path.
+        bundle_name: App bundle name for module.json.
+        module_name: Module name for module.json.
+        elf_entries: List of (filename, elf_bytes) tuples to place in
+            libs/arm64-v8a/.
+        include_openssl: If True, also include a minimal libcrypto.so.3.
+    """
+    with zipfile.ZipFile(path, 'w') as zf:
+        zf.writestr("module.json", json.dumps({
+            "module": {
+                "name": module_name,
+                "type": "entry",
+                "deviceTypes": ["default"]
+            },
+            "app": {
+                "bundleName": bundle_name,
+                "versionCode": 1000000,
+                "versionName": "1.0.0",
+                "minAPIVersion": 11
+            }
+        }))
+        for fname, data in elf_entries:
+            zf.writestr(f"libs/arm64-v8a/{fname}", data)
+        if include_openssl:
+            zf.writestr("libs/arm64-v8a/libcrypto.so.3", _minimal_elf64())
+    return path
+
+
+def _scan_hap_json(hap_path, output_dir):
+    """Run hap subcommand and return parsed JSON report dict."""
+    os.makedirs(output_dir, exist_ok=True)
+    ret = main(['hap', hap_path, '-o', output_dir, '--json-only'])
+    assert ret is None or ret == 0, f'hap command failed: rc={ret}'
+    json_files = [f for f in os.listdir(output_dir) if f.endswith('.json')]
+    assert len(json_files) >= 1, f'No JSON output in {output_dir}'
+    with open(os.path.join(output_dir, json_files[0])) as f:
+        return json.load(f)
+
+
+class TestCustomPatternHapIntegration:
+    """End-to-end tests for CustomMatcher integration in the HAP pipeline.
+
+    Verifies the full path: HAP zip -> extract .so -> CustomMatcher ->
+    package_info['custom_match'] -> JSON report + summary.xlsx column 22.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _build_rodata(self, symbols):
+        """Pack symbols as null-terminated strings into a .rodata blob."""
+        return b'\x00'.join(s.encode() for s in symbols) + b'\x00'
+
+    def test_b1_hitls_und_only(self):
+        """B1: HiTLS UND symbols -> custom_match='openHiTLS (3)'."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = ELFBuilder()
+        for sym in HITLS_SYMS[:3]:
+            elf.add_dynsym(sym, defined=False)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'hitls_und.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b1')
+        _create_hap_with_elfs(hap_path, 'com.test.hitls.und', 'entry',
+                              [('libhitls.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert pi['custom_match'] == 'openHiTLS (3)'
+        assert 'openHiTLS' in pi['custom_match_groups']
+        assert len(pi['custom_match_groups']['openHiTLS']) == 3
+
+    def test_b2_hitls_def_only(self):
+        """B2: HiTLS DEF symbols (static link) -> custom_match='openHiTLS (3)'."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = ELFBuilder()
+        for sym in HITLS_SYMS[:3]:
+            elf.add_dynsym(sym, defined=True)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'hitls_def.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b2')
+        _create_hap_with_elfs(hap_path, 'com.test.hitls.def', 'entry',
+                              [('libhitls.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert pi['custom_match'] == 'openHiTLS (3)'
+        assert 'openHiTLS' in pi['custom_match_groups']
+
+    def test_b3_hitls_rodata_only(self):
+        """B3: HiTLS strings in .rodata only -> custom_match='openHiTLS (3)'."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = self._build_rodata(HITLS_SYMS[:3])
+        elf = ELFBuilder().set_rodata(rodata)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'hitls_rodata.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b3')
+        _create_hap_with_elfs(hap_path, 'com.test.hitls.rodata', 'entry',
+                              [('libhitls.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert pi['custom_match'] == 'openHiTLS (3)'
+        assert 'openHiTLS' in pi['custom_match_groups']
+        assert len(pi['custom_match_groups']['openHiTLS']) == 3
+
+    def test_b4_hitls_plus_bundled_openssl(self):
+        """B4: HiTLS UND + bundled libcrypto.so.3 -> openssl_usage=Bundled."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = ELFBuilder()
+        for sym in HITLS_SYMS[:2]:
+            elf.add_dynsym(sym, defined=False)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'hitls_bundled.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b4')
+        _create_hap_with_elfs(hap_path, 'com.test.hitls.bundled', 'entry',
+                              [('libhitls.so', elf_bytes)],
+                              include_openssl=True)
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert 'openHiTLS' in pi['custom_match']
+        assert pi.get('bundled_openssl') is not False
+
+    def test_b5_hitls_plus_system_openssl(self):
+        """B5: HiTLS UND + SSL_connect UND -> openssl_usage=System-Link."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = ELFBuilder()
+        for sym in HITLS_SYMS[:3]:
+            elf.add_dynsym(sym, defined=False)
+        elf.add_dynsym('SSL_connect', defined=False)
+        elf.add_dynsym('SSL_read', defined=False)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'hitls_syslink.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b5')
+        _create_hap_with_elfs(hap_path, 'com.test.hitls.syslink', 'entry',
+                              [('libhitls.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert 'openHiTLS' in pi['custom_match']
+
+        result = ScanResult(
+            target=hap_path, scan_time="", tool_version="test",
+            arch="aarch64")
+        result.report_type = 'package'
+        result.package_info = pi
+        result.symbols_by_category = data['openssl_symbols'].get(
+            'by_category', {})
+        frs = []
+        for fd in data['files_detail']:
+            fr = FileResult(
+                path=fd['path'],
+                file_type=fd.get('type', 'shared_library'),
+                arch=fd.get('arch', 'aarch64'),
+                direct_deps=fd.get('direct_deps', []),
+                openssl_direct=fd['openssl_deps'].get('direct', False),
+                openssl_transitive=fd['openssl_deps'].get('transitive', False),
+                openssl_libs=fd['openssl_deps'].get('libs', []),
+                openssl_symbols=fd.get('openssl_symbols_used', []),
+            )
+            frs.append(fr)
+        result.files_detail = frs
+        method, s, d, dl, ossl_type = _classify_hap_detection(result)
+        row = _build_hap_summary_row(result, hap_path, method, s, d, dl,
+                                     ossl_type)
+        assert row['openssl_usage'] == 'System-Link'
+
+    def test_b6_multi_lib(self):
+        """B6: HiTLS UND + wolfSSL UND -> both groups in custom_match."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = ELFBuilder()
+        elf.add_dynsym('HITLS_Connect', defined=False)
+        elf.add_dynsym('wolfSSL_Init', defined=False)
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'multi_lib.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b6')
+        _create_hap_with_elfs(hap_path, 'com.test.multilib', 'entry',
+                              [('libmulti.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert 'openHiTLS (1)' in pi['custom_match']
+        assert 'wolfSSL (1)' in pi['custom_match']
+        assert 'openHiTLS' in pi['custom_match_groups']
+        assert 'wolfSSL' in pi['custom_match_groups']
+
+    def test_b7_dedup_und_over_rodata(self):
+        """B7: Same symbol in UND + rodata -> deduplicated, no double count."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = self._build_rodata(['HITLS_Connect', 'HITLS_Read'])
+        elf = (ELFBuilder()
+               .add_dynsym('HITLS_Connect', defined=False)
+               .set_rodata(rodata))
+        elf_bytes = elf.build()
+
+        hap_path = os.path.join(self.tmpdir, 'dedup.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b7')
+        _create_hap_with_elfs(hap_path, 'com.test.dedup', 'entry',
+                              [('libdedup.so', elf_bytes)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert pi['custom_match'] == 'openHiTLS (2)'
+        assert len(pi['custom_match_groups']['openHiTLS']) == 2
+
+    def test_b8_clean_hap(self):
+        """B8: No custom pattern matches -> custom_match=''."""
+        from tests.fixtures.elf_builder import ELFBuilder
+        elf = (ELFBuilder()
+               .add_dynsym('printf', defined=False)
+               .add_dynsym('malloc', defined=False)
+               .build())
+
+        hap_path = os.path.join(self.tmpdir, 'clean.hap')
+        out_dir = os.path.join(self.tmpdir, 'out_b8')
+        _create_hap_with_elfs(hap_path, 'com.test.clean', 'entry',
+                              [('libclean.so', elf)])
+        data = _scan_hap_json(hap_path, out_dir)
+
+        pi = data['meta']['package']
+        assert pi['custom_match'] == ''
+        assert pi.get('custom_match_groups', {}) == {}
+
+    def test_b9_batch_scan_summary(self):
+        """B9: Batch scan 3 HAPs -> per-package JSON + summary.xlsx correct."""
+        from tests.fixtures.elf_builder import ELFBuilder
+
+        pkg_dir = os.path.join(self.tmpdir, 'pkgs')
+        os.makedirs(pkg_dir)
+
+        elf_hitls = (ELFBuilder()
+                     .add_dynsym('HITLS_Accept', defined=False)
+                     .add_dynsym('HITLS_Connect', defined=False)
+                     .build())
+        _create_hap_with_elfs(
+            os.path.join(pkg_dir, 'hitls.hap'),
+            'com.test.batch.hitls', 'entry',
+            [('libhitls.so', elf_hitls)])
+
+        elf_wolf = (ELFBuilder()
+                    .add_dynsym('wolfSSL_Init', defined=False)
+                    .build())
+        _create_hap_with_elfs(
+            os.path.join(pkg_dir, 'wolf.hap'),
+            'com.test.batch.wolf', 'entry',
+            [('libwolf.so', elf_wolf)])
+
+        elf_clean = (ELFBuilder()
+                     .add_dynsym('printf', defined=False)
+                     .build())
+        _create_hap_with_elfs(
+            os.path.join(pkg_dir, 'clean.hap'),
+            'com.test.batch.clean', 'entry',
+            [('libclean.so', elf_clean)])
+
+        out_dir = os.path.join(self.tmpdir, 'out_b9')
+        ret = main(['hap', pkg_dir, '-o', out_dir, '--json-only'])
+        assert ret == 0
+
+        summary_path = os.path.join(out_dir, 'summary.xlsx')
+        assert os.path.isfile(summary_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary_path)
+        ws = wb.active
+
+        col_keys = [c[0] for c in _HAP_SUMMARY_COLUMNS]
+        cm_col = col_keys.index('custom_match') + 1
+
+        header = ws.cell(row=1, column=cm_col).value
+        assert header == 'Custom Match'
+
+        cm_values = {}
+        for r in range(2, ws.max_row + 1):
+            pkg = ws.cell(row=r, column=1).value
+            if pkg and pkg != 'TOTAL':
+                cm_values[pkg] = ws.cell(row=r, column=cm_col).value or ''
+
+        hitls_pkg = [k for k in cm_values if 'hitls' in k.lower()]
+        wolf_pkg = [k for k in cm_values if 'wolf' in k.lower()]
+        clean_pkg = [k for k in cm_values if 'clean' in k.lower()]
+
+        assert len(hitls_pkg) == 1
+        assert 'openHiTLS (2)' in cm_values[hitls_pkg[0]]
+
+        assert len(wolf_pkg) == 1
+        assert 'wolfSSL (1)' in cm_values[wolf_pkg[0]]
+
+        assert len(clean_pkg) == 1
+        assert cm_values[clean_pkg[0]] == ''
+
+    def test_b10_json_roundtrip_hap_summary(self):
+        """B10: hap -> JSON -> hap-summary -> custom_match survives."""
+        from tests.fixtures.elf_builder import ELFBuilder
+
+        elf = (ELFBuilder()
+               .add_dynsym('HITLS_Accept', defined=False)
+               .add_dynsym('HITLS_Connect', defined=False)
+               .add_dynsym('HITLS_Read', defined=False)
+               .build())
+
+        hap_path = os.path.join(self.tmpdir, 'roundtrip.hap')
+        json_dir = os.path.join(self.tmpdir, 'json_out')
+        _create_hap_with_elfs(hap_path, 'com.test.roundtrip', 'entry',
+                              [('libhitls.so', elf)])
+
+        ret1 = main(['hap', hap_path, '-o', json_dir, '--json-only'])
+        assert ret1 is None or ret1 == 0
+
+        json_files = [f for f in os.listdir(json_dir) if f.endswith('.json')]
+        assert len(json_files) >= 1
+
+        with open(os.path.join(json_dir, json_files[0])) as f:
+            original = json.load(f)
+        original_cm = original['meta']['package']['custom_match']
+        assert original_cm == 'openHiTLS (3)'
+
+        summary_dir = os.path.join(self.tmpdir, 'summary_out')
+        os.makedirs(summary_dir, exist_ok=True)
+        summary_xlsx = os.path.join(summary_dir, 'summary.xlsx')
+        ret2 = main(['hap-summary', json_dir, '-o', summary_xlsx])
+        assert ret2 == 0
+
+        from openpyxl import load_workbook
+        wb = load_workbook(summary_xlsx)
+        ws = wb.active
+
+        col_keys = [c[0] for c in _HAP_SUMMARY_COLUMNS]
+        cm_col = col_keys.index('custom_match') + 1
+
+        for r in range(2, ws.max_row + 1):
+            pkg = ws.cell(row=r, column=1).value
+            if pkg and pkg != 'TOTAL':
+                assert ws.cell(row=r, column=cm_col).value == original_cm
+
+    def test_b11_app_container(self):
+        """B11: APP container with inner HiTLS HAP -> per-HAP custom_match."""
+        from tests.fixtures.elf_builder import ELFBuilder
+
+        elf_hitls = (ELFBuilder()
+                     .add_dynsym('HITLS_Accept', defined=False)
+                     .add_dynsym('HITLS_Connect', defined=False)
+                     .build())
+        elf_clean = (ELFBuilder()
+                     .add_dynsym('printf', defined=False)
+                     .build())
+
+        app_path = os.path.join(self.tmpdir, 'container.app')
+        with zipfile.ZipFile(app_path, 'w') as app_zf:
+            for name, bname, mname, elf_data in [
+                ('hitls_mod.hap', 'com.test.container', 'hitls_mod',
+                 elf_hitls),
+                ('clean_mod.hap', 'com.test.container', 'clean_mod',
+                 elf_clean),
+            ]:
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, 'w') as hap_zf:
+                    hap_zf.writestr("module.json", json.dumps({
+                        "module": {"name": mname, "type": "entry",
+                                   "deviceTypes": ["default"]},
+                        "app": {"bundleName": bname,
+                                "versionCode": 1, "versionName": "1.0.0",
+                                "minAPIVersion": 11}
+                    }))
+                    hap_zf.writestr(f"libs/arm64-v8a/lib{mname}.so", elf_data)
+                app_zf.writestr(name, buf.getvalue())
+
+        out_dir = os.path.join(self.tmpdir, 'out_b11')
+        ret = main(['hap', app_path, '-o', out_dir, '--json-only'])
+        assert ret == 0
+
+        json_files = sorted(f for f in os.listdir(out_dir)
+                            if f.endswith('.json'))
+        assert len(json_files) == 2
+
+        results = {}
+        for jf in json_files:
+            with open(os.path.join(out_dir, jf)) as f:
+                d = json.load(f)
+            mname = d['meta']['package']['module_name']
+            results[mname] = d
+
+        assert 'openHiTLS' in results['hitls_mod']['meta']['package']['custom_match']
+        assert results['clean_mod']['meta']['package']['custom_match'] == ''
 
 
 if __name__ == "__main__":
