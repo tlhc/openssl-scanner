@@ -17,6 +17,7 @@ from openssl_scanner.__main__ import main
 from openssl_scanner.hap_report import (
     classify_hap_detection as _classify_hap_detection,
     build_hap_summary_row as _build_hap_summary_row,
+    aggregate_app_classification as _aggregate_app_classification,
     _HAP_SUMMARY_COLUMNS,
     load_scan_result_from_json as _load_scan_result_from_json,
     detect_static_providers as _detect_static_providers,
@@ -2617,6 +2618,720 @@ class TestCustomPatternHapIntegration:
 
         assert 'openHiTLS' in results['hitls_mod']['meta']['package']['custom_match']
         assert results['clean_mod']['meta']['package']['custom_match'] == ''
+
+
+class TestInAPPLinkClassification:
+    """Tests for In-APP-Link: cross-HAP OpenSSL dependency resolution within APP containers."""
+
+    def _make_file_result(self, path, openssl_symbols=None, openssl_libs=None,
+                          static_openssl=False, static_confidence='',
+                          uses_dlopen=False, dlopen_libs=None, dlsym_symbols=None):
+        fr = FileResult(
+            path=path, file_type="shared_library", arch="aarch64",
+            direct_deps=openssl_libs or [], openssl_direct=bool(openssl_symbols),
+            openssl_transitive=False, openssl_libs=openssl_libs or [],
+            openssl_symbols=openssl_symbols or [])
+        fr.static_openssl = static_openssl
+        fr.static_openssl_confidence = static_confidence
+        fr.uses_dlopen = uses_dlopen
+        fr.dlopen_libs = dlopen_libs or []
+        fr.dlsym_symbols = dlsym_symbols or []
+        return fr
+
+    def _make_result(self, files_detail, package_info, symbols_by_category=None):
+        result = ScanResult(
+            target="/tmp/t", scan_time="", tool_version="0.1", arch="aarch64"
+        )
+        result.files_detail = files_detail
+        result.symbols_by_category = symbols_by_category or {}
+        result.package_info = package_info
+        return result
+
+    def _make_pkg_info(self, bundle_name='com.test.pkg', module_name='entry',
+                       package_path='/test.hap', bundled=False,
+                       bundled_files=None, native_count=1):
+        pi = {
+            'bundle_name': bundle_name,
+            'module_name': module_name,
+            'package_type': 'hap',
+            'package_path': package_path,
+            'version_name': '1.0.0',
+            'scanned_abi': ['arm64-v8a'],
+            'native_libs_count': native_count,
+            'bundled_openssl': bundled,
+        }
+        if bundled_files is not None:
+            pi['bundled_openssl_files'] = bundled_files
+        return pi
+
+    def test_a1_classify_extra_bundled_resolves_dynamic(self):
+        """classify_hap_detection with extra_bundled resolves DT_NEEDED."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect", "SSL_read"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect', 'SSL_read']})
+
+        _, _, _, _, ossl_type_before = _classify_hap_detection(result)
+        assert ossl_type_before == 'System-Link'
+
+        _, _, _, _, ossl_type_after = _classify_hap_detection(
+            result, extra_bundled={'libcrypto.so.3'})
+        assert ossl_type_after == 'Self-Contained'
+
+    def test_a2_classify_extra_bundled_resolves_dlopen(self):
+        """classify_hap_detection with extra_bundled resolves dlopen targets."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_CTX_new"],
+            uses_dlopen=True,
+            dlopen_libs=["libssl.so"],
+            dlsym_symbols=["SSL_CTX_new"])
+        pi = self._make_pkg_info(bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_CTX_new']})
+
+        _, _, _, _, t1 = _classify_hap_detection(result)
+        assert t1 == 'System-Link'
+
+        _, _, _, _, t2 = _classify_hap_detection(
+            result, extra_bundled={'libssl.so.3'})
+        assert t2 == 'Self-Contained'
+
+    def test_a3_classify_extra_bundled_partial_unresolved(self):
+        """extra_bundled provides libcrypto but not libssl -> still System-Link."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3", "libssl.so.3"])
+        pi = self._make_pkg_info(bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        _, _, _, _, t = _classify_hap_detection(
+            result, extra_bundled={'libcrypto.so.3'})
+        assert t == 'System-Link'
+
+    def test_a4_classify_extra_bundled_no_effect_on_self_contained(self):
+        """extra_bundled has no effect when already Self-Contained."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(bundled_files=['libcrypto.so.3'])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        _, _, _, _, t = _classify_hap_detection(
+            result, extra_bundled={'libssl.so.3'})
+        assert t == 'Self-Contained'
+
+    def test_a5_classify_extra_bundled_no_effect_on_no_openssl(self):
+        """extra_bundled has no effect on No-OpenSSL HAP."""
+        fr = self._make_file_result("/libplain.so")
+        pi = self._make_pkg_info(bundled_files=[])
+        result = self._make_result([fr], pi)
+
+        _, _, _, _, t = _classify_hap_detection(
+            result, extra_bundled={'libcrypto.so.3'})
+        assert t == 'No-OpenSSL'
+
+    def test_b1_aggregate_basic_app_reclassify(self):
+        """entry.hap System-Link + feature.hap Bundled -> entry becomes In-APP-Link."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect", "SSL_read"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/path/to/MyApp.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect', 'SSL_read']})
+
+        feature_fr = self._make_file_result("/libfeature.so")
+        feature_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/path/to/MyApp.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feature_result = self._make_result([feature_fr], feature_pi)
+
+        all_results = [entry_result, feature_result]
+        classifications = [
+            _classify_hap_detection(r) for r in all_results
+        ]
+        assert classifications[0][4] == 'System-Link'
+        assert classifications[1][4] == 'No-OpenSSL'
+
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+        assert updated[1][4] == 'No-OpenSSL'
+
+    def test_b2_aggregate_standalone_haps_unchanged(self):
+        """Standalone HAPs (not from .app) remain System-Link."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(
+            package_path='/standalone/entry.hap', bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        classifications = [_classify_hap_detection(result)]
+        updated = _aggregate_app_classification([result], classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b3_aggregate_single_hap_in_app_unchanged(self):
+        """Single HAP in .app container: no siblings to resolve from."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(
+            package_path='/path/to/Solo.app', bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        classifications = [_classify_hap_detection(result)]
+        updated = _aggregate_app_classification([result], classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b4_aggregate_siblings_dont_provide_needed_lib(self):
+        """Sibling provides libcrypto but entry needs libssl too -> still System-Link."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3", "libssl.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        feature_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feature_result = self._make_result(
+            [self._make_file_result("/libfeat.so")], feature_pi)
+
+        all_results = [entry_result, feature_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b5_aggregate_multiple_siblings_collectively_resolve(self):
+        """Two siblings each provide one lib -> collectively resolve entry's needs."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3", "libssl.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        feat1_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feat1_result = self._make_result(
+            [self._make_file_result("/libf1.so")], feat1_pi)
+
+        feat2_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libssl.so.3'])
+        feat2_result = self._make_result(
+            [self._make_file_result("/libf2.so")], feat2_pi)
+
+        all_results = [entry_result, feat1_result, feat2_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b6_aggregate_preserves_original_classifications(self):
+        """aggregate_app_classification must NOT mutate the input list."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feat_result = self._make_result(
+            [self._make_file_result("/libf.so")], feat_pi)
+
+        all_results = [result, feat_result]
+        original = [_classify_hap_detection(r) for r in all_results]
+        original_copy = list(original)
+        _aggregate_app_classification(all_results, original)
+        assert original == original_copy
+
+    def test_b7_aggregate_static_only_sibling_does_not_resolve(self):
+        """Static-only sibling (no standalone .so) cannot resolve DT_NEEDED."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        static_fr = self._make_file_result(
+            "/libstatic.so",
+            openssl_symbols=["EVP_DigestInit"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [static_fr], feat_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b8_aggregate_static_shared_sibling_does_not_resolve(self):
+        """Static+shared sibling (e.g. libffmpeg.so) cannot resolve DT_NEEDED libcrypto."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        provider_fr = self._make_file_result(
+            "/libffmpeg.so",
+            openssl_symbols=["EVP_DigestInit", "EVP_EncryptInit"],
+            static_openssl=True, static_confidence='high')
+        consumer_fr = self._make_file_result(
+            "/libplayer.so",
+            openssl_symbols=["EVP_DigestInit"],
+            openssl_libs=["libffmpeg.so"])
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [provider_fr, consumer_fr], feat_pi,
+            {'crypto_evp': ['EVP_DigestInit', 'EVP_EncryptInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b9_aggregate_bundled_so_plus_static_sibling_resolves(self):
+        """Sibling with both standalone .so + static -> resolves via standalone .so."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        static_fr = self._make_file_result(
+            "/libwrapper.so",
+            openssl_symbols=["EVP_DigestInit"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feat_result = self._make_result(
+            [static_fr], feat_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b10_aggregate_boringssl_static_sibling_does_not_resolve(self):
+        """BoringSSL static in sibling (e.g. libflutter.so) cannot resolve DT_NEEDED."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        boring_fr = self._make_file_result(
+            "/libflutter.so",
+            openssl_symbols=["SSL_connect"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [boring_fr], feat_pi, {'ssl_core': ['SSL_connect']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b11_aggregate_sibling_crypto_plus_ssl_resolves_both(self):
+        """Sibling bundles both libcrypto.so.3 + libssl.so.3 -> resolves both DT_NEEDED."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect", "EVP_DigestInit"],
+            openssl_libs=["libcrypto.so.3", "libssl.so.3"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi,
+            {'ssl_core': ['SSL_connect'], 'crypto_evp': ['EVP_DigestInit']})
+
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3', 'libssl.so.3'])
+        feat_result = self._make_result(
+            [self._make_file_result("/libfeat.so")], feat_pi)
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b12_aggregate_sibling_static_provider_resolves_via_dt_needed(self):
+        """Sibling has libfoo.so with static OpenSSL; entry DT_NEEDs libfoo.so -> In-APP-Link."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["EVP_DigestInit", "EVP_EncryptInit"],
+            openssl_libs=[])
+        entry_fr.direct_deps = ["libfoo.so", "libc.so"]
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi,
+            {'crypto_evp': ['EVP_DigestInit', 'EVP_EncryptInit']})
+
+        provider_fr = self._make_file_result(
+            "/libfoo.so",
+            openssl_symbols=["EVP_DigestInit", "EVP_EncryptInit"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [provider_fr], feat_pi,
+            {'crypto_evp': ['EVP_DigestInit', 'EVP_EncryptInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        assert classifications[0][4] == 'System-Link'
+
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b13_aggregate_sibling_static_low_conf_does_not_resolve(self):
+        """Sibling static provider with low confidence cannot resolve dependency."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["EVP_DigestInit"],
+            openssl_libs=[])
+        entry_fr.direct_deps = ["libfoo.so"]
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        provider_fr = self._make_file_result(
+            "/libfoo.so",
+            openssl_symbols=["EVP_DigestInit"],
+            static_openssl=True, static_confidence='low')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [provider_fr], feat_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b14_aggregate_sibling_provider_wrong_dep_name(self):
+        """Entry DT_NEEDs libbar.so, sibling has libfoo.so provider -> unresolved."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["EVP_DigestInit"],
+            openssl_libs=[])
+        entry_fr.direct_deps = ["libbar.so"]
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        provider_fr = self._make_file_result(
+            "/libfoo.so",
+            openssl_symbols=["EVP_DigestInit"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        feat_result = self._make_result(
+            [provider_fr], feat_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b15_aggregate_sibling_provider_plus_bundled_so(self):
+        """Sibling has static provider + standalone .so -> both resolution paths work."""
+        fr1 = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        fr2 = self._make_file_result(
+            "/libwrap.so",
+            openssl_symbols=["EVP_DigestInit"],
+            openssl_libs=[])
+        fr2.direct_deps = ["libfoo.so"]
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [fr1, fr2], entry_pi,
+            {'ssl_core': ['SSL_connect'], 'crypto_evp': ['EVP_DigestInit']})
+
+        provider_fr = self._make_file_result(
+            "/libfoo.so",
+            openssl_symbols=["EVP_DigestInit"],
+            static_openssl=True, static_confidence='high')
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feat_result = self._make_result(
+            [provider_fr], feat_pi, {'crypto_evp': ['EVP_DigestInit']})
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        assert classifications[0][4] == 'System-Link'
+
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b16_aggregate_dlopen_resolved_by_sibling_bundle(self):
+        """Entry dlopen's libcrypto.so, sibling bundles it -> In-APP-Link (stem match)."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_CTX_new"],
+            uses_dlopen=True,
+            dlopen_libs=["libcrypto.so"],
+            dlsym_symbols=["SSL_CTX_new"])
+        entry_pi = self._make_pkg_info(
+            package_path='/path/to/App.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_CTX_new']})
+
+        feat_pi = self._make_pkg_info(
+            package_path='/path/to/App.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feat_result = self._make_result(
+            [self._make_file_result("/libfeat.so")], feat_pi)
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_c1_build_summary_row_in_app_link(self):
+        """build_hap_summary_row with ossl_type='In-APP-Link' -> openssl_usage='In-APP-Link'."""
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        method, s, d, dl, _ = _classify_hap_detection(result)
+        row = _build_hap_summary_row(
+            result, "/test.hap", method, s, d, dl, 'In-APP-Link')
+        assert row['openssl_usage'] == 'In-APP-Link'
+
+    def test_c2_summary_xlsx_in_app_link(self):
+        """generate_hap_summary with APP container -> OpenSSL Usage='In-APP-Link'."""
+        from openssl_scanner.hap_report import generate_hap_summary
+
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect", "SSL_read"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/path/to/MyApp.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect', 'SSL_read']})
+
+        feature_fr = self._make_file_result("/libfeature.so")
+        feature_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/path/to/MyApp.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feature_result = self._make_result([feature_fr], feature_pi)
+
+        out_dir = tempfile.mkdtemp()
+        try:
+            path = generate_hap_summary(
+                [entry_result, feature_result],
+                ['MyApp_entry.hap', 'MyApp_feature.hap'],
+                out_dir)
+            assert path is not None
+
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb.active
+            headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+            usage_col = headers.index('OpenSSL Usage') + 1
+
+            entry_usage = ws.cell(row=2, column=usage_col).value
+            feature_usage = ws.cell(row=3, column=usage_col).value
+            assert entry_usage == 'In-APP-Link'
+            assert feature_usage == 'Bundled'
+        finally:
+            shutil.rmtree(out_dir)
+
+    def test_c3_summary_xlsx_standalone_remains_system_link(self):
+        """Standalone HAP in summary -> OpenSSL Usage stays 'System-Link'."""
+        from openssl_scanner.hap_report import generate_hap_summary
+
+        fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        pi = self._make_pkg_info(
+            package_path='/standalone/entry.hap', bundled_files=[])
+        result = self._make_result([fr], pi, {'ssl_core': ['SSL_connect']})
+
+        out_dir = tempfile.mkdtemp()
+        try:
+            path = generate_hap_summary([result], ['entry.hap'], out_dir)
+            assert path is not None
+
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb.active
+            headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+            usage_col = headers.index('OpenSSL Usage') + 1
+            assert ws.cell(row=2, column=usage_col).value == 'System-Link'
+        finally:
+            shutil.rmtree(out_dir)
+
+    def test_c4_hap_summary_from_json_roundtrip(self):
+        """hap-summary from JSON files preserves In-APP-Link classification."""
+        from openssl_scanner.hap_report import generate_hap_summary
+        from openssl_scanner.reporter import Reporter
+
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/path/to/MyApp.app', bundled_files=[])
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+        entry_result.report_type = 'package'
+
+        feature_fr = self._make_file_result("/libfeature.so")
+        feature_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/path/to/MyApp.app',
+            bundled=True, bundled_files=['libcrypto.so.3'])
+        feature_result = self._make_result([feature_fr], feature_pi)
+        feature_result.report_type = 'package'
+
+        out_dir = tempfile.mkdtemp()
+        try:
+            reporter = Reporter()
+            entry_json = os.path.join(out_dir, 'entry.json')
+            feature_json = os.path.join(out_dir, 'feature.json')
+            with open(entry_json, 'w') as f:
+                f.write(reporter.generate_json(entry_result))
+            with open(feature_json, 'w') as f:
+                f.write(reporter.generate_json(feature_result))
+
+            loaded_results = []
+            loaded_pkgs = []
+            for jf in [entry_json, feature_json]:
+                r, p = _load_scan_result_from_json(jf)
+                assert r is not None
+                loaded_results.append(r)
+                loaded_pkgs.append(os.path.basename(jf))
+
+            summary_dir = os.path.join(out_dir, 'summary')
+            os.makedirs(summary_dir)
+            path = generate_hap_summary(
+                loaded_results, loaded_pkgs, summary_dir)
+            assert path is not None
+
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb.active
+            headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+            usage_col = headers.index('OpenSSL Usage') + 1
+
+            entry_usage = ws.cell(row=2, column=usage_col).value
+            assert entry_usage == 'In-APP-Link'
+        finally:
+            shutil.rmtree(out_dir)
+
+    def test_c5_end_to_end_app_container_in_app_link(self):
+        """E2E: Construct .app with entry(System-Link) + feature(Bundled) -> In-APP-Link."""
+        out_dir = tempfile.mkdtemp()
+        try:
+            app_path = os.path.join(out_dir, 'TestApp.app')
+            with zipfile.ZipFile(app_path, 'w') as app_zf:
+                entry_buf = io.BytesIO()
+                with zipfile.ZipFile(entry_buf, 'w') as hap_zf:
+                    hap_zf.writestr("module.json", json.dumps({
+                        "module": {"name": "entry", "type": "entry",
+                                   "deviceTypes": ["default"]},
+                        "app": {"bundleName": "com.test.inapp",
+                                "versionCode": 1, "versionName": "1.0.0",
+                                "minAPIVersion": 11}
+                    }))
+                    hap_zf.writestr("libs/arm64-v8a/libapp.so", _minimal_elf64())
+                app_zf.writestr("entry.hap", entry_buf.getvalue())
+
+                feat_buf = io.BytesIO()
+                with zipfile.ZipFile(feat_buf, 'w') as hap_zf:
+                    hap_zf.writestr("module.json", json.dumps({
+                        "module": {"name": "crypto_feature", "type": "feature",
+                                   "deviceTypes": ["default"]},
+                        "app": {"bundleName": "com.test.inapp",
+                                "versionCode": 1, "versionName": "1.0.0",
+                                "minAPIVersion": 11}
+                    }))
+                    hap_zf.writestr("libs/arm64-v8a/libcrypto.so.3", _minimal_elf64())
+                    hap_zf.writestr("libs/arm64-v8a/libfeature.so", _minimal_elf64())
+                app_zf.writestr("crypto_feature.hap", feat_buf.getvalue())
+
+            scan_dir = os.path.join(out_dir, 'results')
+            ret = main(['hap', app_path, '-o', scan_dir])
+            assert ret is None or ret == 0
+
+            summary_path = os.path.join(scan_dir, 'summary.xlsx')
+            assert os.path.exists(summary_path)
+
+            from openpyxl import load_workbook
+            wb = load_workbook(summary_path)
+            ws = wb.active
+            headers = [ws.cell(row=1, column=c).value for c in range(1, 25)]
+            usage_col = headers.index('OpenSSL Usage') + 1
+
+            usages = {}
+            for row in range(2, ws.max_row + 1):
+                name = ws.cell(row=row, column=1).value
+                if name and name != 'TOTAL':
+                    usages[name] = ws.cell(row=row, column=usage_col).value
+
+            has_in_app = any(v == 'In-APP-Link' for v in usages.values())
+            has_bundled = any(v == 'Bundled' for v in usages.values())
+            assert has_bundled, f"Expected Bundled in {usages}"
+            assert not has_in_app, (
+                f"Minimal ELFs have no real OpenSSL symbols, "
+                f"so no System-Link to upgrade: {usages}")
+        finally:
+            shutil.rmtree(out_dir)
 
 
 if __name__ == "__main__":

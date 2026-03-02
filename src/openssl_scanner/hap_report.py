@@ -346,7 +346,20 @@ def _dt_needed_resolved(openssl_libs, bundled_basenames, patterns):
     return all(_lib_stem(lib).lower() in bundled_stems for lib in needed)
 
 
-def classify_hap_detection(result):
+def _deps_include_provider(direct_deps, providers):
+    """Check if any DT_NEEDED entry matches a known static OpenSSL provider.
+
+    Used when a file has OpenSSL UND symbols but no OpenSSL-named
+    DT_NEEDED -- the symbols are routed through a non-OpenSSL lib
+    (e.g. libfoo.so with statically linked OpenSSL).
+    """
+    if not direct_deps or not providers:
+        return False
+    dep_basenames = {os.path.basename(d) for d in direct_deps}
+    return bool(dep_basenames & providers)
+
+
+def classify_hap_detection(result, extra_bundled=None, sibling_providers=None):
     """Classify OpenSSL usage and return deduped symbol sets.
 
     Returns ``(method, static_syms, dynamic_syms, dlopen_syms, ossl_type)``
@@ -358,11 +371,21 @@ def classify_hap_detection(result):
 
     Static providers (high/medium confidence) are treated as bundled libs
     for dependency resolution purposes.
+
+    Args:
+        extra_bundled: optional set of additional bundled basenames
+            from sibling HAPs in the same APP container.
+        sibling_providers: optional set of .so basenames that are static
+            OpenSSL providers in sibling HAPs.  Used to resolve
+            DT_NEEDED for non-OpenSSL-named deps (e.g. libfoo.so
+            with static OpenSSL).
     """
     from .constants import OPENSSL_LIBRARY_PATTERNS
 
     pi = result.package_info or {}
     bundled_basenames = set(pi.get('bundled_openssl_files', []))
+    if extra_bundled:
+        bundled_basenames |= extra_bundled
 
     for fr in result.files_detail:
         if (fr.static_openssl
@@ -416,9 +439,13 @@ def classify_hap_detection(result):
         elif fr.openssl_symbols:
             has_dynamic = True
             dynamic_syms.update(fr.openssl_symbols)
-            if not _dt_needed_resolved(
-                    fr.openssl_libs, bundled_basenames,
-                    OPENSSL_LIBRARY_PATTERNS):
+            if fr.openssl_libs:
+                if not _dt_needed_resolved(
+                        fr.openssl_libs, bundled_basenames,
+                        OPENSSL_LIBRARY_PATTERNS):
+                    has_unresolved_external = True
+            elif not _deps_include_provider(
+                    fr.direct_deps, sibling_providers):
                 has_unresolved_external = True
 
     methods = []
@@ -445,6 +472,62 @@ def classify_hap_detection(result):
         ossl_type = 'System-Link'
 
     return method, static_syms, dynamic_syms, dlopen_syms, ossl_type
+
+
+def aggregate_app_classification(all_results, classifications):
+    """Reclassify System-Link HAPs resolved by sibling HAPs in the same APP.
+
+    When multiple HAPs come from the same ``.app`` container (identified
+    by a shared ``package_path`` ending in ``.app``), a System-Link HAP
+    whose DT_NEEDED / dlopen targets are satisfied by OpenSSL libraries
+    bundled in *any* sibling is reclassified as ``In-APP-Link``.
+
+    Returns a **new** list of classification tuples; the input list is
+    not mutated.
+    """
+    updated = list(classifications)
+
+    app_groups = {}
+    for idx, result in enumerate(all_results):
+        pp = (result.package_info or {}).get('package_path', '')
+        if pp.lower().endswith('.app'):
+            app_groups.setdefault(pp, []).append(idx)
+
+    for _app_path, member_idxs in app_groups.items():
+        if len(member_idxs) < 2:
+            continue
+
+        app_bundles = set()
+        app_providers = {}
+        for i in member_idxs:
+            pi = all_results[i].package_info or {}
+            app_bundles.update(pi.get('bundled_openssl_files', []))
+            for fr in all_results[i].files_detail:
+                if (fr.static_openssl
+                        and fr.static_openssl_confidence in ('high', 'medium')):
+                    app_bundles.add(os.path.basename(fr.path))
+                    app_providers.setdefault(i, set()).add(
+                        os.path.basename(fr.path))
+
+        if not app_bundles:
+            continue
+
+        for i in member_idxs:
+            if updated[i][4] != 'System-Link':
+                continue
+            sibling_provs = set()
+            for j, provs in app_providers.items():
+                if j != i:
+                    sibling_provs |= provs
+            new_cls = classify_hap_detection(
+                all_results[i], extra_bundled=app_bundles,
+                sibling_providers=sibling_provs)
+            if new_cls[4] == 'Self-Contained':
+                updated[i] = (
+                    new_cls[0], new_cls[1], new_cls[2],
+                    new_cls[3], 'In-APP-Link')
+
+    return updated
 
 
 def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
@@ -479,6 +562,8 @@ def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         openssl_usage = 'Bundled'
     elif ossl_type == 'System-Link':
         openssl_usage = 'System-Link'
+    elif ossl_type == 'In-APP-Link':
+        openssl_usage = 'In-APP-Link'
     else:
         openssl_usage = 'None'
 
@@ -543,13 +628,15 @@ def generate_hap_summary(all_results, scanned_packages, output_dir,
         cell.fill = header_fill
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
+    per_hap = [classify_hap_detection(r) for r in all_results]
+    per_hap = aggregate_app_classification(all_results, per_hap)
+
     rows = []
     all_static = set()
     all_dynamic = set()
     all_dlopen = set()
     for idx, (result, pkg_path) in enumerate(zip(all_results, scanned_packages)):
-        method, s_syms, d_syms, dl_syms, ossl_type = \
-            classify_hap_detection(result)
+        method, s_syms, d_syms, dl_syms, ossl_type = per_hap[idx]
         cr = custom_results[idx] if custom_results and idx < len(custom_results) else None
         row = build_hap_summary_row(
             result, pkg_path, method, s_syms, d_syms, dl_syms, ossl_type,
