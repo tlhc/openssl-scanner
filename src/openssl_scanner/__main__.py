@@ -1055,6 +1055,8 @@ def cmd_hap(args) -> int:
         out_names = _resolve_hap_output_names(pkg_names_for_output, output_path, fmt_ext)
 
     skipped = 0
+    no_native = 0
+    failed = 0
     try:
         for pkg_idx, entry in enumerate(pkg_plan, 1):
             entry_key = entry.display_name
@@ -1082,6 +1084,9 @@ def cmd_hap(args) -> int:
 
                 if not extract_result.so_files:
                     logger.warning("No native libraries found in %s", entry.display_name)
+                    no_native += 1
+                    print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
+                          f" -> NO NATIVE LIBS", flush=True)
                     if not args.keep_extracted:
                         extractor.cleanup(extract_result)
                     continue
@@ -1188,6 +1193,9 @@ def cmd_hap(args) -> int:
 
             except (ValueError, zipfile.BadZipFile) as e:
                 logger.error("Failed to extract %s: %s", entry.display_name, e)
+                failed += 1
+                print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
+                      f" -> FAILED ({e})", flush=True)
                 continue
             finally:
                 if tmp_file and os.path.exists(tmp_file):
@@ -1213,9 +1221,15 @@ def cmd_hap(args) -> int:
                 )
                 if summary_path:
                     print(f"Summary: {os.path.basename(summary_path)}")
-            skip_msg = f", {skipped} skipped" if skipped else ""
-            print(f"\nBatch complete: {len(all_results)} packages scanned"
-                  f"{skip_msg} in {elapsed:.2f}s -> {output_path}/")
+            parts = [f"{len(all_results)} scanned"]
+            if no_native:
+                parts.append(f"{no_native} no-native")
+            if failed:
+                parts.append(f"{failed} failed")
+            if skipped:
+                parts.append(f"{skipped} cached")
+            print(f"\nBatch complete: {', '.join(parts)}"
+                  f" ({total_packages} total) in {elapsed:.2f}s -> {output_path}/")
             return 0
 
         if len(all_results) == 1:
