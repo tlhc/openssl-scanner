@@ -255,6 +255,7 @@ detection method: Dynamic / Static / dlopen / Mixed / None
 ossl_type (internal):
   Self-Contained  -- all deps resolved within package (mapped to None in output)
   System-Link     -- has unresolved external OpenSSL dependency
+  In-APP-Link     -- System-Link resolved by sibling HAP from same app release
   No-OpenSSL      -- no OpenSSL symbols (mapped to None in output)
 ```
 
@@ -271,6 +272,7 @@ bundled_openssl (str "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
 bundled_openssl (True)           ->  Bundled
 ossl_type == No-OpenSSL          ->  None
 ossl_type == System-Link         ->  System-Link
+ossl_type == In-APP-Link         ->  In-APP-Link
 otherwise                        ->  None
 ```
 
@@ -288,6 +290,108 @@ Helper functions:
 - `_dlopen_targets_resolved(dlopen_libs, bundled_basenames, patterns)`:
   Checks whether all dlopen-loaded OpenSSL targets are satisfied by bundled
   libraries within the package. Same logic as above.
+- `_deps_include_provider(direct_deps, providers)`:
+  Checks whether any DT_NEEDED entry matches a known static OpenSSL provider.
+  Used when a file has OpenSSL UND symbols but no OpenSSL-named DT_NEEDED --
+  the symbols are routed through a non-OpenSSL lib (e.g. libfoo.so with
+  statically linked OpenSSL).
+
+### OpenSSL Usage Classification Reference
+
+| OpenSSL Usage | Meaning | Criteria | Example |
+|---|---|---|---|
+| None | No OpenSSL usage | All `.so` files have no OpenSSL symbols (UND / .rodata / dlsym), OR all dependencies resolved within the package but no standalone bundled OpenSSL `.so` detected | `libentry.so` calls only system APIs, no crypto involvement |
+| Bundled | Ships standalone OpenSSL `.so` | Package `libs/` contains `libcrypto.so*` or `libssl.so*` (matched by `OPENSSL_LIBRARY_PATTERNS`) | `libs/arm64-v8a/` has both `libentry.so` and `libcrypto.so.3` |
+| Bundled (static) | OpenSSL statically linked into a `.so`, self-use only | A `.so` in the package has OpenSSL version banner + corroborating symbols, compiled with `-fvisibility=hidden`; no other `.so` in the package has this file in its DT_NEEDED | `libfoo.so` contains `OpenSSL 3.0.9` string internally, no other `.so` depends on it |
+| Bundled (static, shared) | OpenSSL statically linked into a `.so` that is shared by other libs | Same as above, but other `.so` files in the package have the static provider in their DT_NEEDED -- the provider acts as an internal OpenSSL facade | `libfoo.so` has static OpenSSL; `libapp.so` DT_NEEDs `libfoo.so` to use OpenSSL through it |
+| System-Link | Depends on system-provided OpenSSL | `.so` has OpenSSL UND symbols but DT_NEEDED targets are not found in the package | `libentry.so` DT_NEEDs `libcrypto.so.3` but the package does not contain it |
+| In-APP-Link | Resolved by sibling HAP from same app release | Per-HAP classification is System-Link, but a sibling HAP with matching `(bundle_name, version_code, version_name)` bundles the needed OpenSSL library or provides it via static linking | `entry.hap` DT_NEEDs `libcrypto.so.3`; `feature.hap` (same app release) carries `libcrypto.so.3` |
+
+Priority in `build_hap_summary_row()`:
+
+```
+bundled_openssl (str "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
+bundled_openssl (True)           ->  Bundled
+ossl_type == No-OpenSSL          ->  None
+ossl_type == System-Link         ->  System-Link
+ossl_type == In-APP-Link         ->  In-APP-Link
+otherwise (Self-Contained)       ->  None
+```
+
+### 7.1.1 Cross-HAP Aggregation (`aggregate_app_classification`)
+
+After per-HAP classification, a second pass reclassifies System-Link HAPs
+that are resolved by sibling HAPs from the same app release:
+
+```
+Phase 1: Per-HAP Classification
+  classify_hap_detection(result) for each HAP
+    -> (method, static_syms, dynamic_syms, dlopen_syms, ossl_type)
+
+Phase 2: Cross-HAP Aggregation
+  aggregate_app_classification(all_results, per_hap_classifications)
+    -> updated classifications with In-APP-Link where applicable
+```
+
+**Grouping key:** HAPs are grouped by `(bundle_name, version_code, version_name)` --
+the canonical app-release identity from `module.json`'s `app` section. All HAPs from
+the same app release share these three values regardless of packaging format (.app
+container, .zip bundle, or standalone files).
+
+When metadata is missing, `bundle_name` and `version_code` fall back to `package_path`
+(unique per package), ensuring no false grouping.
+
+Flow:
+
+```
+                    all_results[]
+                         |
+              group by (bundle_name, version_code, version_name)
+              with package_path fallback for missing fields
+                         |
+              +----------+-----------+
+              |                      |
+         group size >= 2        group size == 1
+              |                      |
+              v                      v
+     +------------------+     no aggregation
+     | APP release      |     (keep per-HAP)
+     | member_idxs[]    |
+     +------------------+
+              |
+    collect from all members:
+      app_bundles = bundled_openssl_files
+                  + static providers (high/medium)
+      app_providers = {member_idx: {provider .so names}}
+              |
+    for each System-Link member:
+      sibling_provs = providers from other members (exclude self)
+      re-classify with extra_bundled + sibling_providers
+              |
+         +----+----+
+         |         |
+     resolves   still
+     to Self-   System-
+     Contained  Link
+         |         |
+         v         v
+    In-APP-Link  unchanged
+```
+
+Two resolution paths can upgrade System-Link to In-APP-Link:
+
+| Path | Mechanism | Example |
+|------|-----------|---------|
+| Stem match | Sibling bundles standalone `libcrypto.so.3`, resolves consumer's `DT_NEEDED: libcrypto.so.3` via `_lib_stem()` comparison | feature.hap ships `libcrypto.so.3`, entry.hap links against it |
+| Provider match | Sibling has `libfoo.so` with static OpenSSL (high/medium confidence), consumer's `DT_NEEDED: libfoo.so` resolved by `_deps_include_provider()` | feature.hap ships `libfoo.so` (static OpenSSL inside), entry.hap's `libapp.so` DT_NEEDs `libfoo.so` |
+
+Guard rules:
+- HAPs grouped by semantic identity `(bundle_name, version_code, version_name)`
+- Missing `bundle_name` or `version_code` falls back to `package_path` (no false grouping)
+- At least 2 members required for aggregation (single-member groups unchanged)
+- Low-confidence static providers are excluded
+- Self-providers are excluded (a HAP cannot resolve its own System-Link)
+- Input classification list is not mutated (returns new list)
 
 ### 7.2 Summary XLSX
 
@@ -300,7 +404,7 @@ Helper functions:
 | Version | version_name |
 | ABI | comma-separated |
 | .so Files | native lib count |
-| OpenSSL Usage | None / System-Link / Bundled / Bundled (static) / Bundled (static, shared) |
+| OpenSSL Usage | None / System-Link / In-APP-Link / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
 | Static Symbols | per-package static symbol count |
 | Dynamic Symbols | per-package dynamic symbol count |
@@ -395,9 +499,11 @@ src/openssl_scanner/
   hap_report.py             plan_packages / extract_pkg_entry / merge_hap_results
                             resolve_hap_output_names / hap_write_single_report
                             collect_bundled_names / detect_static_providers
-                            classify_hap_detection / build_hap_summary_row
-                            generate_hap_summary / load_scan_result_from_json
+                            classify_hap_detection / aggregate_app_classification
+                            build_hap_summary_row / generate_hap_summary
+                            load_scan_result_from_json
                             _lib_stem / _dt_needed_resolved / _dlopen_targets_resolved
+                            _deps_include_provider
   __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result

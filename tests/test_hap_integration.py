@@ -2649,13 +2649,15 @@ class TestInAPPLinkClassification:
 
     def _make_pkg_info(self, bundle_name='com.test.pkg', module_name='entry',
                        package_path='/test.hap', bundled=False,
-                       bundled_files=None, native_count=1):
+                       bundled_files=None, native_count=1,
+                       version_code=100, version_name='1.0.0'):
         pi = {
             'bundle_name': bundle_name,
             'module_name': module_name,
             'package_type': 'hap',
             'package_path': package_path,
-            'version_name': '1.0.0',
+            'version_name': version_name,
+            'version_code': version_code,
             'scanned_abi': ['arm64-v8a'],
             'native_libs_count': native_count,
             'bundled_openssl': bundled,
@@ -3132,6 +3134,85 @@ class TestInAPPLinkClassification:
         classifications = [_classify_hap_detection(r) for r in all_results]
         updated = _aggregate_app_classification(all_results, classifications)
         assert updated[0][4] == 'In-APP-Link'
+
+    def test_b17_aggregate_standalone_same_app_version_grouped(self):
+        """Standalone HAPs with same bundle_name+version_code -> In-APP-Link."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect", "SSL_read"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/standalone/entry.hap', bundled_files=[],
+            version_code=100)
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect', 'SSL_read']})
+
+        feat_fr = self._make_file_result("/libfeat.so")
+        feat_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/standalone/feature.hap',
+            bundled=True, bundled_files=['libcrypto.so.3'],
+            version_code=100)
+        feat_result = self._make_result([feat_fr], feat_pi)
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        assert classifications[0][4] == 'System-Link'
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'In-APP-Link'
+
+    def test_b18_aggregate_different_versions_not_grouped(self):
+        """Same bundle_name but different version_code -> NOT grouped."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/v1/entry.hap', bundled_files=[],
+            version_code=100)
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        feat_fr = self._make_file_result("/libfeat.so")
+        feat_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/v2/feature.hap',
+            bundled=True, bundled_files=['libcrypto.so.3'],
+            version_code=200)
+        feat_result = self._make_result([feat_fr], feat_pi)
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
+
+    def test_b19_aggregate_same_vc_different_vn_not_grouped(self):
+        """Same bundle_name+version_code but different version_name -> NOT grouped."""
+        entry_fr = self._make_file_result(
+            "/libapp.so",
+            openssl_symbols=["SSL_connect"],
+            openssl_libs=["libcrypto.so.3"])
+        entry_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='entry',
+            package_path='/a/entry.hap', bundled_files=[],
+            version_code=100, version_name='1.0.0')
+        entry_result = self._make_result(
+            [entry_fr], entry_pi, {'ssl_core': ['SSL_connect']})
+
+        feat_fr = self._make_file_result("/libfeat.so")
+        feat_pi = self._make_pkg_info(
+            bundle_name='com.test.app', module_name='feature',
+            package_path='/b/feature.hap',
+            bundled=True, bundled_files=['libcrypto.so.3'],
+            version_code=100, version_name='1.0.1')
+        feat_result = self._make_result([feat_fr], feat_pi)
+
+        all_results = [entry_result, feat_result]
+        classifications = [_classify_hap_detection(r) for r in all_results]
+        updated = _aggregate_app_classification(all_results, classifications)
+        assert updated[0][4] == 'System-Link'
 
     def test_c1_build_summary_row_in_app_link(self):
         """build_hap_summary_row with ossl_type='In-APP-Link' -> openssl_usage='In-APP-Link'."""

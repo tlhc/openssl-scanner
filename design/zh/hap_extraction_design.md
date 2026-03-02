@@ -249,6 +249,7 @@ cached = (json 存在 AND json_mtime >= source_mtime)
 ossl_type (内部分类):
   Self-Contained  -- 所有依赖在包内解决 (输出时映射为 None)
   System-Link     -- 存在未解析的外部 OpenSSL 依赖
+  In-APP-Link     -- System-Link 由同一应用版本的兄弟 HAP 解决
   No-OpenSSL      -- 无 OpenSSL 符号 (输出时映射为 None)
 ```
 
@@ -264,6 +265,7 @@ bundled_openssl (字符串 "Yes ...")  ->  Bundled (static) / Bundled (static, s
 bundled_openssl (True)              ->  Bundled
 ossl_type == No-OpenSSL             ->  None
 ossl_type == System-Link            ->  System-Link
+ossl_type == In-APP-Link            ->  In-APP-Link
 其他                                ->  None
 ```
 
@@ -280,6 +282,107 @@ ossl_type == System-Link            ->  System-Link
 - `_dlopen_targets_resolved(dlopen_libs, bundled_basenames, patterns)`:
   检查 dlopen 加载的 OpenSSL 目标是否全部由包内 bundled 库满足。
   逻辑同上。
+- `_deps_include_provider(direct_deps, providers)`:
+  检查 DT_NEEDED 中是否包含已知的静态 OpenSSL 提供者。
+  用于 .so 有 OpenSSL UND 符号但无 OpenSSL 命名的 DT_NEEDED 的场景 --
+  符号通过非 OpenSSL 库路由 (如 libfoo.so 内置了静态 OpenSSL)。
+
+### OpenSSL Usage 分类速查表
+
+| OpenSSL Usage | 含义 | 判定条件 | 示例 |
+|---|---|---|---|
+| None | 无 OpenSSL 使用 | 包内所有 `.so` 均无 OpenSSL 符号 (UND/.rodata/dlsym), 或依赖已在包内解决但无独立 bundled OpenSSL `.so` | `libentry.so` 只调用系统 API, 不涉及加密 |
+| Bundled | 打包了独立的 OpenSSL `.so` | 包内 `libs/` 目录含 `libcrypto.so*` 或 `libssl.so*` (由 `OPENSSL_LIBRARY_PATTERNS` 匹配) | `libs/arm64-v8a/` 中同时存在 `libentry.so` 和 `libcrypto.so.3` |
+| Bundled (static) | 静态链接 OpenSSL 到某个 `.so` 中, 仅自用 | 包内某 `.so` 检测到 OpenSSL 版本字符串 + 佐证符号, 以 `-fvisibility=hidden` 编译; 包内无其他 `.so` 在 DT_NEEDED 中引用该文件 | `libfoo.so` 内含 `OpenSSL 3.0.9` 字符串, 无其他库依赖它 |
+| Bundled (static, shared) | 静态链接 OpenSSL 到某个 `.so` 中, 且被其他库共享使用 | 同上, 但包内有其他 `.so` 的 DT_NEEDED 包含该静态提供者 -- 提供者充当包内 OpenSSL 门面 | `libfoo.so` 静态内置 OpenSSL; `libapp.so` DT_NEED `libfoo.so` 通过它使用 OpenSSL |
+| System-Link | 依赖系统 OpenSSL | `.so` 有 OpenSSL UND 符号但 DT_NEEDED 指向的库不在包内 | `libentry.so` DT_NEED `libcrypto.so.3` 但包内无此文件 |
+| In-APP-Link | 由同一应用版本的兄弟 HAP 提供 | 单 HAP 看是 System-Link, 但同一 `(bundle_name, version_code, version_name)` 的兄弟 HAP 打包了所需 OpenSSL 库或通过静态链接提供 | `entry.hap` DT_NEED `libcrypto.so.3`; `feature.hap` (同一应用版本) 携带 `libcrypto.so.3` |
+
+`build_hap_summary_row()` 中的优先级:
+
+```
+bundled_openssl (字符串 "Yes ...")  ->  Bundled (static) / Bundled (static, shared)
+bundled_openssl (True)              ->  Bundled
+ossl_type == No-OpenSSL             ->  None
+ossl_type == System-Link            ->  System-Link
+ossl_type == In-APP-Link            ->  In-APP-Link
+其他 (Self-Contained)               ->  None
+```
+
+### 7.1.1 跨 HAP 聚合 (`aggregate_app_classification`)
+
+逐 HAP 分类完成后, 第二阶段对 System-Link 的 HAP 进行跨 HAP 重分类:
+如果同一应用版本的兄弟 HAP 提供了所需的 OpenSSL 库, 则将
+System-Link 升级为 In-APP-Link。
+
+```
+阶段 1: 逐 HAP 分类
+  classify_hap_detection(result) 对每个 HAP 独立分类
+    -> (method, static_syms, dynamic_syms, dlopen_syms, ossl_type)
+
+阶段 2: 跨 HAP 聚合
+  aggregate_app_classification(all_results, per_hap_classifications)
+    -> 更新后的分类列表, System-Link 可能升级为 In-APP-Link
+```
+
+**分组键:** 按 `(bundle_name, version_code, version_name)` 分组 -- 来自 `module.json`
+的 `app` 段, 是 OpenHarmony 应用版本的规范标识。同一应用版本的所有 HAP 共享这三个
+值, 无论打包形式 (.app 容器、.zip 包、或独立文件)。
+
+缺失元数据时, `bundle_name` 和 `version_code` 回退到 `package_path` (每包唯一),
+确保不会产生误分组。
+
+流程:
+
+```
+                    all_results[]
+                         |
+              按 (bundle_name, version_code, version_name) 分组
+              缺失字段回退到 package_path
+                         |
+              +----------+-----------+
+              |                      |
+         组大小 >= 2            组大小 == 1
+              |                      |
+              v                      v
+     +------------------+     不做聚合
+     | 同一应用版本      |     (保持逐 HAP 结果)
+     | member_idxs[]    |
+     +------------------+
+              |
+    从所有成员收集:
+      app_bundles = bundled_openssl_files
+                  + 静态提供者 (高/中置信度)
+      app_providers = {member_idx: {provider .so 名称}}
+              |
+    对每个 System-Link 成员:
+      sibling_provs = 其他成员的提供者 (排除自身)
+      使用 extra_bundled + sibling_providers 重新分类
+              |
+         +----+----+
+         |         |
+      解析为     仍为
+      Self-     System-
+      Contained Link
+         |         |
+         v         v
+    In-APP-Link  不变
+```
+
+两条解析路径可将 System-Link 升级为 In-APP-Link:
+
+| 路径 | 机制 | 示例 |
+|------|------|------|
+| Stem 匹配 | 兄弟打包了独立的 `libcrypto.so.3`, 通过 `_lib_stem()` 比较解析消费者的 `DT_NEEDED: libcrypto.so.3` | feature.hap 携带 `libcrypto.so.3`, entry.hap 链接它 |
+| Provider 匹配 | 兄弟有 `libfoo.so` 内置静态 OpenSSL (高/中置信度), 消费者的 `DT_NEEDED: libfoo.so` 由 `_deps_include_provider()` 解析 | feature.hap 携带 `libfoo.so` (内部静态 OpenSSL), entry.hap 的 `libapp.so` DT_NEED `libfoo.so` |
+
+约束规则:
+- 按语义标识 `(bundle_name, version_code, version_name)` 分组
+- 缺失 `bundle_name` 或 `version_code` 时回退到 `package_path` (不会误分组)
+- 至少 2 个成员才进行聚合 (单成员组不变)
+- 低置信度的静态提供者被排除
+- 排除自身提供者 (HAP 不能解析自己的 System-Link)
+- 不修改输入分类列表 (返回新列表)
 
 ### 7.2 汇总 XLSX
 
@@ -292,7 +395,7 @@ ossl_type == System-Link            ->  System-Link
 | Version | version_name |
 | ABI | 逗号分隔 |
 | .so Files | native 库数量 |
-| OpenSSL Usage | None / System-Link / Bundled / Bundled (static) / Bundled (static, shared) |
+| OpenSSL Usage | None / System-Link / In-APP-Link / Bundled / Bundled (static) / Bundled (static, shared) |
 | Detection | Dynamic / Static / dlopen / Mixed |
 | Static Symbols | 每包静态符号数 |
 | Dynamic Symbols | 每包动态符号数 |
@@ -382,9 +485,11 @@ src/openssl_scanner/
   hap_report.py             plan_packages / extract_pkg_entry / merge_hap_results
                             resolve_hap_output_names / hap_write_single_report
                             collect_bundled_names / detect_static_providers
-                            classify_hap_detection / build_hap_summary_row
-                            generate_hap_summary / load_scan_result_from_json
+                            classify_hap_detection / aggregate_app_classification
+                            build_hap_summary_row / generate_hap_summary
+                            load_scan_result_from_json
                             _lib_stem / _dt_needed_resolved / _dlopen_targets_resolved
+                            _deps_include_provider
   __main__.py               cmd_hap / cmd_hap_summary
   constants.py              OPENSSL_LIBRARY_PATTERNS
   scanner.py                Scanner.scan_directory / _build_file_result

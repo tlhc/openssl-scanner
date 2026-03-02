@@ -383,7 +383,7 @@ def classify_hap_detection(result, extra_bundled=None, sibling_providers=None):
     from .constants import OPENSSL_LIBRARY_PATTERNS
 
     pi = result.package_info or {}
-    bundled_basenames = set(pi.get('bundled_openssl_files', []))
+    bundled_basenames = set(pi.get('bundled_openssl_files') or [])
     if extra_bundled:
         bundled_basenames |= extra_bundled
 
@@ -477,10 +477,11 @@ def classify_hap_detection(result, extra_bundled=None, sibling_providers=None):
 def aggregate_app_classification(all_results, classifications):
     """Reclassify System-Link HAPs resolved by sibling HAPs in the same APP.
 
-    When multiple HAPs come from the same ``.app`` container (identified
-    by a shared ``package_path`` ending in ``.app``), a System-Link HAP
-    whose DT_NEEDED / dlopen targets are satisfied by OpenSSL libraries
-    bundled in *any* sibling is reclassified as ``In-APP-Link``.
+    When multiple HAPs share the same ``(bundle_name, version_code,
+    version_name)`` — i.e. they belong to the same app release — a
+    System-Link HAP whose DT_NEEDED / dlopen targets are satisfied by
+    OpenSSL libraries bundled in *any* sibling is reclassified as
+    ``In-APP-Link``.
 
     Returns a **new** list of classification tuples; the input list is
     not mutated.
@@ -489,11 +490,13 @@ def aggregate_app_classification(all_results, classifications):
 
     app_groups = {}
     for idx, result in enumerate(all_results):
-        pp = (result.package_info or {}).get('package_path', '')
-        if pp.lower().endswith('.app'):
-            app_groups.setdefault(pp, []).append(idx)
+        pi = result.package_info or {}
+        bn = pi.get('bundle_name') or pi.get('package_path', '')
+        vc = pi.get('version_code') or pi.get('package_path', '')
+        vn = pi.get('version_name', '')
+        app_groups.setdefault((bn, vc, vn), []).append(idx)
 
-    for _app_path, member_idxs in app_groups.items():
+    for _app_key, member_idxs in app_groups.items():
         if len(member_idxs) < 2:
             continue
 
@@ -501,7 +504,7 @@ def aggregate_app_classification(all_results, classifications):
         app_providers = {}
         for i in member_idxs:
             pi = all_results[i].package_info or {}
-            app_bundles.update(pi.get('bundled_openssl_files', []))
+            app_bundles.update(pi.get('bundled_openssl_files') or [])
             for fr in all_results[i].files_detail:
                 if (fr.static_openssl
                         and fr.static_openssl_confidence in ('high', 'medium')):
