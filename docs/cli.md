@@ -52,6 +52,7 @@ Commands:
   source-probe  快速探测目录中的 OpenSSL 使用（ripgrep Aho-Corasick）
   source-merge  合并多个源码扫描 XLSX 报告
   combo-scan    一键完成探测+扫描+合并流水线
+  source-diff   比较两次源码扫描 JSON 报告的差异
   proc          扫描运行中进程加载的 OpenSSL 依赖（Linux）
   hap           扫描 OpenHarmony 应用包（HAP/HAR/HSP/APP/ZIP）
   hap-summary   从已有 HAP 报告生成汇总（无需重新扫描）
@@ -673,6 +674,198 @@ $TMPDIR/                               系统临时目录
 **数据文件检测**: 嵌入式二进制数据文件会导致 tree-sitter 解析器异常缓慢。`_is_data_blob()` 检查文件前 512 字节，跳过无 C 关键字的纯 hex 数据文件。
 
 **符号链接环检测**: `_collect_source_files` 跟踪已访问的真实路径，检测并跳过会导致 `os.walk` 无限递归的符号链接环。
+
+---
+
+## source-diff - 源码扫描差异比较
+
+比较两次源码扫描 JSON 报告（`source` 或 `combo-scan` 输出），输出结构化差异。适用于版本升级分析、安全审计中的变更追踪。
+
+### 语法
+
+```bash
+./scan source-diff <old> <new> [options]
+```
+
+### 参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `old` | 基准 JSON 报告（必需） | - |
+| `new` | 当前 JSON 报告（必需） | - |
+| `-o, --output PATH` | 输出路径（.json / .xlsx）；省略则输出到控制台 | 控制台 |
+| `--summary-only` | 仅输出指标和符号/文件级变更，跳过逐调用点明细 | false |
+| `--include-unchanged` | 在输出中包含未变更的条目 | false |
+| `--old-prefix PREFIX` | 从旧报告文件路径中剥除此前缀 | - |
+| `--new-prefix PREFIX` | 从新报告文件路径中剥除此前缀 | - |
+| `--ignore-categories CAT...` | 排除指定类别（如 `openssl_util crypto_err`） | - |
+| `-v, --verbose` | 详细日志输出 | false |
+| `--log-file PATH` | 日志写入文件 | - |
+
+### 使用示例
+
+```bash
+# 控制台输出差异摘要
+./scan source-diff old_report.json new_report.json
+
+# 导出 JSON 差异报告
+./scan source-diff old.json new.json -o diff.json
+
+# 导出 XLSX 差异报告
+./scan source-diff old.json new.json -o diff.xlsx
+
+# 仅看指标和符号级变更（跳过调用点明细）
+./scan source-diff old.json new.json --summary-only
+
+# 跨机器对比（剥除构建路径前缀）
+./scan source-diff old.json new.json --old-prefix /build1/src --new-prefix /build2/src
+
+# 排除 utility 类别的噪音
+./scan source-diff old.json new.json --ignore-categories openssl_util crypto_err
+
+# combo-scan 报告也可以直接对比
+./scan source-diff old_combo.json new_combo.json -o diff.xlsx
+```
+
+### 差异匹配逻辑
+
+调用点以 `(file_path, caller_function, ossl_symbol)` 三元组为身份标识键（identity key），忽略行号变化。比较结果分为五种状态：
+
+| 状态 | 含义 |
+|------|------|
+| `added` | 新报告中存在，旧报告中不存在 |
+| `removed` | 旧报告中存在，新报告中不存在 |
+| `changed` | 相同身份键，调用次数变化 |
+| `moved` | 相同身份键，行号变化但次数不变 |
+| `unchanged` | 完全一致（默认不输出，`--include-unchanged` 启用） |
+
+### 差异四层模型
+
+```
+Layer 1: 指标差异 (MetricDelta)
+  total_files_scanned, files_with_calls, total_call_sites, unique_symbols
+
+Layer 2: 符号差异 (SymbolDelta)
+  每个 OpenSSL 符号的 added/removed/changed/moved/unchanged 状态
+
+Layer 3: 文件差异 (FileDelta)
+  每个文件的调用数变化、符号增减
+
+Layer 4: 调用点差异 (CallSiteDelta)
+  逐调用点的精确变更（--summary-only 跳过此层）
+```
+
+### 输出格式
+
+#### 控制台
+
+```
+=== Source Scan Diff ===
+  Old: old_report.json
+  New: new_report.json
+
+--- Project: nginx ---
+  Metrics:
+    total_files_scanned     :    5 ->    8  (+3)
+    files_with_calls        :    5 ->    8  (+3)
+    total_call_sites        :  657 ->  684  (+27)
+    unique_symbols          :  268 ->  271  (+3)
+
+  Symbols Added (3):
+    + SSL_CTX_set_ciphersuites        ssl_core
+    + TLS_method                      ssl_tls
+    + EVP_aes_256_gcm                 crypto_evp
+
+  Files Added (3):
+    + src/stream/ngx_stream_ssl_module.c               9 calls
+    + src/stream/ngx_stream_ssl_preread_module.c        3 calls
+    + src/stream/ngx_stream_proxy_module.c              15 calls
+
+  Files Changed (5):
+    ~ src/mail/ngx_mail_ssl_module.c  181 -> 184 calls (+3)
+    ...
+```
+
+#### JSON
+
+```json
+{
+  "meta": {
+    "diff_time": "2026-03-03T14:53:00",
+    "old_report": "old_report.json",
+    "new_report": "new_report.json",
+    "old_scan_time": "2026-03-03T14:50:00",
+    "new_scan_time": "2026-03-03T14:51:00"
+  },
+  "projects": [
+    {
+      "project": "nginx",
+      "metrics": [
+        {"name": "total_files_scanned", "old": 5, "new": 8, "delta": 3},
+        ...
+      ],
+      "symbols": {
+        "added": [{"symbol": "SSL_CTX_set_ciphersuites", "category": "ssl_core"}],
+        "removed": [],
+        "changed": [...],
+        ...
+      },
+      "file_delta": [
+        {
+          "status": "added",
+          "file_path": "src/stream/ngx_stream_ssl_module.c",
+          "old_call_count": 0,
+          "new_call_count": 9,
+          "old_symbols": 0,
+          "new_symbols": 9,
+          "added_symbols": ["SSL_CTX_new", ...],
+          "removed_symbols": []
+        },
+        ...
+      ],
+      "call_sites": [...]
+    }
+  ]
+}
+```
+
+#### XLSX
+
+工作簿包含以下工作表（条件着色：绿色=added，红色=removed，橙色=changed，蓝色=moved）：
+
+| Sheet | 内容 | 列 |
+|-------|------|----|
+| Summary Delta | 指标变更摘要 | Metric, Old, New, Delta |
+| Symbol Delta | 符号级变更 | Symbol, Category, Status, Old Calls, New Calls, Delta |
+| File Delta | 文件级变更 | File, Status, Old Calls, New Calls, Delta, Old Symbols, New Symbols, Added Symbols, Removed Symbols |
+| Call Site Delta | 调用点级变更 | File, Function, Symbol, Category, Status, Old Line, New Line, Old Count, New Count |
+| Project Delta | 多项目汇总（仅 combo 报告） | Project, Status, Old Files, New Files, Old Calls, New Calls, Old Symbols, New Symbols, Added Symbols, Removed Symbols |
+
+### 退出码
+
+`source-diff` 遵循 `diff(1)` 约定：
+
+| 码 | 含义 |
+|---|------|
+| 0 | 无差异 |
+| 1 | 检测到差异 |
+| 2 | 错误（文件不存在、JSON 解析失败、格式不支持） |
+
+### 路径前缀剥除
+
+当同一项目在不同构建环境中扫描时，文件路径可能不同：
+
+```
+旧报告: /build1/src/openssl/tls.c
+新报告: /build2/src/openssl/tls.c
+```
+
+使用 `--old-prefix` 和 `--new-prefix` 剥除路径前缀，使 identity key 匹配：
+
+```bash
+./scan source-diff old.json new.json --old-prefix /build1 --new-prefix /build2
+# 内部匹配: src/openssl/tls.c <-> src/openssl/tls.c
+```
 
 ---
 
@@ -1431,8 +1624,11 @@ depth 2: 二级依赖引用的符号
 
 ## 退出码
 
-| 码 | 含义 |
-|---|------|
-| 0 | 成功 |
-| 1 | 失败 |
-| 130 | 用户中断 (Ctrl+C) |
+| 码 | 含义 | 适用命令 |
+|---|------|----------|
+| 0 | 成功 / 无差异 | 所有命令 / `source-diff` |
+| 1 | 失败 / 检测到差异 | 所有命令 / `source-diff` |
+| 2 | 错误（仅 `source-diff`） | `source-diff` |
+| 130 | 用户中断 (Ctrl+C) | 所有命令 |
+
+> `source-diff` 遵循 `diff(1)` 约定：0=无差异，1=有差异，2=错误。

@@ -103,6 +103,7 @@ def create_parser() -> argparse.ArgumentParser:
     create_vendor_tree_sitter_parser(subparsers)
     create_aggregate_parser(subparsers)
     create_export_parser(subparsers)
+    create_source_diff_parser(subparsers)
 
     return parser
 
@@ -1977,6 +1978,89 @@ def cmd_source_merge(args) -> int:
         return 1
 
 
+def create_source_diff_parser(subparsers) -> None:
+    """Create parser for source-diff command."""
+    parser = subparsers.add_parser(
+        'source-diff',
+        help='Compare two source scan JSON reports and show changes',
+        epilog='''
+Examples:
+  # Console diff
+  openssl-scanner source-diff old_report.json new_report.json
+
+  # JSON output
+  openssl-scanner source-diff old.json new.json -o diff.json
+
+  # XLSX output
+  openssl-scanner source-diff old.json new.json -o diff.xlsx
+
+  # Summary only (no per-call-site detail)
+  openssl-scanner source-diff old.json new.json --summary-only
+
+  # Strip path prefixes for cross-machine comparison
+  openssl-scanner source-diff old.json new.json --old-prefix /build1 --new-prefix /build2
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        'old',
+        help='Baseline source scan JSON report',
+    )
+
+    parser.add_argument(
+        'new',
+        help='Current source scan JSON report',
+    )
+
+    parser.add_argument(
+        '-o', '--output',
+        help='Output path (.json or .xlsx); omit for console',
+    )
+
+    parser.add_argument(
+        '--summary-only',
+        action='store_true',
+        default=False,
+        help='Skip per-call-site delta, show only metrics and symbol/file changes',
+    )
+
+    parser.add_argument(
+        '--include-unchanged',
+        action='store_true',
+        default=False,
+        help='Include unchanged entries in output',
+    )
+
+    parser.add_argument(
+        '--old-prefix',
+        help='Strip this prefix from old report file paths',
+    )
+
+    parser.add_argument(
+        '--new-prefix',
+        help='Strip this prefix from new report file paths',
+    )
+
+    parser.add_argument(
+        '--ignore-categories',
+        nargs='*',
+        help='Category names to exclude from diff',
+    )
+
+    parser.add_argument(
+        '-v', '--verbose',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug)',
+    )
+
+    parser.add_argument(
+        '--log-file',
+        help='Write logs to file',
+    )
+
+
 def create_combo_scan_parser(subparsers) -> None:
     """Create parser for combo-scan command."""
     parser = subparsers.add_parser(
@@ -2892,7 +2976,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-merge', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
+    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-merge', 'source-diff', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
         argv = ['scan'] + argv
 
     args = parser.parse_args(argv)
@@ -2927,9 +3011,102 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_aggregate(args)
     elif args.command == 'export':
         return cmd_export(args)
+    elif args.command == 'source-diff':
+        return cmd_source_diff(args)
     else:
         parser.print_help()
         return 0
+
+
+def cmd_source_diff(args) -> int:
+    """Execute the source-diff command."""
+    logger = logging.getLogger(__name__)
+
+    from .source_diff import (
+        load_report, diff_single, diff_combo,
+        DiffResult, SourceDiffJsonExporter, SourceDiffExcelExporter,
+        format_console,
+    )
+
+    try:
+        old_report = load_report(args.old, prefix=getattr(args, 'old_prefix', None))
+    except FileNotFoundError:
+        logger.error("File not found: %s", args.old)
+        return 2
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in %s: %s", args.old, e)
+        return 2
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("Error reading %s: %s", args.old, e)
+        return 2
+    except PermissionError:
+        logger.error("Permission denied: %s", args.old)
+        return 2
+
+    try:
+        new_report = load_report(args.new, prefix=getattr(args, 'new_prefix', None))
+    except FileNotFoundError:
+        logger.error("File not found: %s", args.new)
+        return 2
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in %s: %s", args.new, e)
+        return 2
+    except (ValueError, KeyError, TypeError) as e:
+        logger.error("Error reading %s: %s", args.new, e)
+        return 2
+    except PermissionError:
+        logger.error("Permission denied: %s", args.new)
+        return 2
+
+    ignore_categories = set(args.ignore_categories) if args.ignore_categories else None
+    include_unchanged = args.include_unchanged
+    summary_only = args.summary_only
+
+    is_combo = (
+        old_report["report_type"] == "combo_scan"
+        or new_report["report_type"] == "combo_scan"
+    )
+
+    if is_combo:
+        old_report["_path"] = args.old
+        new_report["_path"] = args.new
+        result = diff_combo(
+            old_report, new_report,
+            ignore_categories=ignore_categories,
+            include_unchanged=include_unchanged,
+            summary_only=summary_only,
+        )
+    else:
+        old_data = old_report["projects"][0]
+        new_data = new_report["projects"][0]
+        pd = diff_single(
+            old_data, new_data,
+            ignore_categories=ignore_categories,
+            include_unchanged=include_unchanged,
+            summary_only=summary_only,
+        )
+        result = DiffResult(
+            old_label=args.old,
+            new_label=args.new,
+            projects=[pd],
+            old_scan_time=old_report.get("scan_time", ""),
+            new_scan_time=new_report.get("scan_time", ""),
+        )
+
+    output = getattr(args, 'output', None)
+    if not output:
+        print(format_console(result))
+    elif output.lower().endswith('.json'):
+        SourceDiffJsonExporter().export(result, output)
+        logger.info("Diff exported to %s", output)
+    elif output.lower().endswith('.xlsx'):
+        SourceDiffExcelExporter(include_unchanged=include_unchanged).export(result, output)
+        logger.info("Diff exported to %s", output)
+    else:
+        logger.error("Unsupported output format: %s (use .json or .xlsx)", output)
+        return 2
+
+    return 0 if result.is_empty() else 1
 
 
 if __name__ == '__main__':

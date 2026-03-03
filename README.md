@@ -9,6 +9,7 @@
 - **进程扫描** - 分析运行中进程加载的共享库（Linux）
 - **包扫描** - 分析 OpenHarmony HAP/HAR/HSP/APP/ZIP 包内的 OpenSSL 依赖
 - **组合扫描** - 一键完成探测、扫描、合并流水线（probe + scan + merge）
+- **差异比较** - 比较两次源码扫描报告，追踪 OpenSSL API 调用变更
 - **聚合** - 合并多个扫描报告，按组件统计
 - **导出** - 生成 Excel（8 个工作表）和交互式 HTML 报告
 - **严格匹配** - 从 OpenSSL 库/头文件提取符号和宏，100% 精确匹配
@@ -73,6 +74,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | `source-probe` | 快速探测目录中的 OpenSSL 使用 | 根目录 | 项目列表 |
 | `source-merge` | 合并多个源码扫描报告 | 多个 XLSX | 合并 XLSX |
 | `combo-scan` | 一键探测+扫描+合并 | 根目录 | 合并 XLSX/JSON |
+| `source-diff` | 比较两次源码扫描报告 | 两个 JSON 报告 | 控制台/JSON/XLSX |
 | `proc` | 运行中进程分析 | PID 或进程名 | JSON |
 | `hap` | OpenHarmony 包分析 | HAP/HAR/HSP/APP/ZIP | XLSX/HTML/JSON |
 | `hap-summary` | 从已有报告生成汇总 | JSON 报告目录/文件 | XLSX |
@@ -88,6 +90,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | **Directory Scan** | `./scan scan /path/to/dir --scan-dir` | 扫描目录内所有 ELF，计算 import chains |
 | **Source Scan** | `./scan source /path/to/src -o r.xlsx` | AST 分析源码，提取每个 OpenSSL 调用的位置和参数 |
 | **Combo Scan** | `./scan combo-scan /root -o r.xlsx` | 一键完成 probe+scan+merge 流水线 |
+| **Source Diff** | `./scan source-diff old.json new.json` | 比较两次扫描结果，追踪 API 变更 |
 | **Process Scan** | `./scan proc --pid 1234` | 分析运行进程的已加载库 |
 | **Package Scan** | `./scan hap MyApp.hap` | 从 HAP/HAR/HSP/APP/ZIP 包提取并分析 native .so |
 | **Package Summary** | `./scan hap-summary /reports/` | 从已有 JSON 报告生成汇总 XLSX（含 OpenSSL Usage 分类） |
@@ -111,6 +114,10 @@ openssl-scanner scan /path/to/binary -o report.json
 
 # 合并多个报告（含跨项目 Symbol Summary）
 ./scan source-merge /tmp/reports/*.xlsx -o combined.xlsx
+
+# 比较两次扫描报告的差异
+./scan source-diff old_report.json new_report.json
+./scan source-diff old.json new.json -o diff.xlsx
 ```
 
 ### `-o` 自动识别
@@ -290,6 +297,7 @@ Phase 3: 合并 (source-merge)
 - XLSX: Call Sites 工作表（自动筛选）+ Symbol Summary 工作表（去重符号统计）
 - JSON: 结构化报告，含 meta/summary/call_sites/errors
 - Merge XLSX: Summary + 每项目工作表 + Symbol Summary（含 Projects/Project List 列，标记各符号被哪些组件使用）
+- Diff: 控制台摘要 / JSON 结构化差异 / XLSX 多工作表差异报告
 
 ## 符号分类
 
