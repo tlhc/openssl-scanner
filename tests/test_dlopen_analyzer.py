@@ -1270,13 +1270,13 @@ class TestWorkerThreeWayClassification:
         )
 
     def _run_worker(self, info, dlopen_result=None):
-        from openssl_scanner.scanner import _analyze_file_worker
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
         with patch('openssl_scanner.scanner.os.path.isfile', return_value=True), \
              patch('openssl_scanner.scanner.ELFAnalyzer') as mock_cls, \
              patch('openssl_scanner.dlopen_analyzer.detect_dlopen_openssl',
                    return_value=dlopen_result) as mock_detect:
             mock_cls.return_value.analyze.return_value = info
-            result = _analyze_file_worker(('/fake/lib.so', OSSL_EXPORTS))
+            result = _analyze_file_worker(WorkItem('/fake/lib.so', OSSL_EXPORTS))
             return result, mock_detect
 
     def test_direct_dynamic_link(self):
@@ -1520,7 +1520,7 @@ class TestConfidenceField:
     def test_worker_propagates_confidence(self):
         """_analyze_file_worker passes confidence to FileResult."""
         from openssl_scanner.elf_analyzer import ELFInfo, Symbol
-        from openssl_scanner.scanner import _analyze_file_worker
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
 
         info = ELFInfo(
             path='/fake/lib.so', arch='aarch64', elf_type='shared_library',
@@ -1543,14 +1543,14 @@ class TestConfidenceField:
              patch('openssl_scanner.dlopen_analyzer.detect_dlopen_openssl',
                    return_value=dlopen_result):
             mock_cls.return_value.analyze.return_value = info
-            result = _analyze_file_worker(('/fake/lib.so', OSSL_EXPORTS))
+            result = _analyze_file_worker(WorkItem('/fake/lib.so', OSSL_EXPORTS))
             assert result.uses_dlopen is True
             assert result.dlopen_confidence == 'inferred'
 
     def test_worker_high_confidence(self):
         """Worker with high confidence DlopenResult."""
         from openssl_scanner.elf_analyzer import ELFInfo, Symbol
-        from openssl_scanner.scanner import _analyze_file_worker
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
 
         info = ELFInfo(
             path='/fake/lib.so', arch='aarch64', elf_type='shared_library',
@@ -1573,7 +1573,7 @@ class TestConfidenceField:
              patch('openssl_scanner.dlopen_analyzer.detect_dlopen_openssl',
                    return_value=dlopen_result):
             mock_cls.return_value.analyze.return_value = info
-            result = _analyze_file_worker(('/fake/lib.so', OSSL_EXPORTS))
+            result = _analyze_file_worker(WorkItem('/fake/lib.so', OSSL_EXPORTS))
             assert result.uses_dlopen is True
             assert result.dlopen_confidence == 'high'
 

@@ -8,7 +8,7 @@ import os
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from .elf_analyzer import ELFAnalyzer, ELFInfo
@@ -21,13 +21,21 @@ from . import __version__
 
 logger = logging.getLogger(__name__)
 
+
+class WorkItem(NamedTuple):
+    """Input for _analyze_file_worker. NamedTuple for pickle compatibility."""
+    path: str
+    openssl_exports: Set[str]
+    custom_patterns: Optional[Set[str]] = None
+
+
 def _shutdown_executor(executor):
     """Shutdown executor immediately without waiting for workers."""
     executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _run_parallel_analysis(
-    work_items: list,
+    work_items: List[WorkItem],
     workers: int,
 ) -> Tuple[List['FileResult'], List[dict]]:
     """Run _analyze_file_worker in parallel with proper Ctrl+C handling.
@@ -41,7 +49,7 @@ def _run_parallel_analysis(
     executor = ProcessPoolExecutor(max_workers=workers)
     try:
         future_to_path = {
-            executor.submit(_analyze_file_worker, item): item[0]
+            executor.submit(_analyze_file_worker, item): item.path
             for item in work_items
         }
         for future in as_completed(future_to_path):
@@ -127,13 +135,16 @@ def _compute_static_confidence(implemented_symbols, ssl_result):
     return ('low', f'default: {t1} tier1, {t2} tier2, {t3} tier3, {total} total')
 
 
-def _analyze_file_worker(args: tuple) -> 'FileResult':
+def _analyze_file_worker(item: WorkItem) -> 'FileResult':
     """
     Worker function for parallel file analysis.
 
     Must be at module level for ProcessPoolExecutor pickling.
     """
-    path, openssl_exports = args
+    path = item.path
+    openssl_exports = item.openssl_exports
+    custom_patterns = item.custom_patterns
+
     analyzer = ELFAnalyzer()
 
     if not os.path.isfile(path):
@@ -172,8 +183,27 @@ def _analyze_file_worker(args: tuple) -> 'FileResult':
     openssl_libs = [lib for lib in info.needed_libs
                     if any(lib.lower().startswith(p)
                            for p in OPENSSL_LIBRARY_PATTERNS)]
-    return _build_file_result(path, info, openssl_symbols, openssl_defined,
-                              openssl_libs, openssl_exports)
+    file_result = _build_file_result(path, info, openssl_symbols, openssl_defined,
+                                     openssl_libs, openssl_exports)
+
+    if custom_patterns:
+        basename = os.path.basename(path)
+        if basename.endswith('.so') or '.so.' in basename:
+            try:
+                from .elf_analyzer import extract_rodata_matches
+                und_set = set(undefined_names)
+                def_set = set(defined_names)
+                hits = (und_set | def_set) & custom_patterns
+                remaining = custom_patterns - hits
+                if remaining:
+                    rodata_hits = extract_rodata_matches(path, remaining)
+                    hits = hits | rodata_hits
+                file_result.custom_hit_symbols = hits
+            except Exception as exc:
+                logger.debug("Custom pattern match failed for %s: %s",
+                             basename, exc)
+
+    return file_result
 
 
 @dataclass
@@ -427,6 +457,7 @@ class FileResult:
     dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs: List[str] = field(default_factory=list)
     dlopen_confidence: str = 'high'
+    custom_hit_symbols: Set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -476,6 +507,8 @@ class ScanResult:
     all_dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs_detected: List[str] = field(default_factory=list)
 
+    custom_raw_matches: Set[str] = field(default_factory=set)
+
 
 class Scanner:
     """
@@ -491,11 +524,13 @@ class Scanner:
     def __init__(self,
                  search_paths: Optional[List[str]] = None,
                  workers: int = 4,
-                 matcher: Optional[OpenSSLMatcher] = None) -> None:
+                 matcher: Optional[OpenSSLMatcher] = None,
+                 custom_patterns: Optional[Set[str]] = None) -> None:
         self._analyzer = ELFAnalyzer()
         self._matcher = matcher or OpenSSLMatcher()
         self._resolver = DependencyResolver(search_paths, matcher=self._matcher)
         self._workers = workers
+        self._custom_patterns = custom_patterns
 
     def add_search_path(self, path: str) -> None:
         """Add library search path."""
@@ -609,7 +644,7 @@ class Scanner:
         result.total_files_scanned = len(all_paths)
 
         openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in all_paths if p]
+        work_items = [WorkItem(p, openssl_exports) for p in all_paths if p]
 
         files, scan_errors = _run_parallel_analysis(
             work_items, self._workers)
@@ -679,7 +714,8 @@ class Scanner:
         result.total_files_scanned = total_files
 
         openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in elf_files]
+        work_items = [WorkItem(p, openssl_exports, self._custom_patterns)
+                      for p in elf_files]
 
         file_results, scan_errors = _run_parallel_analysis(
             work_items, self._workers)
@@ -710,6 +746,12 @@ class Scanner:
         result.all_unique_symbols = sorted(all_symbols)
         result.openssl_libs_found = sorted(openssl_libs)
         result.arch = arch or 'unknown'
+
+        if self._custom_patterns:
+            all_custom = set()
+            for fr in file_results:
+                all_custom.update(fr.custom_hit_symbols)
+            result.custom_raw_matches = all_custom
 
         result.symbols_by_category = self._matcher.categorize_symbols(
             list(all_symbols)
@@ -775,7 +817,7 @@ class Scanner:
         result.total_files_scanned = len(scan_paths)
 
         openssl_exports = self._matcher.get_openssl_exports()
-        work_items = [(p, openssl_exports) for p in scan_paths]
+        work_items = [WorkItem(p, openssl_exports) for p in scan_paths]
 
         files, scan_errors = _run_parallel_analysis(
             work_items, self._workers)

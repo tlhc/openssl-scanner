@@ -232,6 +232,39 @@ _RODATA_MAX_SIZE = 2 * 1024 * 1024 * 1024
 _RODATA_RE = re.compile(rb'[\x20-\x7e]{4,}')
 
 
+def _iter_rodata_strings(elf_path, section_names=None, min_len=4):
+    """Yield printable ASCII strings from .rodata and similar ELF sections.
+
+    Shared generator used by both extract_rodata_strings and
+    extract_rodata_matches to keep section names, regex, size cap,
+    and error handling in one place.
+    """
+    if section_names is None:
+        section_names = _RODATA_SECTIONS
+
+    if min_len == 4:
+        pat = _RODATA_RE
+    else:
+        pat = re.compile(rb'[\x20-\x7e]{%d,}' % min_len)
+
+    with open(elf_path, 'rb') as f:
+        magic = f.read(4)
+        if magic != b'\x7fELF':
+            return
+        f.seek(0)
+        elf = ELFFile(f)
+
+        for name in section_names:
+            section = elf.get_section_by_name(name)
+            if section is None:
+                continue
+            if section.data_size > _RODATA_MAX_SIZE:
+                continue
+            data = section.data()
+            for m in pat.finditer(data):
+                yield m.group().decode('ascii')
+
+
 def extract_rodata_strings(elf_path, section_names=None, min_len=4):
     """Extract printable ASCII strings from .rodata and similar ELF sections.
 
@@ -243,32 +276,33 @@ def extract_rodata_strings(elf_path, section_names=None, min_len=4):
     Returns:
         Set of unique printable strings found across all matching sections.
     """
-    if section_names is None:
-        section_names = _RODATA_SECTIONS
-
     try:
-        with open(elf_path, 'rb') as f:
-            magic = f.read(4)
-            if magic != b'\x7fELF':
-                return set()
-            f.seek(0)
-            elf = ELFFile(f)
+        return set(_iter_rodata_strings(elf_path, section_names, min_len))
+    except (ELFError, IOError, OSError):
+        return set()
 
-            result = set()
-            if min_len == 4:
-                pat = _RODATA_RE
-            else:
-                pat = re.compile(rb'[\x20-\x7e]{%d,}' % min_len)
 
-            for name in section_names:
-                section = elf.get_section_by_name(name)
-                if section is None:
-                    continue
-                if section.data_size > _RODATA_MAX_SIZE:
-                    continue
-                data = section.data()
-                for m in pat.finditer(data):
-                    result.add(m.group().decode('ascii'))
-            return result
+def extract_rodata_matches(elf_path, candidates, section_names=None, min_len=4):
+    """Extract rodata strings that match a candidate set.
+
+    Same ELF parsing as extract_rodata_strings, but only returns strings
+    present in candidates. Avoids materializing the full string set when
+    only a small subset (e.g. 739 custom patterns) is needed.
+
+    Args:
+        elf_path: Path to an ELF binary.
+        candidates: Set of strings to match against.
+        section_names: Sections to scan (default: .rodata, .data.rel.ro, .data).
+        min_len: Minimum string length (default 4).
+
+    Returns:
+        Set of strings from candidates found in rodata sections.
+    """
+    try:
+        result = set()
+        for s in _iter_rodata_strings(elf_path, section_names, min_len):
+            if s in candidates:
+                result.add(s)
+        return result
     except (ELFError, IOError, OSError):
         return set()

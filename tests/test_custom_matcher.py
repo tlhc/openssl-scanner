@@ -578,3 +578,120 @@ class TestGenerateHapSummaryCustom:
             [result], ['test.hap'], str(tmp_path))
         assert path is not None
         assert os.path.exists(path)
+
+
+class TestMatchToResult:
+    """Tests for CustomMatcher.match_to_result()."""
+
+    def setup_method(self):
+        self.matcher = CustomMatcher()
+        self.matcher.groups = {
+            'openHiTLS': {'HITLS_Init', 'HITLS_Connect', 'HITLS_Read'},
+            'wolfSSL': {'wolfSSL_Init', 'wolfSSL_CTX_new'},
+            'mbedTLS': {'mbedtls_ssl_init'},
+        }
+        self.matcher._rebuild_all_patterns()
+
+    def test_single_group_match(self):
+        result = self.matcher.match_to_result({'HITLS_Init', 'HITLS_Connect'})
+        assert result.matches['openHiTLS'] == {'HITLS_Init', 'HITLS_Connect'}
+        assert 'wolfSSL' not in result.matches
+        assert result.has_matches is True
+
+    def test_cross_group_match(self):
+        result = self.matcher.match_to_result({'HITLS_Init', 'wolfSSL_Init'})
+        assert result.matches['openHiTLS'] == {'HITLS_Init'}
+        assert result.matches['wolfSSL'] == {'wolfSSL_Init'}
+
+    def test_empty_input(self):
+        result = self.matcher.match_to_result(set())
+        assert result.has_matches is False
+        assert result.matches == {}
+
+    def test_none_input(self):
+        result = self.matcher.match_to_result(None)
+        assert result.has_matches is False
+
+    def test_no_matching_symbols(self):
+        result = self.matcher.match_to_result({'foo', 'bar', 'baz'})
+        assert result.has_matches is False
+        assert result.matches == {}
+
+    def test_all_groups_match(self):
+        symbols = {'HITLS_Init', 'wolfSSL_Init', 'mbedtls_ssl_init'}
+        result = self.matcher.match_to_result(symbols)
+        assert len(result.matches) == 3
+        assert result.has_matches is True
+
+    def test_result_type(self):
+        result = self.matcher.match_to_result({'wolfSSL_Init'})
+        assert isinstance(result, CustomResult)
+
+    def test_summary_text_roundtrip(self):
+        result = self.matcher.match_to_result({'wolfSSL_Init', 'wolfSSL_CTX_new'})
+        assert result.summary_text() == 'wolfSSL (2)'
+
+
+class TestExtractRodataMatchesFunction:
+    """Tests for elf_analyzer.extract_rodata_matches()."""
+
+    def test_import_exists(self):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        assert callable(extract_rodata_matches)
+
+    def test_non_elf_returns_empty(self, tmp_path):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        f = tmp_path / 'notelf.bin'
+        f.write_bytes(b'not an elf file')
+        result = extract_rodata_matches(str(f), {'wolfSSL_Init', 'HITLS_Connect'})
+        assert result == set()
+
+    def test_missing_file_returns_empty(self):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        result = extract_rodata_matches('/nonexistent/file.so', {'wolfSSL_Init'})
+        assert result == set()
+
+    def test_matches_candidates_only(self, tmp_path):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = b'wolfSSL_Init\x00HITLS_Connect\x00some_other\x00'
+        elf = ELFBuilder().set_rodata(rodata).build()
+        f = tmp_path / 'test.so'
+        f.write_bytes(elf)
+        candidates = {'wolfSSL_Init', 'mbedtls_ssl_init'}
+        result = extract_rodata_matches(str(f), candidates)
+        assert result == {'wolfSSL_Init'}
+        assert 'HITLS_Connect' not in result
+
+    def test_empty_candidates_returns_empty(self, tmp_path):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = b'wolfSSL_Init\x00'
+        elf = ELFBuilder().set_rodata(rodata).build()
+        f = tmp_path / 'test.so'
+        f.write_bytes(elf)
+        result = extract_rodata_matches(str(f), set())
+        assert result == set()
+
+    def test_all_candidates_matched(self, tmp_path):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = b'wolfSSL_Init\x00HITLS_Connect\x00'
+        elf = ELFBuilder().set_rodata(rodata).build()
+        f = tmp_path / 'test.so'
+        f.write_bytes(elf)
+        candidates = {'wolfSSL_Init', 'HITLS_Connect'}
+        result = extract_rodata_matches(str(f), candidates)
+        assert result == {'wolfSSL_Init', 'HITLS_Connect'}
+
+    def test_short_strings_below_min_len(self, tmp_path):
+        from openssl_scanner.elf_analyzer import extract_rodata_matches
+        from tests.fixtures.elf_builder import ELFBuilder
+        rodata = b'ab\x00wolfSSL_Init\x00'
+        elf = ELFBuilder().set_rodata(rodata).build()
+        f = tmp_path / 'test.so'
+        f.write_bytes(elf)
+        candidates = {'ab', 'wolfSSL_Init'}
+        result = extract_rodata_matches(str(f), candidates)
+        assert 'wolfSSL_Init' in result
+        assert 'ab' not in result

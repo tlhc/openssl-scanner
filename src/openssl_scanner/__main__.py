@@ -1265,6 +1265,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             search_paths=[extract_result.extract_dir],
             workers=jobs,
             matcher=matcher,
+            custom_patterns=custom_matcher.all_patterns if custom_matcher else None,
         )
 
         result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
@@ -1304,7 +1305,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             'static_openssl_providers': static_providers,
         }
 
-        custom_result = custom_matcher.scan_directory(extract_result.extract_dir)
+        custom_result = custom_matcher.match_to_result(result.custom_raw_matches)
         if custom_result.has_matches:
             logger.info("Custom matches: %s", custom_result.summary_text())
         result.package_info['custom_match'] = custom_result.summary_text()

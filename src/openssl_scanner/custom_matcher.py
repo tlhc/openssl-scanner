@@ -107,6 +107,28 @@ class CustomMatcher:
             result[group] = patterns & strings
         return result
 
+    def match_to_result(self, matched_symbols):
+        """Convert a flat set of matched symbols into grouped CustomResult.
+
+        Used after piggybacked custom matching in _analyze_file_worker
+        to build a CustomResult without any ELF I/O.
+
+        Args:
+            matched_symbols: Set of pattern strings already matched
+                against ELF UND/DEF symbols and rodata.
+
+        Returns:
+            CustomResult with matches grouped by pattern group.
+        """
+        result = CustomResult()
+        if not matched_symbols:
+            return result
+        for group, patterns in self.groups.items():
+            group_hits = patterns & matched_symbols
+            if group_hits:
+                result.matches[group] = group_hits
+        return result
+
     def scan_file(self, elf_path):
         """Scan a single ELF file for custom patterns.
 

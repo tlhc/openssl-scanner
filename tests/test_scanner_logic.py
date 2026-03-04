@@ -675,3 +675,286 @@ class TestBuildFileResultOrchestration:
         assert result.arch == 'aarch64'
         assert result.direct_deps == ['libc.so']
         assert isinstance(result, FileResult)
+
+
+class TestWorkItemPickle:
+    """WorkItem must survive pickle round-trip for ProcessPoolExecutor."""
+
+    def test_pickle_round_trip_no_custom(self):
+        import pickle
+        from openssl_scanner.scanner import WorkItem
+        item = WorkItem('/path/to/lib.so', {'SSL_CTX_new', 'EVP_sha256'})
+        restored = pickle.loads(pickle.dumps(item))
+        assert restored.path == '/path/to/lib.so'
+        assert restored.openssl_exports == {'SSL_CTX_new', 'EVP_sha256'}
+        assert restored.custom_patterns is None
+
+    def test_pickle_round_trip_with_custom(self):
+        import pickle
+        from openssl_scanner.scanner import WorkItem
+        custom = {'wolfSSL_Init', 'HITLS_Connect'}
+        item = WorkItem('/path/to/lib.so', {'SSL_CTX_new'}, custom)
+        restored = pickle.loads(pickle.dumps(item))
+        assert restored.path == '/path/to/lib.so'
+        assert restored.openssl_exports == {'SSL_CTX_new'}
+        assert restored.custom_patterns == {'wolfSSL_Init', 'HITLS_Connect'}
+
+    def test_pickle_round_trip_empty_sets(self):
+        import pickle
+        from openssl_scanner.scanner import WorkItem
+        item = WorkItem('/empty.so', set(), set())
+        restored = pickle.loads(pickle.dumps(item))
+        assert restored.path == '/empty.so'
+        assert restored.openssl_exports == set()
+        assert restored.custom_patterns == set()
+
+    def test_namedtuple_field_access(self):
+        from openssl_scanner.scanner import WorkItem
+        item = WorkItem('/x.so', {'A'}, {'B'})
+        assert item[0] == '/x.so'
+        assert item[1] == {'A'}
+        assert item[2] == {'B'}
+
+    def test_default_custom_patterns_is_none(self):
+        from openssl_scanner.scanner import WorkItem
+        item = WorkItem('/x.so', {'A'})
+        assert item.custom_patterns is None
+
+
+class TestWorkerCustomPatterns:
+    """_analyze_file_worker with custom_patterns (3rd WorkItem field)."""
+
+    def _make_info(self, und_names, def_names, needed_libs=None):
+        info = MagicMock(spec=ELFInfo)
+        info.elf_type = 'shared_library'
+        info.arch = 'aarch64'
+        info.needed_libs = needed_libs or ['libc.so']
+        info.undefined_symbols = [
+            Symbol(name=n, bind='GLOBAL', type_='FUNC', defined=False)
+            for n in und_names
+        ]
+        info.defined_symbols = [
+            Symbol(name=n, bind='GLOBAL', type_='FUNC', defined=True)
+            for n in def_names
+        ]
+        info.has_dlopen = False
+        info.has_dlsym = False
+        return info
+
+    def test_custom_patterns_match_und(self):
+        """Custom patterns matched against UND symbols."""
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
+        info = self._make_info(
+            und_names=['wolfSSL_Init', 'printf'],
+            def_names=['main'],
+        )
+        custom = {'wolfSSL_Init', 'wolfSSL_CTX_new', 'HITLS_Connect'}
+        ossl_exports = {'SSL_CTX_new', 'EVP_sha256'}
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner.os.path.isfile',
+                       lambda p: True)
+            m.setattr('openssl_scanner.scanner.ELFAnalyzer',
+                       lambda: MagicMock(analyze=MagicMock(return_value=info)))
+            m.setattr('openssl_scanner.elf_analyzer.extract_rodata_matches',
+                       lambda path, candidates: set())
+            result = _analyze_file_worker(
+                WorkItem('/fake/lib.so', ossl_exports, custom))
+
+        assert 'wolfSSL_Init' in result.custom_hit_symbols
+
+    def test_custom_patterns_match_def(self):
+        """Custom patterns matched against DEF symbols."""
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
+        info = self._make_info(
+            und_names=['printf'],
+            def_names=['wolfSSL_Init', 'main'],
+        )
+        custom = {'wolfSSL_Init', 'wolfSSL_CTX_new'}
+        ossl_exports = {'SSL_CTX_new'}
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner.os.path.isfile',
+                       lambda p: True)
+            m.setattr('openssl_scanner.scanner.ELFAnalyzer',
+                       lambda: MagicMock(analyze=MagicMock(return_value=info)))
+            m.setattr('openssl_scanner.elf_analyzer.extract_rodata_matches',
+                       lambda path, candidates: set())
+            result = _analyze_file_worker(
+                WorkItem('/fake/lib.so', ossl_exports, custom))
+
+        assert 'wolfSSL_Init' in result.custom_hit_symbols
+
+    def test_custom_patterns_rodata_fallback(self):
+        """Remaining custom patterns checked via extract_rodata_matches."""
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
+        info = self._make_info(
+            und_names=['printf'],
+            def_names=['main'],
+        )
+        custom = {'HITLS_Connect', 'wolfSSL_Init'}
+        ossl_exports = {'SSL_CTX_new'}
+
+        def mock_rodata(path, candidates):
+            return candidates & {'HITLS_Connect'}
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner.os.path.isfile',
+                       lambda p: True)
+            m.setattr('openssl_scanner.scanner.ELFAnalyzer',
+                       lambda: MagicMock(analyze=MagicMock(return_value=info)))
+            m.setattr('openssl_scanner.elf_analyzer.extract_rodata_matches',
+                       mock_rodata)
+            result = _analyze_file_worker(
+                WorkItem('/fake/lib.so', ossl_exports, custom))
+
+        assert 'HITLS_Connect' in result.custom_hit_symbols
+        assert 'wolfSSL_Init' not in result.custom_hit_symbols
+
+    def test_custom_patterns_none_skips_custom(self):
+        """custom_patterns=None means no custom matching."""
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
+        info = self._make_info(
+            und_names=['wolfSSL_Init'],
+            def_names=['main'],
+        )
+        ossl_exports = {'SSL_CTX_new'}
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner.os.path.isfile',
+                       lambda p: True)
+            m.setattr('openssl_scanner.scanner.ELFAnalyzer',
+                       lambda: MagicMock(analyze=MagicMock(return_value=info)))
+            result = _analyze_file_worker(
+                WorkItem('/fake/lib.so', ossl_exports))
+
+        assert result.custom_hit_symbols == set()
+
+    def test_custom_patterns_non_so_file_skipped(self):
+        """Custom matching only runs on .so files."""
+        from openssl_scanner.scanner import _analyze_file_worker, WorkItem
+        info = self._make_info(
+            und_names=['wolfSSL_Init'],
+            def_names=['main'],
+        )
+        ossl_exports = {'SSL_CTX_new'}
+        custom = {'wolfSSL_Init'}
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner.os.path.isfile',
+                       lambda p: True)
+            m.setattr('openssl_scanner.scanner.ELFAnalyzer',
+                       lambda: MagicMock(analyze=MagicMock(return_value=info)))
+            result = _analyze_file_worker(
+                WorkItem('/fake/app_binary', ossl_exports, custom))
+
+        assert result.custom_hit_symbols == set()
+
+
+class TestScannerCustomPatternsConstructor:
+    """Scanner(custom_patterns=...) stores patterns for scan_directory."""
+
+    def test_constructor_stores_custom_patterns(self):
+        custom = {'wolfSSL_Init', 'HITLS_Connect'}
+        scanner = Scanner(custom_patterns=custom)
+        assert scanner._custom_patterns == custom
+
+    def test_constructor_no_custom_patterns(self):
+        scanner = Scanner()
+        assert scanner._custom_patterns is None
+
+    def test_custom_patterns_passed_to_work_items(self):
+        """scan_directory creates WorkItems with custom_patterns."""
+        from openssl_scanner.scanner import WorkItem
+        custom = {'wolfSSL_Init'}
+        scanner = Scanner(custom_patterns=custom, workers=1)
+        scanner._matcher = MagicMock()
+        scanner._matcher.get_openssl_exports.return_value = {'SSL_CTX_new'}
+        scanner._matcher.categorize_symbols.return_value = {}
+        scanner._analyzer = MagicMock()
+        scanner._analyzer.is_elf_file.return_value = True
+
+        captured_items = []
+        original_run = __import__(
+            'openssl_scanner.scanner', fromlist=['_run_parallel_analysis']
+        )._run_parallel_analysis
+
+        def capture_run(items, workers):
+            captured_items.extend(items)
+            return [], []
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner._run_parallel_analysis',
+                       capture_run)
+            m.setattr('os.walk', lambda d: [
+                (d, [], ['lib.so'])])
+            scanner.scan_directory('/fake/dir')
+
+        assert len(captured_items) == 1
+        assert captured_items[0].custom_patterns == {'wolfSSL_Init'}
+
+
+class TestScanResultCustomRawMatchesAggregation:
+    """ScanResult.custom_raw_matches aggregation across file results."""
+
+    def test_aggregation_unions_hits(self):
+        """custom_raw_matches is the union of all file_result.custom_hit_symbols."""
+        from openssl_scanner.scanner import ScanResult, FileResult
+        fr1 = FileResult(
+            path='/a.so', file_type='shared_library', arch='aarch64',
+            direct_deps=[], openssl_direct=False, openssl_transitive=False,
+            openssl_libs=[], openssl_symbols=[],
+            custom_hit_symbols={'wolfSSL_Init', 'wolfSSL_free'},
+        )
+        fr2 = FileResult(
+            path='/b.so', file_type='shared_library', arch='aarch64',
+            direct_deps=[], openssl_direct=False, openssl_transitive=False,
+            openssl_libs=[], openssl_symbols=[],
+            custom_hit_symbols={'HITLS_Connect'},
+        )
+
+        scanner = Scanner(custom_patterns={'wolfSSL_Init', 'wolfSSL_free',
+                                            'HITLS_Connect'}, workers=1)
+        scanner._matcher = MagicMock()
+        scanner._matcher.get_openssl_exports.return_value = set()
+        scanner._matcher.categorize_symbols.return_value = {}
+        scanner._matcher.is_openssl_library.return_value = False
+        scanner._resolver = MagicMock()
+        scanner._analyzer = MagicMock()
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner._run_parallel_analysis',
+                       lambda items, w: ([fr1, fr2], []))
+            m.setattr('os.walk', lambda d: [
+                (d, [], ['a.so', 'b.so'])])
+            scanner._analyzer.is_elf_file.return_value = True
+            result = scanner.scan_directory('/fake/dir')
+
+        assert result.custom_raw_matches == {
+            'wolfSSL_Init', 'wolfSSL_free', 'HITLS_Connect'}
+
+    def test_no_custom_patterns_empty_aggregation(self):
+        """Without custom_patterns, custom_raw_matches stays empty."""
+        scanner = Scanner(workers=1)
+        scanner._matcher = MagicMock()
+        scanner._matcher.get_openssl_exports.return_value = set()
+        scanner._matcher.categorize_symbols.return_value = {}
+        scanner._matcher.is_openssl_library.return_value = False
+        scanner._resolver = MagicMock()
+        scanner._analyzer = MagicMock()
+
+        fr = FileResult(
+            path='/a.so', file_type='shared_library', arch='aarch64',
+            direct_deps=[], openssl_direct=False, openssl_transitive=False,
+            openssl_libs=[], openssl_symbols=[],
+        )
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr('openssl_scanner.scanner._run_parallel_analysis',
+                       lambda items, w: ([fr], []))
+            m.setattr('os.walk', lambda d: [
+                (d, [], ['a.so'])])
+            scanner._analyzer.is_elf_file.return_value = True
+            result = scanner.scan_directory('/fake/dir')
+
+        assert result.custom_raw_matches == set()
