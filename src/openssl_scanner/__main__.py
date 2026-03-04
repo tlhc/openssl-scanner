@@ -1049,6 +1049,7 @@ def cmd_hap(args) -> int:
     output_ext = os.path.splitext(output_path)[1].lower()
     per_package = (not output_ext) or os.path.isdir(output_path)
 
+    out_names = {}
     if per_package:
         os.makedirs(output_path, exist_ok=True)
         fmt_ext = '.json' if args.json_only else '.xlsx'
@@ -1059,6 +1060,7 @@ def cmd_hap(args) -> int:
     no_native = 0
     failed = 0
     try:
+        to_scan = []
         for pkg_idx, entry in enumerate(pkg_plan, 1):
             entry_key = entry.display_name
 
@@ -1076,132 +1078,52 @@ def cmd_hap(args) -> int:
                     skipped += 1
                     continue
 
-            tmp_file = None
-            try:
-                pkg_path, tmp_file = _extract_pkg_entry(entry, logger)
-                logger.info("Extracting: %s", entry.display_name)
+            to_scan.append((pkg_idx, entry))
 
-                extract_result = extractor.extract(pkg_path, abi=args.abi)
+        cpus = os.cpu_count() or 4
+        use_parallel = per_package and len(to_scan) > 1
+        if use_parallel:
+            parallel = min(len(to_scan), cpus)
+            per_pkg_jobs = max(1, cpus // parallel)
+        else:
+            parallel = 1
+            per_pkg_jobs = args.jobs
 
-                if not extract_result.so_files:
-                    logger.warning("No native libraries found in %s", entry.display_name)
-                    no_native += 1
-                    print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
-                          f" -> NO NATIVE LIBS", flush=True)
-                    if not args.keep_extracted:
-                        extractor.cleanup(extract_result)
-                    continue
+        logger_name = logger.name
 
-                logger.info(
-                    "Package: %s | ABI: %s | Native libs: %d",
-                    extract_result.metadata.bundle_name or entry.display_name,
-                    extract_result.metadata.abis_found,
-                    len(extract_result.so_files)
-                )
-
-                matcher = OpenSSLMatcher()
-                count = matcher.load_builtin_symbols()
-                logger.info("Loaded %d built-in OpenSSL symbols", count)
-
-                removed = 0
-                removed_libs = []
-                for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
-                    for fname in filenames:
-                        if matcher.is_openssl_library(fname):
-                            fpath = os.path.join(dirpath, fname)
-                            os.remove(fpath)
-                            removed += 1
-                            removed_libs.append(fname)
-                            logger.debug("Excluded OpenSSL lib: %s", fpath)
-                if removed:
-                    logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
-
-                scanner = Scanner(
-                    search_paths=[extract_result.extract_dir],
-                    workers=args.jobs,
-                    matcher=matcher,
-                )
-
-                result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
-                result.files_detail.sort(key=lambda fr: fr.path)
-                result.report_type = 'package'
-
-                meta = extract_result.metadata
-
-                has_standalone = (removed > 0
-                                  or extract_result.openssl_lib is not None
-                                  or extract_result.openssl_ssl is not None)
-                static_bundled, static_providers = _detect_static_providers(result)
-
-                if has_standalone:
-                    bundled_val = True
-                elif static_bundled:
-                    bundled_val = static_bundled
-                else:
-                    bundled_val = False
-
-                result.package_info = {
-                    'package_path': entry.container or meta.package_path,
-                    'package_type': meta.package_type,
-                    'bundle_name': meta.bundle_name or entry.display_name,
-                    'module_name': meta.module_name,
-                    'module_type': meta.module_type,
-                    'version_name': meta.version_name,
-                    'version_code': meta.version_code,
-                    'min_api_version': meta.min_api_version,
-                    'device_types': meta.device_types,
-                    'scanned_abi': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
-                    'abis_available': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
-                    'native_libs_count': len(extract_result.so_files),
-                    'bundled_openssl': bundled_val,
-                    'bundled_openssl_files': _collect_bundled_names(
-                        removed_libs, extract_result),
-                    'static_openssl_providers': static_providers,
-                }
-
-                custom_result = custom_matcher.scan_directory(extract_result.extract_dir)
-                if custom_result.has_matches:
-                    logger.info("Custom matches: %s", custom_result.summary_text())
-                result.package_info['custom_match'] = custom_result.summary_text()
-                result.package_info['custom_match_groups'] = {
-                    g: sorted(s) for g, s in custom_result.matches.items() if s
-                }
-
-                all_results.append(result)
-                all_custom_results.append(custom_result)
-                scanned_packages.append(entry_key)
-
-                if not args.keep_extracted:
-                    extractor.cleanup(extract_result)
-
-                pkg_name = meta.bundle_name or entry.display_name
-                sym_count = len(result.all_unique_symbols)
-                file_count = result.files_with_openssl
-
-                if per_package:
-                    _hap_write_single_report(
-                        result, entry_key, out_names[entry_key], reporter, args.json_only
-                    )
-                    out_name = os.path.basename(out_names[entry_key])
-                    print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
-                          f" ({sym_count} symbols, {file_count} files)",
-                          flush=True)
-                else:
-                    if not args.json_only:
-                        print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
-                              f" | {sym_count} OpenSSL symbols | {file_count} files",
-                              flush=True)
-
-            except (ValueError, zipfile.BadZipFile) as e:
-                logger.error("Failed to extract %s: %s", entry.display_name, e)
+        def _collect_result(ret):
+            nonlocal no_native, failed
+            if ret['failed']:
                 failed += 1
-                print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
-                      f" -> FAILED ({e})", flush=True)
-                continue
-            finally:
-                if tmp_file and os.path.exists(tmp_file):
-                    os.unlink(tmp_file)
-                    logger.debug("Cleaned up temp: %s", tmp_file)
+            elif ret['no_native']:
+                no_native += 1
+            elif ret['result'] is not None:
+                all_results.append(ret['result'])
+                all_custom_results.append(ret['custom_result'])
+                scanned_packages.append(ret['entry_key'])
+
+        if use_parallel:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            print(f"\n  Parallel scan: {len(to_scan)} packages, "
+                  f"{parallel} workers ({per_pkg_jobs} jobs each)",
+                  flush=True)
+            with ProcessPoolExecutor(max_workers=parallel) as pool:
+                futures = {}
+                for idx, ent in to_scan:
+                    fut = pool.submit(
+                        _scan_one_hap, ent, extractor, custom_matcher, args,
+                        reporter, out_names, per_package, logger_name,
+                        idx, total_packages, per_pkg_jobs)
+                    futures[fut] = (idx, ent)
+                for fut in as_completed(futures):
+                    _collect_result(fut.result())
+        else:
+            for idx, ent in to_scan:
+                ret = _scan_one_hap(
+                    ent, extractor, custom_matcher, args, reporter,
+                    out_names, per_package, logger_name,
+                    idx, total_packages, per_pkg_jobs)
+                _collect_result(ret)
 
         elapsed = time.time() - start_time
 
@@ -1287,6 +1209,146 @@ from .hap_report import (
     generate_hap_summary as _generate_hap_summary,
     load_scan_result_from_json as _load_scan_result_from_json,
 )
+
+
+def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
+                  out_names, per_package, logger_name, pkg_idx, total_packages,
+                  per_pkg_jobs=None):
+    """Scan a single HAP package. Process-safe: all mutable state is local.
+
+    Returns dict with keys: result, custom_result, entry_key, no_native, failed
+    """
+    logger = logging.getLogger(logger_name)
+    entry_key = entry.display_name
+    jobs = per_pkg_jobs if per_pkg_jobs is not None else args.jobs
+    tmp_file = None
+    try:
+        pkg_path, tmp_file = _extract_pkg_entry(entry, logger)
+        logger.info("Extracting: %s", entry.display_name)
+
+        extract_result = extractor.extract(pkg_path, abi=args.abi)
+
+        if not extract_result.so_files:
+            logger.warning("No native libraries found in %s", entry.display_name)
+            print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
+                  f" -> NO NATIVE LIBS", flush=True)
+            if not args.keep_extracted:
+                extractor.cleanup(extract_result)
+            return {'result': None, 'custom_result': None,
+                    'entry_key': entry_key, 'no_native': True, 'failed': False}
+
+        logger.info(
+            "Package: %s | ABI: %s | Native libs: %d",
+            extract_result.metadata.bundle_name or entry.display_name,
+            extract_result.metadata.abis_found,
+            len(extract_result.so_files)
+        )
+
+        matcher = OpenSSLMatcher()
+        count = matcher.load_builtin_symbols()
+        logger.info("Loaded %d built-in OpenSSL symbols", count)
+
+        removed = 0
+        removed_libs = []
+        for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
+            for fname in filenames:
+                if matcher.is_openssl_library(fname):
+                    fpath = os.path.join(dirpath, fname)
+                    os.remove(fpath)
+                    removed += 1
+                    removed_libs.append(fname)
+                    logger.debug("Excluded OpenSSL lib: %s", fpath)
+        if removed:
+            logger.info("Excluded %d OpenSSL lib file(s) from scan", removed)
+
+        scanner = Scanner(
+            search_paths=[extract_result.extract_dir],
+            workers=jobs,
+            matcher=matcher,
+        )
+
+        result = scanner.scan_directory(extract_result.extract_dir, recursive=True)
+        result.files_detail.sort(key=lambda fr: fr.path)
+        result.report_type = 'package'
+
+        meta = extract_result.metadata
+
+        has_standalone = (removed > 0
+                          or extract_result.openssl_lib is not None
+                          or extract_result.openssl_ssl is not None)
+        static_bundled, static_providers = _detect_static_providers(result)
+
+        if has_standalone:
+            bundled_val = True
+        elif static_bundled:
+            bundled_val = static_bundled
+        else:
+            bundled_val = False
+
+        result.package_info = {
+            'package_path': entry.container or meta.package_path,
+            'package_type': meta.package_type,
+            'bundle_name': meta.bundle_name or entry.display_name,
+            'module_name': meta.module_name,
+            'module_type': meta.module_type,
+            'version_name': meta.version_name,
+            'version_code': meta.version_code,
+            'min_api_version': meta.min_api_version,
+            'device_types': meta.device_types,
+            'scanned_abi': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
+            'abis_available': sorted(meta.abis_found) if isinstance(meta.abis_found, list) else meta.abis_found,
+            'native_libs_count': len(extract_result.so_files),
+            'bundled_openssl': bundled_val,
+            'bundled_openssl_files': _collect_bundled_names(
+                removed_libs, extract_result),
+            'static_openssl_providers': static_providers,
+        }
+
+        custom_result = custom_matcher.scan_directory(extract_result.extract_dir)
+        if custom_result.has_matches:
+            logger.info("Custom matches: %s", custom_result.summary_text())
+        result.package_info['custom_match'] = custom_result.summary_text()
+        result.package_info['custom_match_groups'] = {
+            g: sorted(s) for g, s in custom_result.matches.items() if s
+        }
+
+        if not args.keep_extracted:
+            extractor.cleanup(extract_result)
+
+        pkg_name = meta.bundle_name or entry.display_name
+        sym_count = len(result.all_unique_symbols)
+        file_count = result.files_with_openssl
+
+        if per_package:
+            _hap_write_single_report(
+                result, entry_key, out_names[entry_key], reporter, args.json_only
+            )
+            out_name = os.path.basename(out_names[entry_key])
+            print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
+                  f" ({sym_count} symbols, {file_count} files)",
+                  flush=True)
+        else:
+            if not args.json_only:
+                print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
+                      f" | {sym_count} OpenSSL symbols | {file_count} files",
+                      flush=True)
+
+        return {'result': result, 'custom_result': custom_result,
+                'entry_key': entry_key, 'no_native': False, 'failed': False}
+
+    except (ValueError, zipfile.BadZipFile) as e:
+        logger.error("Failed to extract %s: %s", entry.display_name, e)
+        print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
+              f" -> FAILED ({e})", flush=True)
+        return {'result': None, 'custom_result': None,
+                'entry_key': entry_key, 'no_native': False, 'failed': True}
+    finally:
+        if tmp_file and os.path.exists(tmp_file):
+            os.unlink(tmp_file)
+            logger.debug("Cleaned up temp: %s", tmp_file)
+
+_scan_one_hap.__module__ = 'openssl_scanner.__main__'
+sys.modules.setdefault('openssl_scanner.__main__', sys.modules[__name__])
 
 
 def cmd_hap_summary(args) -> int:
