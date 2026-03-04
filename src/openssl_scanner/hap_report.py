@@ -555,7 +555,7 @@ def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
 
     top_cat = ''
     if cat_counts:
-        top_cat = max(cat_counts, key=cat_counts.get)
+        top_cat = max(cat_counts, key=lambda c: (cat_counts[c], c))
 
     bundled_raw = pi.get('bundled_openssl', False)
     if isinstance(bundled_raw, str) and bundled_raw.startswith('Yes'):
@@ -667,7 +667,7 @@ def generate_hap_summary(all_results, scanned_packages, output_dir,
 
     top_cat_total = ''
     if cat_union:
-        top_cat_total = max(cat_union, key=lambda c: len(cat_union[c]))
+        top_cat_total = max(cat_union, key=lambda c: (len(cat_union[c]), c))
 
     usage_counts = {}
     for r in rows:

@@ -1080,14 +1080,12 @@ def cmd_hap(args) -> int:
 
             to_scan.append((pkg_idx, entry))
 
-        cpus = os.cpu_count() or 4
-        use_parallel = per_package and len(to_scan) > 1
+        use_parallel = per_package and len(to_scan) > 1 and args.jobs != 1
         if use_parallel:
-            parallel = min(len(to_scan), cpus)
-            per_pkg_jobs = max(1, cpus // parallel)
+            parallel = min(len(to_scan), args.jobs)
         else:
             parallel = 1
-            per_pkg_jobs = args.jobs
+        per_pkg_jobs = 1
 
         logger_name = logger.name
 
@@ -1104,10 +1102,13 @@ def cmd_hap(args) -> int:
 
         if use_parallel:
             from concurrent.futures import ProcessPoolExecutor, as_completed
+            pool_kw = {'max_workers': parallel}
+            if sys.version_info >= (3, 11):
+                pool_kw['max_tasks_per_child'] = 1
             print(f"\n  Parallel scan: {len(to_scan)} packages, "
                   f"{parallel} workers ({per_pkg_jobs} jobs each)",
                   flush=True)
-            with ProcessPoolExecutor(max_workers=parallel) as pool:
+            with ProcessPoolExecutor(**pool_kw) as pool:
                 futures = {}
                 for idx, ent in to_scan:
                     fut = pool.submit(
