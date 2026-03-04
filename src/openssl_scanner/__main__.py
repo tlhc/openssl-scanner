@@ -373,11 +373,14 @@ Examples:
         help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
+    _default_hap_jobs = (os.cpu_count() or 4) * 5
     hap_parser.add_argument(
         '-j', '--jobs',
         type=int,
-        default=os.cpu_count() or 4,
-        help=f'Number of parallel workers (default: {os.cpu_count() or 4})',
+        nargs='?',
+        default=_default_hap_jobs,
+        const=_default_hap_jobs,
+        help=f'Number of parallel workers (default: {_default_hap_jobs})',
     )
 
     hap_parser.add_argument(
@@ -1059,6 +1062,7 @@ def cmd_hap(args) -> int:
     skipped = 0
     no_native = 0
     failed = 0
+    is_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
     try:
         to_scan = []
         for pkg_idx, entry in enumerate(pkg_plan, 1):
@@ -1073,8 +1077,7 @@ def cmd_hap(args) -> int:
                 if cached and not args.json_only and not os.path.exists(out_file):
                     cached = False
                 if cached:
-                    print(f"[{pkg_idx}/{total_packages}] {entry_key} -> SKIPPED (cached)",
-                          flush=True)
+                    print(f"  {entry_key} -> SKIPPED (cached)", flush=True)
                     skipped += 1
                     continue
 
@@ -1088,9 +1091,12 @@ def cmd_hap(args) -> int:
         per_pkg_jobs = 1
 
         logger_name = logger.name
+        scan_total = len(to_scan)
+        scan_start = time.time()
+        completed = 0
 
         def _collect_result(ret):
-            nonlocal no_native, failed
+            nonlocal no_native, failed, completed
             if ret['failed']:
                 failed += 1
             elif ret['no_native']:
@@ -1099,14 +1105,21 @@ def cmd_hap(args) -> int:
                 all_results.append(ret['result'])
                 all_custom_results.append(ret['custom_result'])
                 scanned_packages.append(ret['entry_key'])
+            completed += 1
+            bar = _hap_progress_bar(completed, scan_total, scan_start)
+            msg = ret.get('message', '')
+            if msg:
+                _hap_print_progress(f"  {msg}", bar, is_tty)
+            elif is_tty:
+                sys.stdout.write('\r\033[K' + bar)
+                sys.stdout.flush()
 
         if use_parallel:
             from concurrent.futures import ProcessPoolExecutor, as_completed
             pool_kw = {'max_workers': parallel}
             if sys.version_info >= (3, 11):
                 pool_kw['max_tasks_per_child'] = 1
-            print(f"\n  Parallel scan: {len(to_scan)} packages, "
-                  f"{parallel} workers ({per_pkg_jobs} jobs each)",
+            print(f"\n  Scanning {scan_total} packages ({parallel} workers)",
                   flush=True)
             with ProcessPoolExecutor(**pool_kw) as pool:
                 futures = {}
@@ -1117,7 +1130,19 @@ def cmd_hap(args) -> int:
                         idx, total_packages, per_pkg_jobs)
                     futures[fut] = (idx, ent)
                 for fut in as_completed(futures):
-                    _collect_result(fut.result())
+                    idx, ent = futures[fut]
+                    try:
+                        ret = fut.result()
+                    except Exception as e:
+                        logger.error("Worker crashed for %s: %s",
+                                     ent.display_name, e)
+                        ret = {
+                            'result': None, 'custom_result': None,
+                            'entry_key': ent.display_name,
+                            'no_native': False, 'failed': True,
+                            'message': f"{ent.display_name} -> FAILED ({e})",
+                        }
+                    _collect_result(ret)
         else:
             for idx, ent in to_scan:
                 ret = _scan_one_hap(
@@ -1125,6 +1150,10 @@ def cmd_hap(args) -> int:
                     out_names, per_package, logger_name,
                     idx, total_packages, per_pkg_jobs)
                 _collect_result(ret)
+
+        if is_tty:
+            sys.stdout.write('\r\033[K')
+            sys.stdout.flush()
 
         elapsed = time.time() - start_time
 
@@ -1212,6 +1241,34 @@ from .hap_report import (
 )
 
 
+def _hap_progress_bar(completed, total, start_time):
+    """Build a single-line progress bar string."""
+    pct = completed * 100 // total if total else 0
+    elapsed = time.time() - start_time
+    bar_width = 30
+    filled = bar_width * completed // total if total else 0
+    bar = '=' * filled
+    if filled < bar_width:
+        bar += '>'
+    bar = bar.ljust(bar_width)
+    eta = ''
+    if completed > 0 and completed < total:
+        eta_sec = elapsed * (total - completed) / completed
+        eta = f'  ETA {eta_sec:.0f}s'
+    return f'  [{bar}] {completed}/{total}  {pct}%  {elapsed:.1f}s{eta}'
+
+
+def _hap_print_progress(message, progress_line, is_tty):
+    """Print a detail message above the progress bar."""
+    if is_tty:
+        sys.stdout.write('\r\033[K')
+        sys.stdout.write(message + '\n')
+        sys.stdout.write(progress_line)
+        sys.stdout.flush()
+    else:
+        print(message, flush=True)
+
+
 def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                   out_names, per_package, logger_name, pkg_idx, total_packages,
                   per_pkg_jobs=None):
@@ -1231,12 +1288,11 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
 
         if not extract_result.so_files:
             logger.warning("No native libraries found in %s", entry.display_name)
-            print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
-                  f" -> NO NATIVE LIBS", flush=True)
             if not args.keep_extracted:
                 extractor.cleanup(extract_result)
             return {'result': None, 'custom_result': None,
-                    'entry_key': entry_key, 'no_native': True, 'failed': False}
+                    'entry_key': entry_key, 'no_native': True, 'failed': False,
+                    'message': f"{entry.display_name} -> NO NATIVE LIBS"}
 
         logger.info(
             "Package: %s | ABI: %s | Native libs: %d",
@@ -1326,24 +1382,21 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                 result, entry_key, out_names[entry_key], reporter, args.json_only
             )
             out_name = os.path.basename(out_names[entry_key])
-            print(f"[{pkg_idx}/{total_packages}] {pkg_name} -> {out_name}"
-                  f" ({sym_count} symbols, {file_count} files)",
-                  flush=True)
+            msg = f"{pkg_name} -> {out_name} ({sym_count} symbols, {file_count} files)"
+        elif not args.json_only:
+            msg = f"{pkg_name} | {sym_count} OpenSSL symbols | {file_count} files"
         else:
-            if not args.json_only:
-                print(f"[{pkg_idx}/{total_packages}] {pkg_name}"
-                      f" | {sym_count} OpenSSL symbols | {file_count} files",
-                      flush=True)
+            msg = ''
 
         return {'result': result, 'custom_result': custom_result,
-                'entry_key': entry_key, 'no_native': False, 'failed': False}
+                'entry_key': entry_key, 'no_native': False, 'failed': False,
+                'message': msg}
 
     except (ValueError, zipfile.BadZipFile) as e:
         logger.error("Failed to extract %s: %s", entry.display_name, e)
-        print(f"[{pkg_idx}/{total_packages}] {entry.display_name}"
-              f" -> FAILED ({e})", flush=True)
         return {'result': None, 'custom_result': None,
-                'entry_key': entry_key, 'no_native': False, 'failed': True}
+                'entry_key': entry_key, 'no_native': False, 'failed': True,
+                'message': f"{entry.display_name} -> FAILED ({e})"}
     finally:
         if tmp_file and os.path.exists(tmp_file):
             os.unlink(tmp_file)
