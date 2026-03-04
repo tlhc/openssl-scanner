@@ -724,3 +724,484 @@ class TestExcelExporterLegacyImportChains:
         assert ws.cell(row=2, column=5).value == 'test_app -> libssl.so -> libcrypto.so'
         assert ws.cell(row=2, column=6).value == 2
         wb.close()
+
+
+def _make_aggregated_report():
+    """Build a representative aggregated scan report dict."""
+    return {
+        'meta': {
+            'tool_version': '1.0.0',
+            'report_type': 'aggregated',
+            'aggregation_time': '2026-03-01T00:00:00',
+            'source_reports_count': 2,
+            'mapping_file': 'mapping.json',
+        },
+        'summary': {
+            'total_components': 2,
+            'total_executables': 3,
+            'global_unique_symbols': 4,
+        },
+        'ranking': [
+            {'rank': 1, 'component': 'http_framework', 'unique_symbols_count': 3},
+            {'rank': 2, 'component': 'crypto_lib', 'unique_symbols_count': 2},
+        ],
+        'components': {
+            'http_framework': {
+                'executables': ['nginx', 'httpd'],
+                'executables_detail': {
+                    'nginx': {
+                        'name': 'nginx',
+                        'path': '/usr/sbin/nginx',
+                        'unique_symbols_count': 2,
+                        'unique_symbols': ['SSL_connect', 'EVP_sha256'],
+                        'by_category': {
+                            'ssl_core': {'count': 1, 'symbols': ['SSL_connect']},
+                            'crypto_evp': {'count': 1, 'symbols': ['EVP_sha256']},
+                        },
+                    },
+                    'httpd': {
+                        'name': 'httpd',
+                        'path': '/usr/sbin/httpd',
+                        'unique_symbols_count': 1,
+                        'unique_symbols': ['BIO_new'],
+                        'by_category': {
+                            'crypto_bio': {'count': 1, 'symbols': ['BIO_new']},
+                        },
+                    },
+                },
+                'unique_symbols_count': 3,
+                'unique_symbols': ['SSL_connect', 'EVP_sha256', 'BIO_new'],
+                'by_category': {
+                    'ssl_core': {'count': 1, 'symbols': ['SSL_connect']},
+                    'crypto_evp': {'count': 1, 'symbols': ['EVP_sha256']},
+                    'crypto_bio': {'count': 1, 'symbols': ['BIO_new']},
+                },
+            },
+            'crypto_lib': {
+                'executables': ['libcurl.so'],
+                'executables_detail': {
+                    'libcurl.so': {
+                        'name': 'libcurl.so',
+                        'path': '/usr/lib/libcurl.so',
+                        'unique_symbols_count': 2,
+                        'unique_symbols': ['RAND_bytes', 'SSL_connect'],
+                        'by_category': {
+                            'crypto_rand': {'count': 1, 'symbols': ['RAND_bytes']},
+                            'ssl_core': {'count': 1, 'symbols': ['SSL_connect']},
+                        },
+                    },
+                },
+                'unique_symbols_count': 2,
+                'unique_symbols': ['RAND_bytes', 'SSL_connect'],
+                'by_category': {
+                    'crypto_rand': {'count': 1, 'symbols': ['RAND_bytes']},
+                    'ssl_core': {'count': 1, 'symbols': ['SSL_connect']},
+                },
+            },
+        },
+        'unclassified': None,
+        'global_unique_symbols': ['BIO_new', 'EVP_sha256', 'RAND_bytes', 'SSL_connect'],
+        'openssl_symbols': {
+            'import_chains': {
+                'SSL_connect': [
+                    {
+                        'component': 'http_framework',
+                        'binary': 'nginx',
+                        'chain': 'nginx -> libssl.so -> libcrypto.so',
+                        'depth': 2,
+                    },
+                ],
+            },
+            'by_depth': {
+                'depth_1': {
+                    'count': 2,
+                    'symbols': ['SSL_connect', 'EVP_sha256'],
+                    'files': ['nginx'],
+                    'components': ['http_framework'],
+                },
+            },
+            'by_category': {
+                'ssl_core': {'count': 1, 'symbols': ['SSL_connect']},
+                'crypto_evp': {'count': 1, 'symbols': ['EVP_sha256']},
+                'crypto_bio': {'count': 1, 'symbols': ['BIO_new']},
+                'crypto_rand': {'count': 1, 'symbols': ['RAND_bytes']},
+            },
+        },
+        'errors': [],
+    }
+
+
+class TestExcelExporterAggregated:
+    """Test Excel export with aggregated report data."""
+
+    def test_aggregated_sheet_names(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+
+        expected = [
+            'Overview', 'Files', 'File-Symbol', 'Import Chains',
+            'By Category', 'By Depth', 'Dep Tree', 'Errors',
+        ]
+        assert wb.sheetnames == expected
+        wb.close()
+
+    def test_aggregated_overview_report_type(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Overview']
+
+        values = {}
+        for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+            if row[0]:
+                values[row[0]] = row[1]
+
+        assert values.get('Report Type') == 'aggregated'
+        wb.close()
+
+    def test_aggregated_overview_aggregation_time(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Overview']
+
+        values = {}
+        for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+            if row[0]:
+                values[row[0]] = row[1]
+
+        assert values.get('Scan Time') == '2026-03-01T00:00:00'
+        wb.close()
+
+    def test_aggregated_overview_source_reports(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Overview']
+
+        values = {}
+        for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+            if row[0]:
+                values[row[0]] = row[1]
+
+        assert values.get('Source Reports') == '2'
+        wb.close()
+
+    def test_aggregated_file_symbol_has_component(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['File-Symbol']
+
+        components = set()
+        for row in ws.iter_rows(min_row=2, min_col=1, max_col=1, values_only=True):
+            if row[0]:
+                components.add(row[0])
+
+        assert 'http_framework' in components
+        assert 'crypto_lib' in components
+        wb.close()
+
+    def test_aggregated_file_symbol_has_symbols(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['File-Symbol']
+
+        symbols = set()
+        for row in ws.iter_rows(min_row=2, min_col=3, max_col=3, values_only=True):
+            if row[0]:
+                symbols.add(row[0])
+
+        assert 'SSL_connect' in symbols
+        assert 'EVP_sha256' in symbols
+        assert 'BIO_new' in symbols
+        assert 'RAND_bytes' in symbols
+        wb.close()
+
+    def test_aggregated_category_sheet(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['By Category']
+
+        categories = set()
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0] and row[0] != 'TOTAL':
+                categories.add(row[0])
+
+        assert 'ssl_core' in categories
+        assert 'crypto_evp' in categories
+        assert 'crypto_bio' in categories
+        assert 'crypto_rand' in categories
+        wb.close()
+
+    def test_aggregated_files_sheet_with_components(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_aggregated_report())
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Files']
+
+        paths = []
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0]:
+                paths.append(row[0])
+
+        assert 'nginx' in paths
+        assert 'httpd' in paths
+        assert 'libcurl.so' in paths
+        wb.close()
+
+
+class TestExcelExporterEdgeCases:
+    """Test edge cases and unusual report data."""
+
+    def test_report_no_openssl_symbols_key(self, tmp_path):
+        report = _make_single_report()
+        del report['openssl_symbols']
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        assert wb.sheetnames == [
+            'Overview', 'Files', 'File-Symbol', 'Import Chains',
+            'By Category', 'By Depth', 'Dep Tree', 'Errors',
+        ]
+        ws = wb['By Category']
+        assert ws.cell(row=ws.max_row, column=1).value == 'TOTAL'
+        assert ws.cell(row=ws.max_row, column=2).value == 1
+        assert ws.max_row == 2
+        ws = wb['File-Symbol']
+        assert ws.max_row >= 2
+        wb.close()
+
+    def test_unicode_file_paths(self, tmp_path):
+        report = _make_single_report()
+        report['files_detail'][0]['path'] = '/usr/lib/\u5f00\u6e90/libtest.so'
+        report['openssl_symbols']['by_file'] = {
+            '/usr/lib/\u5f00\u6e90/libtest.so': {
+                'count': 1,
+                'symbols': ['SSL_connect'],
+            },
+        }
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Files']
+
+        paths = []
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0]:
+                paths.append(row[0])
+        assert '/usr/lib/\u5f00\u6e90/libtest.so' in paths
+        wb.close()
+
+    def test_report_only_errors(self, tmp_path):
+        report = _make_empty_report()
+        report['errors'] = [
+            {'severity': 'error', 'file': '/bad.so', 'error': 'corrupt ELF'},
+            {'severity': 'warning', 'file': '/warn.so', 'error': 'missing section'},
+        ]
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Errors']
+
+        errors = []
+        for row in ws.iter_rows(min_row=2, max_col=3, values_only=True):
+            if row[0] and row[0] != 'No errors':
+                errors.append(row[2])
+
+        assert 'corrupt ELF' in errors
+        assert 'missing section' in errors
+        wb.close()
+
+    def test_null_values_in_fields(self, tmp_path):
+        report = _make_single_report()
+        report['files_detail'][0]['arch'] = None
+        report['files_detail'][0]['type'] = None
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Files']
+        headers = [cell.value for cell in ws[1]]
+        arch_col = headers.index('Arch') + 1
+        type_col = headers.index('Type') + 1
+        assert ws.cell(row=2, column=arch_col).value is None
+        assert ws.cell(row=2, column=type_col).value is None
+        assert ws.cell(row=2, column=1).value == '/usr/bin/test_app'
+        wb.close()
+
+    def test_empty_by_category(self, tmp_path):
+        report = _make_single_report()
+        report['openssl_symbols']['by_category'] = {}
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['By Category']
+
+        last_row = ws.max_row
+        assert ws.cell(row=last_row, column=1).value == 'TOTAL'
+        wb.close()
+
+
+class TestExporterErrorHandling:
+    """Test error handling and malformed inputs."""
+
+    def test_malformed_json_raises(self, tmp_path):
+        path = os.path.join(str(tmp_path), 'bad.json')
+        with open(path, 'w') as f:
+            f.write('{not valid json}')
+
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        with pytest.raises(json.JSONDecodeError):
+            ExcelExporter().export(path, output_path)
+
+    def test_json_missing_meta_no_crash(self, tmp_path):
+        report = {'summary': {}, 'openssl_symbols': {}, 'files_detail': [], 'errors': []}
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        assert wb.sheetnames == [
+            'Overview', 'Files', 'File-Symbol', 'Import Chains',
+            'By Category', 'By Depth', 'Dep Tree', 'Errors',
+        ]
+        ws = wb['Overview']
+        values = {}
+        for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+            if row[0]:
+                values[row[0]] = row[1]
+        assert values.get('Report Type') == 'single'
+        assert values.get('Tool Version') is None
+        wb.close()
+
+    def test_report_with_empty_strings(self, tmp_path):
+        report = _make_single_report()
+        report['meta']['scan_root'] = ''
+        report['meta']['target_arch'] = ''
+        report['files_detail'][0]['path'] = ''
+
+        report_path = _write_json(tmp_path, 'report.json', report)
+        output_path = os.path.join(str(tmp_path), 'output.xlsx')
+        ExcelExporter().export(report_path, output_path)
+
+        from openpyxl import load_workbook
+        wb = load_workbook(output_path)
+        ws = wb['Overview']
+        values = {}
+        for row in ws.iter_rows(min_col=1, max_col=2, values_only=True):
+            if row[0]:
+                values[row[0]] = row[1]
+        assert 'Scan Root' in values
+        assert values['Scan Root'] is None
+        assert 'Target Architecture' in values
+        assert values['Target Architecture'] is None
+        ws = wb['Files']
+        assert ws.cell(row=2, column=1).value is None
+        wb.close()
+
+    def test_output_missing_parent_dirs_raises(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_single_report())
+        nested_dir = os.path.join(str(tmp_path), 'a', 'b', 'c')
+        output_path = os.path.join(nested_dir, 'output.xlsx')
+
+        with pytest.raises((FileNotFoundError, OSError)):
+            ExcelExporter().export(report_path, output_path)
+
+
+class TestHTMLExporterDetailed:
+    """Detailed tests for HTML output structure."""
+
+    def test_html_contains_tab_elements(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_single_report())
+        output_path = os.path.join(str(tmp_path), 'output.html')
+        HTMLExporter().export(report_path, output_path)
+
+        with open(output_path, 'r') as f:
+            content = f.read()
+
+        assert 'id="ranking"' in content
+        assert 'id="dependencies"' in content
+        assert 'id="categories"' in content
+        assert 'id="symbols"' in content
+
+    def test_html_contains_chart_canvases(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_single_report())
+        output_path = os.path.join(str(tmp_path), 'output.html')
+        HTMLExporter().export(report_path, output_path)
+
+        with open(output_path, 'r') as f:
+            content = f.read()
+
+        assert 'id="rankingChart"' in content
+        assert 'id="categoryChart"' in content
+
+    def test_html_no_external_resources(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_single_report())
+        output_path = os.path.join(str(tmp_path), 'output.html')
+        HTMLExporter().export(report_path, output_path)
+
+        with open(output_path, 'r') as f:
+            content = f.read()
+
+        assert '<script src=' not in content
+        assert '<link rel="stylesheet" href="http' not in content
+
+    def test_html_contains_export_buttons(self, tmp_path):
+        report_path = _write_json(tmp_path, 'report.json', _make_single_report())
+        output_path = os.path.join(str(tmp_path), 'output.html')
+        HTMLExporter().export(report_path, output_path)
+
+        with open(output_path, 'r') as f:
+            content = f.read()
+
+        assert 'Export Excel' in content
+        assert 'Load JSON' in content

@@ -793,7 +793,7 @@ def _delta_font(delta):
 
 
 def _write_header(ws, columns, header_font, header_fill):
-    """Write header row and set column widths."""
+    """Write header row and set column widths.  Returns column count."""
     from . import _vendor  # noqa: F401
     from openpyxl.utils import get_column_letter
 
@@ -802,6 +802,15 @@ def _write_header(ws, columns, header_font, header_fill):
         cell.font = header_font
         cell.fill = header_fill
         ws.column_dimensions[get_column_letter(col_idx)].width = width
+    return len(columns)
+
+
+def _set_auto_filter(ws, row, num_cols):
+    """Set auto_filter if sheet has data rows beyond header."""
+    if row > 2:
+        from . import _vendor  # noqa: F401
+        from openpyxl.utils import get_column_letter
+        ws.auto_filter.ref = f"A1:{get_column_letter(num_cols)}{row - 1}"
 
 
 class SourceDiffExcelExporter:
@@ -850,7 +859,7 @@ class SourceDiffExcelExporter:
     def _write_summary_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("Summary Delta")
         columns = [(30, "Metric"), (12, "Old"), (12, "New"), (12, "Delta")]
-        _write_header(ws, columns, header_font, header_fill)
+        num_cols = _write_header(ws, columns, header_font, header_fill)
 
         if len(result.projects) == 1:
             metrics = result.projects[0].metrics
@@ -894,7 +903,6 @@ class SourceDiffExcelExporter:
             delta_cell.font = _delta_font(m.delta)
             row += 1
 
-        row += 1
         cat_old: Dict[str, Set[str]] = {}
         cat_new: Dict[str, Set[str]] = {}
         for proj in result.projects:
@@ -905,6 +913,8 @@ class SourceDiffExcelExporter:
                     cat_new.setdefault(sd.category, set()).add(sd.symbol)
 
         all_cats = sorted(set(cat_old.keys()) | set(cat_new.keys()))
+        if all_cats:
+            row += 1
         for cat in all_cats:
             ov = len(cat_old.get(cat, set()))
             nv = len(cat_new.get(cat, set()))
@@ -916,13 +926,15 @@ class SourceDiffExcelExporter:
             delta_cell.font = _delta_font(delta)
             row += 1
 
+        _set_auto_filter(ws, row, num_cols)
+
     def _write_symbol_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("Symbol Delta")
         columns = [
             (35, "OpenSSL Symbol"), (20, "Category"), (12, "Status"),
             (12, "Old Calls"), (12, "New Calls"), (10, "Delta"),
         ]
-        _write_header(ws, columns, header_font, header_fill)
+        num_cols = _write_header(ws, columns, header_font, header_fill)
 
         all_symbols: Dict[str, SymbolDelta] = {}
         for proj in result.projects:
@@ -968,8 +980,7 @@ class SourceDiffExcelExporter:
             delta_cell.font = _delta_font(delta)
             row += 1
 
-        if row > 2:
-            ws.auto_filter.ref = f"A1:F{row - 1}"
+        _set_auto_filter(ws, row, num_cols)
 
     def _write_file_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("File Delta")
@@ -978,7 +989,7 @@ class SourceDiffExcelExporter:
             (12, "New Calls"), (10, "Delta"), (12, "Old Symbols"),
             (12, "New Symbols"), (40, "Added Symbols"), (40, "Removed Symbols"),
         ]
-        _write_header(ws, columns, header_font, header_fill)
+        num_cols = _write_header(ws, columns, header_font, header_fill)
 
         is_combo = len(result.projects) > 1
         all_files: List[Tuple[str, FileDelta]] = []
@@ -1014,6 +1025,8 @@ class SourceDiffExcelExporter:
             ws.cell(row=row, column=9, value=", ".join(fd.removed_symbols))
             row += 1
 
+        _set_auto_filter(ws, row, num_cols)
+
     def _write_callsite_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("Call Site Delta")
         is_combo = result.is_combo
@@ -1030,7 +1043,7 @@ class SourceDiffExcelExporter:
                 (35, "OpenSSL Symbol"), (20, "Category"), (10, "Old Count"),
                 (10, "New Count"), (15, "Old Lines"), (15, "New Lines"),
             ]
-        _write_header(ws, columns, header_font, header_fill)
+        num_cols = _write_header(ws, columns, header_font, header_fill)
 
         all_cs: List[Tuple[str, CallSiteDelta]] = []
         for proj in result.projects:
@@ -1077,6 +1090,8 @@ class SourceDiffExcelExporter:
                     value=", ".join(str(ln) for ln in csd.new_lines))
             row += 1
 
+        _set_auto_filter(ws, row, num_cols)
+
     def _write_project_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("Project Delta")
         columns = [
@@ -1084,7 +1099,7 @@ class SourceDiffExcelExporter:
             (12, "New Calls"), (10, "Delta"), (12, "Old Symbols"),
             (12, "New Symbols"), (40, "Added Symbols"), (40, "Removed Symbols"),
         ]
-        _write_header(ws, columns, header_font, header_fill)
+        num_cols = _write_header(ws, columns, header_font, header_fill)
 
         row = 2
         for proj in result.projects:
@@ -1125,3 +1140,5 @@ class SourceDiffExcelExporter:
             ws.cell(row=row, column=8, value=", ".join(added))
             ws.cell(row=row, column=9, value=", ".join(removed))
             row += 1
+
+        _set_auto_filter(ws, row, num_cols)

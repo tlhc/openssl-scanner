@@ -1458,3 +1458,135 @@ class TestJsonMetaScanTime:
         path = _write_json(tmp_path, "report.json", report)
         loaded = load_report(path)
         assert loaded["scan_time"] == "2026-03-01T00:00:00"
+
+
+class TestExcelExporterAutoFilter:
+
+    def _load_wb(self, path):
+        from openssl_scanner import _vendor  # noqa: F401
+        from openpyxl import load_workbook
+        return load_workbook(path)
+
+    def _make_single_diff(self):
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=10)
+        new_cs = _make_call_site(symbol="SSL_connect", caller="do_connect", line=20)
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs],
+             "summary": {"total_files_scanned": 5, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+            {"project": "proj", "call_sites": [old_cs, new_cs],
+             "summary": {"total_files_scanned": 7, "files_with_calls": 1,
+                         "total_call_sites": 2}},
+        )
+        return DiffResult(old_label="old.json", new_label="new.json", projects=[pd])
+
+    def _make_combo_diff(self):
+        cs_curl = _make_call_site(file_path="lib/tls.c", symbol="SSL_CTX_new", line=10)
+        cs_nginx = _make_call_site(file_path="src/ssl.c", symbol="SSL_connect",
+                                   caller="do_ssl", line=5)
+        pd1 = diff_single(
+            {"project": "curl", "call_sites": [cs_curl],
+             "summary": {"total_files_scanned": 10, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+            {"project": "curl", "call_sites": [cs_curl],
+             "summary": {"total_files_scanned": 10, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+            include_unchanged=True,
+        )
+        pd2 = diff_single(
+            {"project": "nginx", "call_sites": [],
+             "summary": {"total_files_scanned": 0, "files_with_calls": 0,
+                         "total_call_sites": 0}},
+            {"project": "nginx", "call_sites": [cs_nginx],
+             "summary": {"total_files_scanned": 5, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+        )
+        return DiffResult(old_label="old.json", new_label="new.json",
+                          projects=[pd1, pd2], is_combo=True)
+
+    def _assert_auto_filter(self, ws, expected_col, sheet_label=""):
+        """Assert auto_filter ref starts at A1, ends at expected column, row >= 2."""
+        import re
+        ref = ws.auto_filter.ref
+        assert ref is not None, f"{sheet_label} auto_filter.ref should not be None"
+        m = re.match(r'^A1:([A-Z]+)(\d+)$', ref)
+        assert m, f"{sheet_label} auto_filter.ref has unexpected format: {ref}"
+        assert m.group(1) == expected_col, (
+            f"{sheet_label} expected column {expected_col}, got {m.group(1)}")
+        assert int(m.group(2)) >= 2, (
+            f"{sheet_label} expected row >= 2, got {m.group(2)}")
+
+    def test_auto_filter_single_summary(self, tmp_path):
+        """Summary Delta sheet has auto_filter set."""
+        dr = self._make_single_diff()
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["Summary Delta"], "D", "Summary Delta")
+
+    def test_auto_filter_single_file(self, tmp_path):
+        """File Delta sheet has auto_filter with 9 columns (A-I)."""
+        dr = self._make_single_diff()
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["File Delta"], "I", "File Delta")
+
+    def test_auto_filter_single_callsite(self, tmp_path):
+        """Call Site Delta (single) has auto_filter with 9 columns (A-I)."""
+        dr = self._make_single_diff()
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["Call Site Delta"], "I", "Call Site Delta")
+
+    def test_auto_filter_single_symbol(self, tmp_path):
+        """Symbol Delta sheet has auto_filter with 6 columns (A-F)."""
+        dr = self._make_single_diff()
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["Symbol Delta"], "F", "Symbol Delta")
+
+    def test_auto_filter_combo_callsite(self, tmp_path):
+        """Call Site Delta (combo) has auto_filter with 10 columns (A-J)."""
+        dr = self._make_combo_diff()
+        out_path = os.path.join(str(tmp_path), "combo.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["Call Site Delta"], "J", "Call Site Delta")
+
+    def test_auto_filter_combo_project(self, tmp_path):
+        """Project Delta sheet has auto_filter with 9 columns (A-I)."""
+        dr = self._make_combo_diff()
+        out_path = os.path.join(str(tmp_path), "combo.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        self._assert_auto_filter(wb["Project Delta"], "I", "Project Delta")
+
+    def test_auto_filter_empty_diff(self, tmp_path):
+        """Empty diff (no data rows) should not set auto_filter."""
+        pd = diff_single(
+            {"project": "proj", "call_sites": [],
+             "summary": {"total_files_scanned": 0, "files_with_calls": 0,
+                         "total_call_sites": 0}},
+            {"project": "proj", "call_sites": [],
+             "summary": {"total_files_scanned": 0, "files_with_calls": 0,
+                         "total_call_sites": 0}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json", projects=[pd])
+        out_path = os.path.join(str(tmp_path), "empty.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+
+        wb = self._load_wb(out_path)
+        for sheet_name in ["Symbol Delta", "File Delta", "Call Site Delta"]:
+            ws = wb[sheet_name]
+            assert ws.auto_filter.ref is None, (
+                f"{sheet_name} should not have auto_filter when empty"
+            )

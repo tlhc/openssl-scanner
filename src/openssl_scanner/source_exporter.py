@@ -201,13 +201,10 @@ class SourceMergeExporter:
         Returns:
             Dict with per-project stats for console summary.
         """
-        project_data = []
-        for path in input_paths:
-            name, rows = self._read_xlsx(path)
-            project_data.append({
-                'name': name, 'files_scanned': '--',
-                'rows': rows, 'source': path,
-            })
+        input_paths = list(input_paths)
+        project_data = self._load_projects(input_paths, self._read_xlsx)
+        for pdata, path in zip(project_data, input_paths):
+            pdata['source'] = path
         return self._merge_to_workbook(project_data, output_path)
 
     def merge_from_json(self, input_paths: List[str],
@@ -217,13 +214,23 @@ class SourceMergeExporter:
         Unlike merge() which reads XLSX, this reads the faster JSON format
         and preserves total_files_scanned (not '--').
         """
+        project_data = self._load_projects(input_paths, self._read_json)
+        return self._merge_to_workbook(project_data, output_path)
+
+    def _load_projects(self, input_paths, reader):
+        """Load project data from input files using the given reader.
+
+        Args:
+            input_paths: List of file paths to read.
+            reader: Callable returning (name, files_scanned, rows).
+        """
         project_data = []
         for path in input_paths:
-            name, files_scanned, rows = self._read_json(path)
+            name, files_scanned, rows = reader(path)
             project_data.append({
                 'name': name, 'files_scanned': files_scanned, 'rows': rows,
             })
-        return self._merge_to_workbook(project_data, output_path)
+        return project_data
 
     def _merge_to_workbook(self, project_data: List[Dict],
                            output_path: str) -> Dict:
@@ -343,11 +350,11 @@ class SourceMergeExporter:
         logger.info("Merged XLSX report saved to: %s", output_path)
         return {'sheets': stats, 'total_symbols': len(all_symbols)}
 
-    def _read_xlsx(self, path: str) -> Tuple[str, List[List]]:
+    def _read_xlsx(self, path: str) -> Tuple[str, str, List[List]]:
         """Read call site rows from a source scan XLSX.
 
         Returns:
-            (project_name, list_of_row_values)
+            (project_name, files_scanned_placeholder, list_of_row_values)
         """
         from . import _vendor  # noqa: F401
         from openpyxl import load_workbook
@@ -363,7 +370,7 @@ class SourceMergeExporter:
         wb.close()
 
         name = os.path.splitext(os.path.basename(path))[0]
-        return name, rows
+        return name, '--', rows
 
     def _read_json(self, path: str) -> Tuple[str, int, List[List]]:
         """Read call site rows from a source scan JSON.
