@@ -43,6 +43,15 @@ class MetricDelta:
 
 
 @dataclass
+class ArgDelta:
+    status: DiffStatus
+    old_line: Optional[int] = None
+    new_line: Optional[int] = None
+    old_args: str = ""
+    new_args: str = ""
+
+
+@dataclass
 class CallSiteDelta:
     status: DiffStatus
     identity_key: Tuple[str, str, str]
@@ -51,6 +60,7 @@ class CallSiteDelta:
     old_lines: List[int] = field(default_factory=list)
     new_lines: List[int] = field(default_factory=list)
     category: str = ""
+    arg_deltas: List[ArgDelta] = field(default_factory=list)
 
 
 @dataclass
@@ -243,6 +253,152 @@ def _build_identity_map(
     return result
 
 
+def _match_call_sites_within_group(
+    old_entries: List[Dict[str, Any]],
+    new_entries: List[Dict[str, Any]],
+) -> List[ArgDelta]:
+    """Match individual call sites within an identity group using 4-phase greedy.
+
+    Phase 1: Exact match   (line == line AND args == args)  -> UNCHANGED
+    Phase 2: Same args     (args == args, closest line)     -> MOVED
+    Phase 3: Same line     (line == line AND args != args)  -> CHANGED
+    Phase 4: Nearest line  (remaining, closest |line| pair) -> CHANGED
+    Residual: unmatched old -> REMOVED, unmatched new -> ADDED
+
+    Phase 2 runs before Phase 3 to prefer content identity (same args = MOVED)
+    over location identity (same line = CHANGED). This correctly classifies
+    code shifts (all lines move by N, args unchanged) as MOVED rather than
+    CHANGED.
+    """
+    old_raw_lines = [e.get("line_number") for e in old_entries]
+    new_raw_lines = [e.get("line_number") for e in new_entries]
+    old_items = [
+        (ln or 0, e.get("call_args") or "")
+        for ln, e in zip(old_raw_lines, old_entries)
+    ]
+    new_items = [
+        (ln or 0, e.get("call_args") or "")
+        for ln, e in zip(new_raw_lines, new_entries)
+    ]
+
+    matched_old: set = set()
+    matched_new: set = set()
+    result: List[ArgDelta] = []
+
+    for oi, (ol, oa) in enumerate(old_items):
+        for ni, (nl, na) in enumerate(new_items):
+            if ni in matched_new:
+                continue
+            if ol == nl and oa == na:
+                matched_old.add(oi)
+                matched_new.add(ni)
+                result.append(ArgDelta(
+                    status=DiffStatus.UNCHANGED,
+                    old_line=old_raw_lines[oi], new_line=new_raw_lines[ni],
+                    old_args=oa, new_args=na,
+                ))
+                break
+
+    for oi, (ol, oa) in enumerate(old_items):
+        if oi in matched_old:
+            continue
+        best_ni = None
+        best_dist = None
+        for ni, (nl, na) in enumerate(new_items):
+            if ni in matched_new:
+                continue
+            if oa == na:
+                dist = abs(ol - nl)
+                if best_dist is None or dist < best_dist:
+                    best_ni = ni
+                    best_dist = dist
+        if best_ni is not None:
+            nl, na = new_items[best_ni]
+            matched_old.add(oi)
+            matched_new.add(best_ni)
+            result.append(ArgDelta(
+                status=DiffStatus.MOVED,
+                old_line=old_raw_lines[oi], new_line=new_raw_lines[best_ni],
+                old_args=oa, new_args=na,
+            ))
+
+    for oi, (ol, oa) in enumerate(old_items):
+        if oi in matched_old:
+            continue
+        for ni, (nl, na) in enumerate(new_items):
+            if ni in matched_new:
+                continue
+            if ol == nl:
+                matched_old.add(oi)
+                matched_new.add(ni)
+                result.append(ArgDelta(
+                    status=DiffStatus.CHANGED,
+                    old_line=old_raw_lines[oi], new_line=new_raw_lines[ni],
+                    old_args=oa, new_args=na,
+                ))
+                break
+
+    for oi, (ol, oa) in enumerate(old_items):
+        if oi in matched_old:
+            continue
+        best_ni = None
+        best_dist = None
+        for ni, (nl, na) in enumerate(new_items):
+            if ni in matched_new:
+                continue
+            dist = abs(ol - nl)
+            if best_dist is None or dist < best_dist:
+                best_ni = ni
+                best_dist = dist
+        if best_ni is not None:
+            nl, na = new_items[best_ni]
+            matched_old.add(oi)
+            matched_new.add(best_ni)
+            result.append(ArgDelta(
+                status=DiffStatus.CHANGED,
+                old_line=old_raw_lines[oi], new_line=new_raw_lines[best_ni],
+                old_args=oa, new_args=na,
+            ))
+
+    for oi, (ol, oa) in enumerate(old_items):
+        if oi in matched_old:
+            continue
+        result.append(ArgDelta(
+            status=DiffStatus.REMOVED,
+            old_line=old_raw_lines[oi], old_args=oa,
+        ))
+
+    for ni, (nl, na) in enumerate(new_items):
+        if ni in matched_new:
+            continue
+        result.append(ArgDelta(
+            status=DiffStatus.ADDED,
+            new_line=new_raw_lines[ni], new_args=na,
+        ))
+
+    result.sort(key=lambda ad: (
+        ad.new_line if ad.new_line is not None else (ad.old_line or 0),
+        ad.old_line if ad.old_line is not None else 0,
+    ))
+    return result
+
+
+def _derive_group_status(arg_deltas: List[ArgDelta]) -> DiffStatus:
+    """Derive group-level status from individual arg deltas."""
+    if not arg_deltas:
+        return DiffStatus.UNCHANGED
+    statuses = {ad.status for ad in arg_deltas}
+    if statuses == {DiffStatus.UNCHANGED}:
+        return DiffStatus.UNCHANGED
+    if statuses <= {DiffStatus.UNCHANGED, DiffStatus.MOVED}:
+        return DiffStatus.MOVED
+    if DiffStatus.ADDED in statuses and len(statuses) == 1:
+        return DiffStatus.ADDED
+    if DiffStatus.REMOVED in statuses and len(statuses) == 1:
+        return DiffStatus.REMOVED
+    return DiffStatus.CHANGED
+
+
 def _compute_call_site_delta(
     old_map: Dict[IdentityKey, List[Dict[str, Any]]],
     new_map: Dict[IdentityKey, List[Dict[str, Any]]],
@@ -257,24 +413,16 @@ def _compute_call_site_delta(
         new_entries = new_map.get(key, [])
         old_count = len(old_entries)
         new_count = len(new_entries)
-        old_lines = sorted(e.get("line_number", 0) for e in old_entries)
-        new_lines = sorted(e.get("line_number", 0) for e in new_entries)
+        old_lines = sorted(e.get("line_number") or 0 for e in old_entries)
+        new_lines = sorted(e.get("line_number") or 0 for e in new_entries)
         category = ""
         if new_entries:
             category = new_entries[0].get("category", "")
         elif old_entries:
             category = old_entries[0].get("category", "")
 
-        if old_count == 0:
-            status = DiffStatus.ADDED
-        elif new_count == 0:
-            status = DiffStatus.REMOVED
-        elif old_count == new_count and old_lines == new_lines:
-            status = DiffStatus.UNCHANGED
-        elif old_count == new_count and old_lines != new_lines:
-            status = DiffStatus.MOVED
-        else:
-            status = DiffStatus.CHANGED
+        arg_deltas = _match_call_sites_within_group(old_entries, new_entries)
+        status = _derive_group_status(arg_deltas)
 
         if status == DiffStatus.UNCHANGED and not include_unchanged:
             continue
@@ -287,6 +435,7 @@ def _compute_call_site_delta(
             old_lines=old_lines,
             new_lines=new_lines,
             category=category,
+            arg_deltas=arg_deltas,
         ))
 
     deltas.sort(key=lambda d: (STATUS_SORT_ORDER.get(d.status, 99), d.identity_key))
@@ -614,8 +763,9 @@ class SourceDiffJsonExporter:
             for fd in pd.file_delta
         ]
 
-        call_site_delta = [
-            {
+        call_site_delta = []
+        for csd in pd.call_site_delta:
+            entry = {
                 "status": csd.status.value,
                 "file_path": csd.identity_key[0],
                 "caller_function": csd.identity_key[1],
@@ -626,8 +776,18 @@ class SourceDiffJsonExporter:
                 "old_lines": csd.old_lines,
                 "new_lines": csd.new_lines,
             }
-            for csd in pd.call_site_delta
-        ]
+            if csd.arg_deltas:
+                entry["arg_deltas"] = [
+                    {
+                        "status": ad.status.value,
+                        "old_line": ad.old_line,
+                        "new_line": ad.new_line,
+                        "old_args": ad.old_args,
+                        "new_args": ad.new_args,
+                    }
+                    for ad in csd.arg_deltas
+                ]
+            call_site_delta.append(entry)
 
         return {
             "summary_delta": summary_delta,
@@ -736,6 +896,21 @@ def format_console(result: DiffResult) -> str:
                     f"  {fd.old_call_count} -> {fd.new_call_count} calls"
                     f" ({sign}{delta})"
                 )
+
+        args_changed = []
+        for csd in pd.call_site_delta:
+            for ad in csd.arg_deltas:
+                if ad.status == DiffStatus.CHANGED and ad.old_args != ad.new_args:
+                    args_changed.append((csd.identity_key, ad))
+        if args_changed:
+            lines.append(f"  Args Changed ({len(args_changed)}):")
+            for key, ad in args_changed:
+                file_path, caller, symbol = key
+                line_label = f"L{ad.old_line}" if ad.old_line is not None else "L?"
+                lines.append(
+                    f"    {file_path} :: {caller} :: {symbol}  {line_label}")
+                lines.append(f"      old: {ad.old_args}")
+                lines.append(f"      new: {ad.new_args}")
 
     return "\n".join(lines)
 
@@ -1034,14 +1209,14 @@ class SourceDiffExcelExporter:
             columns = [
                 (20, "Project"), (12, "Status"), (50, "File Path"),
                 (30, "Caller Function"), (35, "OpenSSL Symbol"),
-                (20, "Category"), (10, "Old Count"), (10, "New Count"),
-                (15, "Old Lines"), (15, "New Lines"),
+                (20, "Category"), (10, "Old Line"), (10, "New Line"),
+                (30, "Old Args"), (30, "New Args"),
             ]
         else:
             columns = [
                 (12, "Status"), (50, "File Path"), (30, "Caller Function"),
-                (35, "OpenSSL Symbol"), (20, "Category"), (10, "Old Count"),
-                (10, "New Count"), (15, "Old Lines"), (15, "New Lines"),
+                (35, "OpenSSL Symbol"), (20, "Category"), (10, "Old Line"),
+                (10, "New Line"), (30, "Old Args"), (30, "New Args"),
             ]
         num_cols = _write_header(ws, columns, header_font, header_fill)
 
@@ -1062,33 +1237,36 @@ class SourceDiffExcelExporter:
         row = 2
         for proj_name, csd in all_cs:
             file_path, caller, symbol = csd.identity_key
-            col = 1
-            if is_combo:
-                ws.cell(row=row, column=col, value=_safe_cell(proj_name))
+            if not csd.arg_deltas:
+                continue
+            for ad in csd.arg_deltas:
+                col = 1
+                if is_combo:
+                    ws.cell(row=row, column=col, value=_safe_cell(proj_name))
+                    col += 1
+                status_cell = ws.cell(row=row, column=col, value=ad.status.value)
+                fill = _get_status_fill(ad.status.value)
+                if fill:
+                    status_cell.fill = fill
                 col += 1
-            status_cell = ws.cell(row=row, column=col, value=csd.status.value)
-            fill = _get_status_fill(csd.status.value)
-            if fill:
-                status_cell.fill = fill
-            col += 1
-            ws.cell(row=row, column=col, value=_safe_cell(file_path))
-            col += 1
-            ws.cell(row=row, column=col, value=_safe_cell(caller))
-            col += 1
-            ws.cell(row=row, column=col, value=symbol)
-            col += 1
-            ws.cell(row=row, column=col, value=csd.category)
-            col += 1
-            ws.cell(row=row, column=col, value=csd.old_count)
-            col += 1
-            ws.cell(row=row, column=col, value=csd.new_count)
-            col += 1
-            ws.cell(row=row, column=col,
-                    value=", ".join(str(ln) for ln in csd.old_lines))
-            col += 1
-            ws.cell(row=row, column=col,
-                    value=", ".join(str(ln) for ln in csd.new_lines))
-            row += 1
+                ws.cell(row=row, column=col, value=_safe_cell(file_path))
+                col += 1
+                ws.cell(row=row, column=col, value=_safe_cell(caller))
+                col += 1
+                ws.cell(row=row, column=col, value=symbol)
+                col += 1
+                ws.cell(row=row, column=col, value=csd.category)
+                col += 1
+                ws.cell(row=row, column=col,
+                        value=ad.old_line if ad.old_line is not None else "")
+                col += 1
+                ws.cell(row=row, column=col,
+                        value=ad.new_line if ad.new_line is not None else "")
+                col += 1
+                ws.cell(row=row, column=col, value=_safe_cell(ad.old_args))
+                col += 1
+                ws.cell(row=row, column=col, value=_safe_cell(ad.new_args))
+                row += 1
 
         _set_auto_filter(ws, row, num_cols)
 

@@ -7,10 +7,11 @@ import tempfile
 import pytest
 
 from openssl_scanner.source_diff import (
-    DiffStatus, MetricDelta, CallSiteDelta, SymbolDelta,
+    DiffStatus, MetricDelta, ArgDelta, CallSiteDelta, SymbolDelta,
     FileDelta, ProjectDelta, DiffResult, load_report, diff_single,
     diff_combo, SourceDiffJsonExporter, SourceDiffExcelExporter,
     format_console, DIFF_COLORS,
+    _match_call_sites_within_group, _derive_group_status,
 )
 
 
@@ -959,7 +960,7 @@ class TestExcelExporter:
         ws = wb["Call Site Delta"]
         header = [ws.cell(row=1, column=c).value for c in range(1, 10)]
         assert header == ["Status", "File Path", "Caller Function", "OpenSSL Symbol",
-                          "Category", "Old Count", "New Count", "Old Lines", "New Lines"]
+                          "Category", "Old Line", "New Line", "Old Args", "New Args"]
 
         statuses = []
         for row in range(2, ws.max_row + 1):
@@ -1590,3 +1591,877 @@ class TestExcelExporterAutoFilter:
             assert ws.auto_filter.ref is None, (
                 f"{sheet_name} should not have auto_filter when empty"
             )
+
+
+class TestArgDelta:
+
+    def _make_entry(self, line=10, args="(NULL)"):
+        return {"line_number": line, "call_args": args}
+
+    def test_exact_match_unchanged(self):
+        old = [self._make_entry(10, "(NULL)")]
+        new = [self._make_entry(10, "(NULL)")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.UNCHANGED
+        assert result[0].old_line == 10
+        assert result[0].new_line == 10
+        assert result[0].old_args == "(NULL)"
+        assert result[0].new_args == "(NULL)"
+
+    def test_same_line_different_args(self):
+        old = [self._make_entry(42, "(TLSv1_2_method())")]
+        new = [self._make_entry(42, "(TLS_method())")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.CHANGED
+        assert result[0].old_args == "(TLSv1_2_method())"
+        assert result[0].new_args == "(TLS_method())"
+
+    def test_same_args_different_line(self):
+        old = [self._make_entry(10, "(NULL)")]
+        new = [self._make_entry(20, "(NULL)")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.MOVED
+        assert result[0].old_line == 10
+        assert result[0].new_line == 20
+
+    def test_nearest_line_fallback(self):
+        old = [self._make_entry(10, "(EVP_sha1())")]
+        new = [self._make_entry(15, "(EVP_sha256())")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.CHANGED
+        assert result[0].old_line == 10
+        assert result[0].new_line == 15
+        assert result[0].old_args == "(EVP_sha1())"
+        assert result[0].new_args == "(EVP_sha256())"
+
+    def test_added_call_within_group(self):
+        old = []
+        new = [self._make_entry(10, "(NULL)")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.ADDED
+        assert result[0].new_line == 10
+        assert result[0].old_line is None
+
+    def test_removed_call_within_group(self):
+        old = [self._make_entry(10, "(NULL)")]
+        new = []
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.REMOVED
+        assert result[0].old_line == 10
+        assert result[0].new_line is None
+
+    def test_mixed_group_matching(self):
+        old = [
+            self._make_entry(10, "(NULL)"),
+            self._make_entry(20, "(EVP_sha1())"),
+            self._make_entry(30, "(ctx)"),
+        ]
+        new = [
+            self._make_entry(10, "(NULL)"),
+            self._make_entry(20, "(EVP_sha256())"),
+            self._make_entry(40, "(ctx)"),
+            self._make_entry(50, "(new_arg)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 4
+        statuses = {ad.status for ad in result}
+        assert DiffStatus.UNCHANGED in statuses
+        assert DiffStatus.CHANGED in statuses
+        assert DiffStatus.MOVED in statuses
+        assert DiffStatus.ADDED in statuses
+
+    def test_group_status_all_unchanged(self):
+        deltas = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10),
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=20, new_line=20),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.UNCHANGED
+
+    def test_group_status_moved_only(self):
+        deltas = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10),
+            ArgDelta(status=DiffStatus.MOVED, old_line=20, new_line=30),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.MOVED
+
+    def test_group_status_changed_args(self):
+        deltas = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10),
+            ArgDelta(status=DiffStatus.CHANGED, old_line=20, new_line=20,
+                     old_args="(EVP_sha1())", new_args="(EVP_sha256())"),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.CHANGED
+
+    def test_group_status_changed_count(self):
+        deltas = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10),
+            ArgDelta(status=DiffStatus.ADDED, new_line=20),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.CHANGED
+
+    def test_json_has_arg_deltas(self, tmp_path):
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        out_path = os.path.join(str(tmp_path), "diff.json")
+        SourceDiffJsonExporter().export(dr, out_path)
+        with open(out_path) as f:
+            data = json.load(f)
+        csd_list = data["call_site_delta"]
+        assert len(csd_list) == 1
+        assert "arg_deltas" in csd_list[0]
+        ads = csd_list[0]["arg_deltas"]
+        assert len(ads) == 1
+        assert ads[0]["status"] == "changed"
+        assert ads[0]["old_args"] == "(TLSv1_2_method())"
+        assert ads[0]["new_args"] == "(TLS_method())"
+
+    def test_json_backward_compat(self, tmp_path):
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=10,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        out_path = os.path.join(str(tmp_path), "diff.json")
+        SourceDiffJsonExporter().export(dr, out_path)
+        with open(out_path) as f:
+            data = json.load(f)
+        csd = data["call_site_delta"][0]
+        assert "old_count" in csd
+        assert "new_count" in csd
+        assert "old_lines" in csd
+        assert "new_lines" in csd
+
+    def test_xlsx_new_column_headers(self, tmp_path):
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+        from openssl_scanner import _vendor  # noqa: F401
+        from openpyxl import load_workbook
+        wb = load_workbook(out_path)
+        ws = wb["Call Site Delta"]
+        header = [ws.cell(row=1, column=c).value for c in range(1, 10)]
+        assert header == ["Status", "File Path", "Caller Function",
+                          "OpenSSL Symbol", "Category", "Old Line",
+                          "New Line", "Old Args", "New Args"]
+
+    def test_xlsx_per_call_site_rows(self, tmp_path):
+        old_cs1 = _make_call_site(symbol="SSL_CTX_new", line=10, args="(NULL)")
+        old_cs2 = _make_call_site(symbol="SSL_CTX_new", line=20, args="(NULL)")
+        new_cs1 = _make_call_site(symbol="SSL_CTX_new", line=10, args="(NULL)")
+        new_cs2 = _make_call_site(symbol="SSL_CTX_new", line=20,
+                                  args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs1, old_cs2], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs1, new_cs2], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        out_path = os.path.join(str(tmp_path), "diff.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+        from openssl_scanner import _vendor  # noqa: F401
+        from openpyxl import load_workbook
+        wb = load_workbook(out_path)
+        ws = wb["Call Site Delta"]
+        data_rows = 0
+        for row in range(2, ws.max_row + 1):
+            if ws.cell(row=row, column=1).value:
+                data_rows += 1
+        assert data_rows == 2
+
+    def test_console_shows_args_changed(self):
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        text = format_console(dr)
+        assert "Args Changed" in text
+        assert "(TLSv1_2_method())" in text
+        assert "(TLS_method())" in text
+
+    def test_empty_args_handled(self):
+        old = [{"line_number": 10}]
+        new = [{"line_number": 10}]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.UNCHANGED
+        assert result[0].old_args == ""
+        assert result[0].new_args == ""
+
+    def test_both_empty_lists(self):
+        result = _match_call_sites_within_group([], [])
+        assert len(result) == 0
+        assert _derive_group_status(result) == DiffStatus.UNCHANGED
+
+    def test_duplicate_same_line_same_args(self):
+        old = [self._make_entry(10, "(NULL)"), self._make_entry(10, "(NULL)")]
+        new = [self._make_entry(10, "(NULL)"), self._make_entry(10, "(NULL)")]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        assert all(ad.status == DiffStatus.UNCHANGED for ad in result)
+        assert _derive_group_status(result) == DiffStatus.UNCHANGED
+
+    def test_five_old_zero_new(self):
+        old = [self._make_entry(i * 10, f"(arg{i})") for i in range(5)]
+        new = []
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 5
+        assert all(ad.status == DiffStatus.REMOVED for ad in result)
+        assert _derive_group_status(result) == DiffStatus.REMOVED
+
+    def test_zero_old_five_new(self):
+        old = []
+        new = [self._make_entry(i * 10, f"(arg{i})") for i in range(5)]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 5
+        assert all(ad.status == DiffStatus.ADDED for ad in result)
+        assert _derive_group_status(result) == DiffStatus.ADDED
+
+    def test_tls_upgrade_real_scenario(self):
+        """Real-world: TLS version upgrade changes method argument."""
+        old = [
+            self._make_entry(42, "(TLSv1_2_client_method())"),
+            self._make_entry(85, "(NULL)"),
+        ]
+        new = [
+            self._make_entry(42, "(TLS_client_method())"),
+            self._make_entry(85, "(NULL)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        unchanged = [ad for ad in result if ad.status == DiffStatus.UNCHANGED]
+        changed = [ad for ad in result if ad.status == DiffStatus.CHANGED]
+        assert len(unchanged) == 1
+        assert unchanged[0].old_line == 85
+        assert len(changed) == 1
+        assert changed[0].old_line == 42
+        assert changed[0].old_args == "(TLSv1_2_client_method())"
+        assert changed[0].new_args == "(TLS_client_method())"
+        assert _derive_group_status(result) == DiffStatus.CHANGED
+
+    def test_hash_algorithm_migration_scenario(self):
+        """Real-world: SHA-1 to SHA-256 migration across multiple call sites."""
+        old = [
+            self._make_entry(10, "(EVP_sha1())"),
+            self._make_entry(20, "(EVP_sha1())"),
+            self._make_entry(30, "(EVP_sha256())"),
+        ]
+        new = [
+            self._make_entry(10, "(EVP_sha256())"),
+            self._make_entry(20, "(EVP_sha256())"),
+            self._make_entry(30, "(EVP_sha256())"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 3
+        changed = [ad for ad in result if ad.status == DiffStatus.CHANGED]
+        unchanged = [ad for ad in result if ad.status == DiffStatus.UNCHANGED]
+        assert len(changed) == 2
+        assert len(unchanged) == 1
+        assert unchanged[0].old_line == 30
+        for ad in changed:
+            assert ad.old_args == "(EVP_sha1())"
+            assert ad.new_args == "(EVP_sha256())"
+
+    def test_cipher_suite_string_change(self):
+        """Real-world: cipher suite string update."""
+        old = [self._make_entry(100,
+               '("ECDHE-RSA-AES128-GCM-SHA256:AES256-SHA")')]
+        new = [self._make_entry(100,
+               '("TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256")')]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.CHANGED
+        assert "ECDHE" in result[0].old_args
+        assert "TLS_AES" in result[0].new_args
+
+    def test_code_refactor_moves_call_with_same_args(self):
+        """Real-world: function body reorganized, calls moved to new lines."""
+        old = [
+            self._make_entry(10, "(ctx, EVP_sha256(), NULL)"),
+            self._make_entry(25, "(ctx, EVP_sha256(), NULL)"),
+        ]
+        new = [
+            self._make_entry(50, "(ctx, EVP_sha256(), NULL)"),
+            self._make_entry(75, "(ctx, EVP_sha256(), NULL)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        assert all(ad.status == DiffStatus.MOVED for ad in result)
+        assert _derive_group_status(result) == DiffStatus.MOVED
+
+    def test_e2e_diff_single_with_args_change(self, tmp_path):
+        """End-to-end: diff_single produces correct arg_deltas in CallSiteDelta."""
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        csd = pd.call_site_delta[0]
+        assert csd.status == DiffStatus.CHANGED
+        assert len(csd.arg_deltas) == 1
+        assert csd.arg_deltas[0].status == DiffStatus.CHANGED
+        assert csd.arg_deltas[0].old_args == "(TLSv1_2_method())"
+        assert csd.arg_deltas[0].new_args == "(TLS_method())"
+
+    def test_e2e_unchanged_excluded_from_diff_single(self):
+        """End-to-end: identical call sites excluded from diff_single by default."""
+        cs = _make_call_site(symbol="SSL_CTX_new", line=10, args="(NULL)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [cs], "summary": {}},
+            {"project": "proj", "call_sites": [cs], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 0
+
+    def test_e2e_unchanged_included_when_requested(self):
+        """End-to-end: identical call sites included with include_unchanged=True."""
+        cs = _make_call_site(symbol="SSL_CTX_new", line=10, args="(NULL)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [cs], "summary": {}},
+            {"project": "proj", "call_sites": [cs], "summary": {}},
+            include_unchanged=True,
+        )
+        assert len(pd.call_site_delta) == 1
+        csd = pd.call_site_delta[0]
+        assert csd.status == DiffStatus.UNCHANGED
+        assert len(csd.arg_deltas) == 1
+        assert csd.arg_deltas[0].status == DiffStatus.UNCHANGED
+
+    def test_combo_xlsx_with_arg_deltas(self, tmp_path):
+        """Combo mode XLSX produces correct per-call-site rows with Project column."""
+        old_cs = _make_call_site(file_path="lib/tls.c", symbol="SSL_CTX_new",
+                                 line=10, args="(TLSv1_2_method())")
+        new_cs = _make_call_site(file_path="lib/tls.c", symbol="SSL_CTX_new",
+                                 line=10, args="(TLS_method())")
+        pd = diff_single(
+            {"project": "curl", "call_sites": [old_cs],
+             "summary": {"total_files_scanned": 5, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+            {"project": "curl", "call_sites": [new_cs],
+             "summary": {"total_files_scanned": 5, "files_with_calls": 1,
+                         "total_call_sites": 1}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd], is_combo=True)
+        out_path = os.path.join(str(tmp_path), "combo.xlsx")
+        SourceDiffExcelExporter().export(dr, out_path)
+        from openssl_scanner import _vendor  # noqa: F401
+        from openpyxl import load_workbook
+        wb = load_workbook(out_path)
+        ws = wb["Call Site Delta"]
+        header = [ws.cell(row=1, column=c).value for c in range(1, 11)]
+        assert header == ["Project", "Status", "File Path", "Caller Function",
+                          "OpenSSL Symbol", "Category", "Old Line", "New Line",
+                          "Old Args", "New Args"]
+        assert ws.cell(row=2, column=1).value == "curl"
+        assert ws.cell(row=2, column=2).value == "changed"
+        assert ws.cell(row=2, column=9).value == "(TLSv1_2_method())"
+        assert ws.cell(row=2, column=10).value == "(TLS_method())"
+
+    def test_console_no_args_changed_for_unchanged(self):
+        """Console output does not show Args Changed when no args actually differ."""
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=10, args="(NULL)")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=20, args="(NULL)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd])
+        text = format_console(dr)
+        assert "Args Changed" not in text
+
+    def test_json_combo_has_arg_deltas(self, tmp_path):
+        """Combo diff JSON includes arg_deltas in each project's call_site_delta."""
+        old_cs = _make_call_site(file_path="lib/tls.c", symbol="SSL_CTX_new",
+                                 line=42, args="(TLSv1_2_method())")
+        new_cs = _make_call_site(file_path="lib/tls.c", symbol="SSL_CTX_new",
+                                 line=42, args="(TLS_method())")
+        pd = diff_single(
+            {"project": "curl", "call_sites": [old_cs], "summary": {}},
+            {"project": "curl", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(old_label="old.json", new_label="new.json",
+                        projects=[pd], is_combo=True)
+        out_path = os.path.join(str(tmp_path), "combo.json")
+        SourceDiffJsonExporter().export(dr, out_path)
+        with open(out_path) as f:
+            data = json.load(f)
+        proj = data["projects"][0]
+        assert "arg_deltas" in proj["call_site_delta"][0]
+        ad = proj["call_site_delta"][0]["arg_deltas"][0]
+        assert ad["status"] == "changed"
+        assert ad["old_args"] == "(TLSv1_2_method())"
+
+    def test_same_line_two_different_calls(self):
+        """Multiple calls on same line with different args (macro expansion).
+
+        old: (10,"sha1"), (10,"sha256")
+        new: (10,"sha256"), (10,"sha512")
+        Phase 1: old[1] (10,"sha256") matches new[0] (10,"sha256") -> UNCHANGED
+        Phase 2: old[0] (10,"sha1") matches new[1] (10,"sha512") same line -> CHANGED
+        """
+        old = [
+            self._make_entry(10, "(ctx, EVP_sha1())"),
+            self._make_entry(10, "(ctx, EVP_sha256())"),
+        ]
+        new = [
+            self._make_entry(10, "(ctx, EVP_sha256())"),
+            self._make_entry(10, "(ctx, EVP_sha512())"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        unchanged = [ad for ad in result if ad.status == DiffStatus.UNCHANGED]
+        changed = [ad for ad in result if ad.status == DiffStatus.CHANGED]
+        assert len(unchanged) == 1
+        assert unchanged[0].old_args == "(ctx, EVP_sha256())"
+        assert len(changed) == 1
+        assert changed[0].old_args == "(ctx, EVP_sha1())"
+        assert changed[0].new_args == "(ctx, EVP_sha512())"
+
+    def test_result_sorted_by_line(self):
+        """ArgDelta results are sorted by line number for deterministic output."""
+        old = [
+            self._make_entry(50, "(a)"),
+            self._make_entry(10, "(b)"),
+            self._make_entry(30, "(c)"),
+        ]
+        new = [
+            self._make_entry(10, "(b)"),
+            self._make_entry(30, "(c)"),
+            self._make_entry(50, "(d)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        lines = []
+        for ad in result:
+            line = ad.new_line if ad.new_line is not None else ad.old_line
+            lines.append(line)
+        assert lines == sorted(lines), f"Results not sorted by line: {lines}"
+
+    def test_phase4_different_line_different_args(self):
+        """Phase 4: both line and args differ, nearest line pairing."""
+        old = [
+            self._make_entry(10, "(EVP_sha1())"),
+            self._make_entry(100, "(EVP_md5())"),
+        ]
+        new = [
+            self._make_entry(12, "(EVP_sha256())"),
+            self._make_entry(98, "(EVP_sha3_256())"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        assert all(ad.status == DiffStatus.CHANGED for ad in result)
+        matched_pairs = {(ad.old_line, ad.new_line) for ad in result}
+        assert (10, 12) in matched_pairs
+        assert (100, 98) in matched_pairs
+
+    def test_none_line_number_handled(self):
+        """line_number=None preserved in output, normalized to 0 only for matching."""
+        old = [{"line_number": None, "call_args": "(NULL)"}]
+        new = [{"line_number": 10, "call_args": "(NULL)"}]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.MOVED
+        assert result[0].old_line is None
+        assert result[0].new_line == 10
+
+    def test_none_call_args_handled(self):
+        """call_args=None should not crash the matcher."""
+        old = [{"line_number": 10, "call_args": None}]
+        new = [{"line_number": 10, "call_args": None}]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.UNCHANGED
+        assert result[0].old_args == ""
+
+    def test_duplicate_count_mismatch_same_line(self):
+        """2 identical calls on old side, 1 on new side: 1 UNCHANGED + 1 REMOVED."""
+        old = [
+            self._make_entry(10, "(NULL)"),
+            self._make_entry(10, "(NULL)"),
+        ]
+        new = [
+            self._make_entry(10, "(NULL)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        statuses = [ad.status for ad in result]
+        assert statuses.count(DiffStatus.UNCHANGED) == 1
+        assert statuses.count(DiffStatus.REMOVED) == 1
+
+    def test_duplicate_count_mismatch_reverse(self):
+        """1 call on old side, 2 identical calls on new side: 1 UNCHANGED + 1 ADDED."""
+        old = [
+            self._make_entry(10, "(NULL)"),
+        ]
+        new = [
+            self._make_entry(10, "(NULL)"),
+            self._make_entry(10, "(NULL)"),
+        ]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 2
+        statuses = [ad.status for ad in result]
+        assert statuses.count(DiffStatus.UNCHANGED) == 1
+        assert statuses.count(DiffStatus.ADDED) == 1
+
+    def test_derive_group_status_moved_and_added(self):
+        """MOVED + ADDED -> CHANGED group status."""
+        deltas = [
+            ArgDelta(status=DiffStatus.MOVED, old_line=10, new_line=20),
+            ArgDelta(status=DiffStatus.ADDED, new_line=30),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.CHANGED
+
+    def test_derive_group_status_moved_and_removed(self):
+        """MOVED + REMOVED -> CHANGED group status."""
+        deltas = [
+            ArgDelta(status=DiffStatus.MOVED, old_line=10, new_line=20),
+            ArgDelta(status=DiffStatus.REMOVED, old_line=30),
+        ]
+        assert _derive_group_status(deltas) == DiffStatus.CHANGED
+
+    def test_semantic_improvement_same_line_diff_args_is_changed(self):
+        """Key semantic improvement: same line + different args = CHANGED (not UNCHANGED).
+
+        Previously, status was derived only from count/lines:
+            same count + same lines => UNCHANGED (even if args differed!)
+        Now status is derived from per-call-site matching:
+            same line + different args => Phase 2 CHANGED
+        """
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLSv1_2_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=42,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        assert pd.call_site_delta[0].status == DiffStatus.CHANGED
+
+    def test_semantic_diff_line_moved_args_changed_is_changed(self):
+        """Different line + different args = CHANGED (not MOVED).
+
+        Previously: same count + different lines => MOVED (ignoring args).
+        Now: different line + different args => Phase 4 CHANGED (correct).
+        """
+        old_cs = _make_call_site(symbol="EVP_DigestInit", line=10,
+                                 args="(ctx, EVP_sha1())")
+        new_cs = _make_call_site(symbol="EVP_DigestInit", line=20,
+                                 args="(ctx, EVP_sha256())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        assert pd.call_site_delta[0].status == DiffStatus.CHANGED
+
+    def test_semantic_diff_line_moved_args_same_is_moved(self):
+        """Different line + same args = MOVED (preserved from old behavior)."""
+        old_cs = _make_call_site(symbol="SSL_CTX_new", line=10,
+                                 args="(TLS_method())")
+        new_cs = _make_call_site(symbol="SSL_CTX_new", line=50,
+                                 args="(TLS_method())")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        assert pd.call_site_delta[0].status == DiffStatus.MOVED
+
+    def test_code_shift_all_lines_move_by_n(self):
+        """When all lines shift by N but args stay the same, all should be MOVED.
+
+        Scenario: a header include is added, shifting all lines down by 5.
+        Before the Phase 2/3 swap, this incorrectly produced CHANGED because
+        Phase 2 (same-line) matched cross-pairs before Phase 3 (same-args).
+        """
+        old_entries = [
+            {"line_number": 10, "call_args": "(TLS_method())"},
+            {"line_number": 20, "call_args": "(ctx)"},
+            {"line_number": 30, "call_args": "(ctx, cert_file, SSL_FILETYPE_PEM)"},
+        ]
+        new_entries = [
+            {"line_number": 15, "call_args": "(TLS_method())"},
+            {"line_number": 25, "call_args": "(ctx)"},
+            {"line_number": 35, "call_args": "(ctx, cert_file, SSL_FILETYPE_PEM)"},
+        ]
+        result = _match_call_sites_within_group(old_entries, new_entries)
+        assert len(result) == 3
+        for ad in result:
+            assert ad.status == DiffStatus.MOVED, (
+                f"Expected MOVED for line {ad.old_line}->{ad.new_line}, "
+                f"got {ad.status.value}"
+            )
+        assert result[0].old_line == 10 and result[0].new_line == 15
+        assert result[1].old_line == 20 and result[1].new_line == 25
+        assert result[2].old_line == 30 and result[2].new_line == 35
+
+    def test_phase_priority_args_over_line(self):
+        """Phase 2 (same-args) takes priority over Phase 3 (same-line).
+
+        old: line 10 arg_A, line 20 arg_B
+        new: line 20 arg_A, line 10 arg_B
+
+        If line-matching ran first: (10,arg_A)-(10,arg_B)=CHANGED, (20,arg_B)-(20,arg_A)=CHANGED
+        With args-matching first:   (10,arg_A)-(20,arg_A)=MOVED,   (20,arg_B)-(10,arg_B)=MOVED
+        """
+        old_entries = [
+            {"line_number": 10, "call_args": "(arg_A)"},
+            {"line_number": 20, "call_args": "(arg_B)"},
+        ]
+        new_entries = [
+            {"line_number": 20, "call_args": "(arg_A)"},
+            {"line_number": 10, "call_args": "(arg_B)"},
+        ]
+        result = _match_call_sites_within_group(old_entries, new_entries)
+        assert len(result) == 2
+        statuses = {ad.status for ad in result}
+        assert statuses == {DiffStatus.MOVED}, (
+            f"Expected all MOVED, got {[ad.status.value for ad in result]}"
+        )
+
+    def test_mixed_changed_and_moved_groups_xlsx(self):
+        """XLSX correctly renders mixed CHANGED + MOVED groups as per-call-site rows."""
+        old_cs = [
+            _make_call_site(symbol="SSL_CTX_new", line=10, args="(TLSv1_2_method())"),
+            _make_call_site(symbol="EVP_DigestInit", line=50,
+                            args="(ctx, EVP_sha256())", category="crypto_evp"),
+            _make_call_site(symbol="EVP_DigestInit", line=60,
+                            args="(ctx2, EVP_sha256())", category="crypto_evp"),
+        ]
+        new_cs = [
+            _make_call_site(symbol="SSL_CTX_new", line=10, args="(TLS_method())"),
+            _make_call_site(symbol="EVP_DigestInit", line=55,
+                            args="(ctx, EVP_sha256())", category="crypto_evp"),
+            _make_call_site(symbol="EVP_DigestInit", line=65,
+                            args="(ctx2, EVP_sha256())", category="crypto_evp"),
+        ]
+        pd = diff_single(
+            {"project": "p", "call_sites": old_cs, "summary": {}},
+            {"project": "p", "call_sites": new_cs, "summary": {}},
+        )
+        # SSL_CTX_new: CHANGED (args differ), EVP_DigestInit: MOVED (lines shifted)
+        by_sym = {csd.identity_key[2]: csd for csd in pd.call_site_delta}
+        assert by_sym["SSL_CTX_new"].status == DiffStatus.CHANGED
+        assert by_sym["EVP_DigestInit"].status == DiffStatus.MOVED
+
+        dr = DiffResult(projects=[pd], old_label="v1", new_label="v2")
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            xlsx_path = f.name
+        try:
+            SourceDiffExcelExporter().export(dr, xlsx_path)
+            from openssl_scanner._vendor.openpyxl import load_workbook
+            wb = load_workbook(xlsx_path)
+            ws = wb["Call Site Delta"]
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+            assert len(rows) == 3
+            statuses = [r[0] for r in rows]
+            assert "changed" in statuses
+            assert "moved" in statuses
+        finally:
+            os.unlink(xlsx_path)
+
+    def test_added_removed_group_derive_changed(self):
+        """Group with only ADDED + REMOVED arg_deltas derives to CHANGED."""
+        ads = [
+            ArgDelta(status=DiffStatus.ADDED, new_line=10, new_args="(X)"),
+            ArgDelta(status=DiffStatus.REMOVED, old_line=20, old_args="(Y)"),
+        ]
+        assert _derive_group_status(ads) == DiffStatus.CHANGED
+
+    def test_derive_unchanged_plus_added_is_changed(self):
+        """Group with UNCHANGED + ADDED derives to CHANGED, not ADDED."""
+        ads = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10,
+                     old_args="(A)", new_args="(A)"),
+            ArgDelta(status=DiffStatus.ADDED, new_line=20, new_args="(B)"),
+        ]
+        assert _derive_group_status(ads) == DiffStatus.CHANGED
+
+    def test_derive_unchanged_plus_removed_is_changed(self):
+        """Group with UNCHANGED + REMOVED derives to CHANGED, not REMOVED."""
+        ads = [
+            ArgDelta(status=DiffStatus.UNCHANGED, old_line=10, new_line=10,
+                     old_args="(A)", new_args="(A)"),
+            ArgDelta(status=DiffStatus.REMOVED, old_line=20, old_args="(B)"),
+        ]
+        assert _derive_group_status(ads) == DiffStatus.CHANGED
+
+    def test_e2e_unchanged_plus_added_call(self):
+        """Adding a second call to same group: 1 UNCHANGED + 1 ADDED = CHANGED."""
+        old_cs = [_make_call_site(symbol="SSL_read", line=10, args="(ctx, buf, n)")]
+        new_cs = [
+            _make_call_site(symbol="SSL_read", line=10, args="(ctx, buf, n)"),
+            _make_call_site(symbol="SSL_read", line=20, args="(ctx2, buf2, n2)"),
+        ]
+        pd = diff_single(
+            {"project": "p", "call_sites": old_cs, "summary": {}},
+            {"project": "p", "call_sites": new_cs, "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        csd = pd.call_site_delta[0]
+        assert csd.status == DiffStatus.CHANGED
+        statuses = [ad.status for ad in csd.arg_deltas]
+        assert DiffStatus.UNCHANGED in statuses
+        assert DiffStatus.ADDED in statuses
+
+    def test_removed_entries_sort_by_old_line(self):
+        """REMOVED arg_deltas (new_line=None) sort by old_line ascending."""
+        old_entries = [
+            {"line_number": 30, "call_args": "(C)"},
+            {"line_number": 10, "call_args": "(A)"},
+            {"line_number": 20, "call_args": "(B)"},
+        ]
+        result = _match_call_sites_within_group(old_entries, [])
+        lines = [ad.old_line for ad in result]
+        assert lines == [10, 20, 30]
+        assert all(ad.status == DiffStatus.REMOVED for ad in result)
+
+    def test_xlsx_formula_injection_in_args(self):
+        """XLSX escapes formula-injection chars (= + - @) in arg values."""
+        old_cs = _make_call_site(args='=HYPERLINK("http://evil.com")')
+        new_cs = _make_call_site(args="+cmd|exit")
+        pd = diff_single(
+            {"project": "p", "call_sites": [old_cs], "summary": {}},
+            {"project": "p", "call_sites": [new_cs], "summary": {}},
+        )
+        dr = DiffResult(projects=[pd], old_label="v1", new_label="v2")
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            xlsx_path = f.name
+        try:
+            SourceDiffExcelExporter().export(dr, xlsx_path)
+            from openssl_scanner._vendor.openpyxl import load_workbook
+            wb = load_workbook(xlsx_path)
+            ws = wb["Call Site Delta"]
+            row = list(ws.iter_rows(min_row=2, max_row=2, values_only=True))[0]
+            old_args_val = row[7]
+            new_args_val = row[8]
+            assert old_args_val.startswith("'"), (
+                f"Expected leading quote for = injection: {old_args_val}")
+            assert new_args_val.startswith("'"), (
+                f"Expected leading quote for + injection: {new_args_val}")
+        finally:
+            os.unlink(xlsx_path)
+
+    def test_none_line_number_e2e_diff_single(self):
+        """None line_number in JSON should not crash sorted() in _compute_call_site_delta."""
+        old_cs1 = _make_call_site(symbol="SSL_read", line=None, args="(ssl, buf, len)")
+        old_cs2 = _make_call_site(symbol="SSL_read", line=10, args="(ssl, buf, len)")
+        new_cs1 = _make_call_site(symbol="SSL_read", line=10, args="(ssl, buf, len)")
+        new_cs2 = _make_call_site(symbol="SSL_read", line=20, args="(ssl, buf, len)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs1, old_cs2], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs1, new_cs2], "summary": {}},
+        )
+        assert len(pd.call_site_delta) == 1
+        csd = pd.call_site_delta[0]
+        assert len(csd.arg_deltas) == 2
+
+    def test_none_vs_zero_line_collision(self):
+        """None and 0 are equivalent in matching but None preserved in output."""
+        old = [{"line_number": None, "call_args": "(buf)"}]
+        new = [{"line_number": 0, "call_args": "(buf)"}]
+        result = _match_call_sites_within_group(old, new)
+        assert len(result) == 1
+        assert result[0].status == DiffStatus.UNCHANGED
+        assert result[0].old_line is None
+        assert result[0].new_line == 0
+
+    def test_json_preserves_null_line(self):
+        """JSON arg_deltas should have null for None lines, not 0."""
+        old_cs = _make_call_site(symbol="SSL_read", line=None, args="(ssl, buf, n)")
+        new_cs = _make_call_site(symbol="SSL_read", line=10, args="(ssl, buf, n)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        from openssl_scanner.source_diff import SourceDiffJsonExporter
+        exporter = SourceDiffJsonExporter()
+        data = exporter._serialize_project(pd)
+        ad = data["call_site_delta"][0]["arg_deltas"][0]
+        assert ad["old_line"] is None, f"Expected null, got {ad['old_line']}"
+        assert ad["new_line"] == 10
+
+    def test_console_none_line_shows_question_mark(self):
+        """Console output should show L? for unknown lines, not LNone."""
+        old_cs = _make_call_site(symbol="SSL_read", line=None, args="(old)")
+        new_cs = _make_call_site(symbol="SSL_read", line=None, args="(new)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        from openssl_scanner.source_diff import DiffResult
+        dr = DiffResult(
+            old_label="old.json", new_label="new.json",
+            projects=[pd],
+        )
+        text = format_console(dr)
+        assert "LNone" not in text, f"Should not contain LNone: {text}"
+        assert "L?" in text, f"Should contain L? for unknown line: {text}"
+
+    def test_xlsx_none_line_blank_cell(self):
+        """XLSX should have blank cell for None line, not 0."""
+        import tempfile, os
+        old_cs = _make_call_site(symbol="SSL_read", line=None, args="(old)")
+        new_cs = _make_call_site(symbol="SSL_read", line=10, args="(new)")
+        pd = diff_single(
+            {"project": "proj", "call_sites": [old_cs], "summary": {}},
+            {"project": "proj", "call_sites": [new_cs], "summary": {}},
+        )
+        from openssl_scanner.source_diff import DiffResult, SourceDiffExcelExporter
+        dr = DiffResult(
+            old_label="old.json", new_label="new.json",
+            projects=[pd],
+        )
+        xlsx_path = tempfile.mktemp(suffix=".xlsx")
+        try:
+            SourceDiffExcelExporter().export(dr, xlsx_path)
+            from openssl_scanner._vendor.openpyxl import load_workbook
+            wb = load_workbook(xlsx_path)
+            ws = wb["Call Site Delta"]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                status = row[0]
+                old_line = row[5]
+                if status == "changed":
+                    assert old_line is None or old_line == "", (
+                        f"Expected blank for None line, got {old_line}")
+                    break
+        finally:
+            os.unlink(xlsx_path)
