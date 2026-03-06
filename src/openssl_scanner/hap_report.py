@@ -788,10 +788,9 @@ def load_scan_result_from_json(json_path):
 
     result.package_info = meta.get('package')
 
-    pkg_path = ''
-    if result.package_info:
-        pkg_path = result.package_info.get('package_path', '')
+    pkg_path = os.path.basename(json_path)
     if not pkg_path:
-        pkg_path = json_path
+        pi = result.package_info or {}
+        pkg_path = pi.get('package_path', json_path)
 
     return result, pkg_path

@@ -3336,7 +3336,7 @@ class TestInAPPLinkClassification:
                 r, p = _load_scan_result_from_json(jf)
                 assert r is not None
                 loaded_results.append(r)
-                loaded_pkgs.append(os.path.basename(jf))
+                loaded_pkgs.append(p)
 
             summary_dir = os.path.join(out_dir, 'summary')
             os.makedirs(summary_dir)
@@ -3413,6 +3413,137 @@ class TestInAPPLinkClassification:
                 f"so no System-Link to upgrade: {usages}")
         finally:
             shutil.rmtree(out_dir)
+
+
+    def _verify_pkg_name_roundtrip(self, scenario_pkgs):
+        """Helper: verify pkg_name consistency between hap and hap-summary.
+
+        scenario_pkgs: list of (display_name, bundle_name, module_name,
+                                package_path) tuples.
+        """
+        from openssl_scanner.hap_report import (
+            generate_hap_summary, load_scan_result_from_json)
+        from openssl_scanner.reporter import Reporter
+
+        reporter = Reporter()
+
+        all_results = []
+        display_names = []
+        for display_name, bundle, module, pkg_path in scenario_pkgs:
+            fr = self._make_file_result("/lib.so")
+            pi = self._make_pkg_info(
+                bundle_name=bundle, module_name=module,
+                package_path=pkg_path)
+            result = self._make_result([fr], pi)
+            result.report_type = 'package'
+            all_results.append(result)
+            display_names.append(display_name)
+
+        out_dir = tempfile.mkdtemp()
+        try:
+            direct_dir = os.path.join(out_dir, 'direct')
+            os.makedirs(direct_dir)
+            direct_path = generate_hap_summary(
+                all_results, display_names, direct_dir)
+            assert direct_path is not None
+
+            json_dir = os.path.join(out_dir, 'json')
+            os.makedirs(json_dir)
+            for result, dn in zip(all_results, display_names):
+                stem = os.path.splitext(dn)[0]
+                jf = os.path.join(json_dir, f'{stem}.json')
+                with open(jf, 'w') as f:
+                    f.write(reporter.generate_json(result))
+
+            loaded_results = []
+            loaded_pkgs = []
+            for dn in display_names:
+                stem = os.path.splitext(dn)[0]
+                jf = os.path.join(json_dir, f'{stem}.json')
+                r, p = load_scan_result_from_json(jf)
+                assert r is not None
+                loaded_results.append(r)
+                loaded_pkgs.append(p)
+
+            rt_dir = os.path.join(out_dir, 'roundtrip')
+            os.makedirs(rt_dir)
+            rt_path = generate_hap_summary(
+                loaded_results, loaded_pkgs, rt_dir)
+            assert rt_path is not None
+
+            from openpyxl import load_workbook
+
+            def read_pkg_names(xlsx_path):
+                wb = load_workbook(xlsx_path)
+                ws = wb.active
+                names = []
+                for row in range(2, ws.max_row + 1):
+                    val = ws.cell(row=row, column=1).value
+                    if val and val != 'TOTAL':
+                        names.append(val)
+                return names
+
+            direct_names = read_pkg_names(direct_path)
+            rt_names = read_pkg_names(rt_path)
+            assert direct_names == rt_names, (
+                f"pkg_name mismatch:\n"
+                f"  hap (direct):  {direct_names}\n"
+                f"  hap-summary:   {rt_names}")
+            return direct_names
+        finally:
+            shutil.rmtree(out_dir)
+
+    def test_c6_pkg_name_consistency_app_container(self):
+        """APP container: pkg_name must match between hap and hap-summary."""
+        names = self._verify_pkg_name_roundtrip([
+            ('standalone.hap', 'com.test.standalone', 'entry',
+             '/path/to/standalone.hap'),
+            ('MyApp_entry.hap', 'com.test.myapp', 'entry',
+             '/path/to/MyApp.app'),
+            ('MyApp_feature.hap', 'com.test.myapp', 'feature',
+             '/path/to/MyApp.app'),
+        ])
+        assert 'com.test.myapp/entry (MyApp_entry)' in names
+        assert 'com.test.myapp/feature (MyApp_feature)' in names
+        assert 'com.test.standalone/entry (standalone)' in names
+
+    def test_c7_pkg_name_consistency_no_metadata(self):
+        """HAPs without bundle_name/module_name: source-only pkg_name."""
+        names = self._verify_pkg_name_roundtrip([
+            ('bare.hap', '', '', '/tmp/bare.hap'),
+            ('Container_inner.hap', '', '', '/tmp/Container.app'),
+        ])
+        assert 'bare' in names
+        assert 'Container_inner' in names
+
+    def test_c8_pkg_name_consistency_bundle_only(self):
+        """HAPs with bundle_name but no module_name."""
+        names = self._verify_pkg_name_roundtrip([
+            ('MyApp_mod.hap', 'com.test.app', '', '/path/to/MyApp.app'),
+            ('solo.hap', 'com.test.solo', '', '/path/to/solo.hap'),
+        ])
+        assert 'com.test.app (MyApp_mod)' in names
+        assert 'com.test.solo (solo)' in names
+
+    def test_c9_pkg_name_consistency_multiple_containers(self):
+        """Multiple APP containers with same-named inner HAPs."""
+        names = self._verify_pkg_name_roundtrip([
+            ('AppA_entry.hap', 'com.a', 'entry', '/pkg/AppA.app'),
+            ('AppB_entry.hap', 'com.b', 'entry', '/pkg/AppB.app'),
+            ('AppA_feature.hap', 'com.a', 'feature', '/pkg/AppA.app'),
+        ])
+        assert 'com.a/entry (AppA_entry)' in names
+        assert 'com.b/entry (AppB_entry)' in names
+        assert 'com.a/feature (AppA_feature)' in names
+
+    def test_c10_pkg_name_consistency_name_collision(self):
+        """Container with duplicate inner names (counter suffix)."""
+        names = self._verify_pkg_name_roundtrip([
+            ('Dup_mod.hap', 'com.dup', 'mod1', '/pkg/Dup.app'),
+            ('Dup_mod_2.hap', 'com.dup', 'mod2', '/pkg/Dup.app'),
+        ])
+        assert 'com.dup/mod1 (Dup_mod)' in names
+        assert 'com.dup/mod2 (Dup_mod_2)' in names
 
 
 if __name__ == "__main__":
