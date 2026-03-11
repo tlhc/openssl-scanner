@@ -514,13 +514,13 @@ class TestFingerprintScoring:
             return f.name
 
     def _build_openssl_binary(self, strings):
-        """Build fake binary with NUL-separated strings."""
+        """Build fake binary with NUL-terminated strings (like real .rodata)."""
         parts = []
         for s in strings:
             if isinstance(s, str):
                 s = s.encode('ascii')
             parts.append(s)
-        return b'\x00'.join(parts)
+        return b'\x00' + b'\x00'.join(parts) + b'\x00'
 
     def test_empty_file(self):
         path = self._write_file(b'')

@@ -21,7 +21,7 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 _MAX_SCAN_SIZE = 128 * 1024 * 1024
-_NUL_CHUNK_RE = re.compile(rb'[^\x00]{4,}')
+_NUL_PRINTABLE_RE = re.compile(rb'(?<=\x00)[\x20-\x7e]{4,}(?=\x00)')
 
 OPENSSL_STRICT_PATTERN = re.compile(
     rb"OpenSSL\s+(\d+\.\d+\.\d+[a-z]*"
@@ -434,26 +434,14 @@ def _count_corroborating(data, _strings=None):
 def _extract_printable_strings(data):
     """Extract printable ASCII strings (>=4 chars) from NUL-delimited binary data.
 
-    Uses re.finditer on a pre-compiled pattern that matches sequences of 4+
-    non-NUL bytes. Works on both bytes and mmap.mmap objects, avoiding the
-    AttributeError from mmap.split() for files > _MAX_SCAN_SIZE.
+    Matches runs of printable ASCII (0x20-0x7e) bounded by NUL bytes.
+    The NUL-boundary requirement prevents false positives from short symbol
+    names (e.g. SHA1, RC4) that can appear as byte subsequences in compiled
+    code or DWARF data.
 
-    Relies on the ELF convention that symbol names and error-reason strings
-    embedded by the OpenSSL toolchain (e.g. ERR_STRING_DATA entries, __FILE__
-    macros) are NUL-terminated.  Multi-word sentences that happen to contain
-    a symbol name as a substring are therefore NOT matched, which keeps the
-    false-positive rate low.
+    Works on both bytes and mmap.mmap objects.
     """
-    strings = set()
-    for m in _NUL_CHUNK_RE.finditer(data):
-        chunk = m.group()
-        try:
-            s = chunk.decode('ascii')
-        except UnicodeDecodeError:
-            continue
-        if s.isprintable():
-            strings.add(s)
-    return strings
+    return set(s.decode('ascii') for s in _NUL_PRINTABLE_RE.findall(data))
 
 
 def _read_strings_from_file(file_path):
