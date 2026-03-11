@@ -102,6 +102,17 @@ class StaticSSLResult:
     found_symbols: List[str] = field(default_factory=list)
 
 
+@dataclass
+class FingerprintResult:
+    """Result of .rodata fingerprint-based OpenSSL detection."""
+    score: float = 0.0
+    confidence: str = ''
+    library: str = ''
+    category_scores: dict = field(default_factory=dict)
+    matched_count: int = 0
+    total_candidates: int = 0
+
+
 def detect_static_openssl(file_path: str) -> Optional[str]:
     """
     Detect statically linked OpenSSL and return the version string.
@@ -430,6 +441,34 @@ def _extract_printable_strings(data):
     return strings
 
 
+def _read_strings_from_file(file_path):
+    """Extract printable strings from a binary file.
+
+    Handles mmap fallback for large files (> _MAX_SCAN_SIZE).
+
+    Returns:
+        Set of strings, or None on error.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            file_size = f.seek(0, 2)
+            f.seek(0)
+            if file_size == 0:
+                return None
+            if file_size > _MAX_SCAN_SIZE:
+                try:
+                    with mmap.mmap(f.fileno(), 0,
+                                   access=mmap.ACCESS_READ) as data:
+                        return _extract_printable_strings(data)
+                except ValueError:
+                    return None
+            else:
+                data = f.read()
+                return _extract_printable_strings(data)
+    except (IOError, OSError):
+        return None
+
+
 def scan_hidden_static_symbols(file_path, openssl_exports):
     """Scan binary for all OpenSSL symbol name strings.
 
@@ -444,25 +483,163 @@ def scan_hidden_static_symbols(file_path, openssl_exports):
     Returns:
         Sorted list of OpenSSL symbol names found as strings.
     """
-    try:
-        with open(file_path, 'rb') as f:
-            file_size = f.seek(0, 2)
-            f.seek(0)
-
-            if file_size == 0:
-                return []
-
-            if file_size > _MAX_SCAN_SIZE:
-                try:
-                    with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                        strings = _extract_printable_strings(data)
-                except ValueError:
-                    return []
-            else:
-                data = f.read()
-                strings = _extract_printable_strings(data)
-    except (IOError, OSError):
+    strings = _read_strings_from_file(file_path)
+    if strings is None:
         return []
-
     found = strings & set(openssl_exports)
     return sorted(found)
+
+
+_FINGERPRINT_DATA = None
+_FINGERPRINT_LOADED = False
+
+
+def _load_fingerprint_data():
+    """Load fingerprint data from data/openssl_fingerprints.json."""
+    global _FINGERPRINT_DATA, _FINGERPRINT_LOADED
+    if _FINGERPRINT_LOADED:
+        return
+    try:
+        import json
+        import os as _os
+        data_dir = _os.path.join(_os.path.dirname(__file__), 'data')
+        fp_path = _os.path.join(data_dir, 'openssl_fingerprints.json')
+        with open(fp_path) as f:
+            raw = json.load(f)
+        cats = raw.get('categories', {})
+        if not isinstance(cats, dict):
+            raise ValueError("categories must be a dict")
+        for name, info in cats.items():
+            if not isinstance(info.get('strings', []), list):
+                raise ValueError("category %s: strings must be a list" % name)
+            info['per_point'] = float(info.get('per_point', 0))
+            info['max_points'] = float(info.get('max_points', 0))
+        _FINGERPRINT_DATA = raw
+        logger.debug("Loaded fingerprint data: %d categories", len(cats))
+    except Exception as e:
+        logger.debug("Failed to load fingerprint data: %s", e)
+        _FINGERPRINT_DATA = None
+    _FINGERPRINT_LOADED = True
+
+
+def _infer_library_from_fingerprint(cat_scores):
+    """Infer SSL library variant from per-library fingerprint scores.
+
+    Data-driven: each category in the fingerprint JSON may carry a
+    'library' tag (e.g. "BoringSSL", "OpenSSL"). The scorer records
+    this tag into cat_scores. This function tallies capped scores
+    per library and returns the one with the highest total.
+    Falls back to 'OpenSSL' when no library-tagged categories matched.
+    """
+    lib_scores = {}
+    for info in cat_scores.values():
+        lib = info.get('library')
+        if lib:
+            lib_scores[lib] = lib_scores.get(lib, 0) + info['capped']
+    if not lib_scores:
+        return 'OpenSSL'
+    return max(lib_scores, key=lib_scores.get)
+
+
+def score_openssl_fingerprint(file_path):
+    """Score a binary for OpenSSL-family fingerprint strings in .rodata.
+
+    Extracts NUL-terminated strings from the file and matches against
+    the fingerprint database (~130 strings across 7 categories covering
+    OpenSSL, BoringSSL, and LibreSSL). Each match earns per-string points,
+    capped per category. Total max score is 100.
+
+    Categories use exact match by default. Categories with
+    match_mode=substring check if any extracted string contains the
+    fingerprint substring (e.g. BoringSSL source paths have a different
+    prefix but share the crypto/*.c suffix with OpenSSL).
+
+    Args:
+        file_path: Path to the binary file.
+
+    Returns:
+        FingerprintResult with score, confidence, and per-category breakdown.
+    """
+    _load_fingerprint_data()
+    if _FINGERPRINT_DATA is None:
+        return FingerprintResult()
+
+    categories = _FINGERPRINT_DATA.get('categories', {})
+    thresholds = _FINGERPRINT_DATA.get('thresholds', {})
+    if not categories:
+        return FingerprintResult()
+
+    strings = _read_strings_from_file(file_path)
+    if strings is None:
+        return FingerprintResult()
+
+    total_score = 0.0
+    total_matched = 0
+    total_candidates = 0
+    cat_scores = {}
+
+    for cat_name, cat_info in categories.items():
+        per_point = cat_info.get('per_point', 0)
+        max_points = cat_info.get('max_points', 0)
+        cat_strings = cat_info.get('strings', [])
+        match_mode = cat_info.get('match_mode', 'exact')
+        total_candidates += len(cat_strings)
+
+        matched = 0
+        if match_mode == 'substring':
+            for s in cat_strings:
+                for extracted in strings:
+                    if s in extracted:
+                        matched += 1
+                        break
+        else:
+            for s in cat_strings:
+                if s in strings:
+                    matched += 1
+        if matched == 0:
+            continue
+
+        raw = matched * per_point
+        capped = min(raw, max_points)
+        entry = {
+            'matched': matched,
+            'total': len(cat_strings),
+            'raw': round(raw, 2),
+            'capped': round(capped, 2),
+        }
+        library_tag = cat_info.get('library')
+        if library_tag:
+            entry['library'] = library_tag
+        cat_scores[cat_name] = entry
+        total_score += capped
+        total_matched += matched
+
+    total_score = round(total_score, 2)
+    high_th = thresholds.get('high', 60)
+    medium_th = thresholds.get('medium', 30)
+    low_th = thresholds.get('low', 15)
+
+    if total_score >= high_th:
+        confidence = 'high'
+    elif total_score >= medium_th:
+        confidence = 'medium'
+    elif total_score >= low_th:
+        confidence = 'low'
+    else:
+        confidence = ''
+
+    library = ''
+    if confidence:
+        library = _infer_library_from_fingerprint(cat_scores)
+
+    max_possible = _FINGERPRINT_DATA.get('max_score', 100)
+    total_score = round(total_score / max_possible * 100, 1)
+
+    return FingerprintResult(
+        score=total_score,
+        confidence=confidence,
+        library=library,
+        category_scores=cat_scores,
+        matched_count=total_matched,
+        total_candidates=total_candidates,
+    )

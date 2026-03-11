@@ -83,16 +83,55 @@ class DependencyGraph:
         self._openssl_libs.add(lib_path)
         self._openssl_libs.add(os.path.basename(lib_path))
 
-    def find_all_paths_to_openssl(self, source: str,
-                                   max_depth: int = 10) -> List[List[str]]:
+    def has_path_to_openssl(self, source: str,
+                            max_depth: int = 10) -> bool:
         """
-        Find ALL paths from source file to any OpenSSL library.
+        Check if any path exists from source to an OpenSSL library.
 
-        Uses BFS to find all paths up to max_depth.
+        Standard BFS with shared visited set: O(V+E) time and O(V) memory.
+        """
+        source_path = self._file_to_path.get(source, source)
+
+        if source_path in self._path_cache:
+            return len(self._path_cache[source_path]) > 0
+
+        visited = {source_path}
+        queue: deque = deque()
+        queue.append((source_path, 1))
+
+        while queue:
+            current, depth = queue.popleft()
+
+            if depth > max_depth:
+                continue
+
+            deps = self._adjacency.get(current, [])
+            for dep in deps:
+                dep_basename = os.path.basename(dep) if '/' in dep else dep
+
+                if dep in self._openssl_libs or dep_basename in self._openssl_libs:
+                    return True
+
+                resolved = self._resolve_dep(dep, current)
+                if resolved and resolved not in visited:
+                    visited.add(resolved)
+                    queue.append((resolved, depth + 1))
+
+        return False
+
+    def find_all_paths_to_openssl(self, source: str,
+                                   max_depth: int = 10,
+                                   max_paths: int = 50) -> List[List[str]]:
+        """
+        Find paths from source file to any OpenSSL library.
+
+        Uses BFS to find paths up to max_depth, capped at max_paths
+        to prevent combinatorial explosion in dense graphs.
 
         Args:
             source: Starting file path or name
             max_depth: Maximum path length to search
+            max_paths: Maximum number of paths to return
 
         Returns:
             List of paths, each path is a list of file names
@@ -120,6 +159,9 @@ class DependencyGraph:
                 if dep in self._openssl_libs or dep_basename in self._openssl_libs:
                     complete_path = path + [dep_basename]
                     all_paths.append(complete_path)
+                    if len(all_paths) >= max_paths:
+                        self._path_cache[source_path] = all_paths
+                        return all_paths
                     continue
 
                 resolved = self._resolve_dep(dep, current)

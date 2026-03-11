@@ -37,6 +37,7 @@ _HAP_SUMMARY_COLUMNS = [
     ('other_cats',      10, 'Other Cats'),
     ('dlopen_libs',     30, 'dlopen Libs'),
     ('custom_match',    22, 'Custom Match'),
+    ('fingerprint',     14, 'Fingerprint'),
 ]
 
 _HAP_HIGHLIGHT_CATS = [
@@ -251,15 +252,26 @@ def hap_write_single_report(result, pkg_path, out_path, reporter, json_only):
 
 
 def collect_bundled_names(removed_libs, extract_result):
-    """Collect bundled OpenSSL library basenames from multiple sources."""
-    names = list(removed_libs)
+    """Collect bundled OpenSSL library basenames from multiple sources.
+
+    Multi-ABI packages may yield duplicate basenames (e.g. libcrypto.so
+    from both arm64-v8a and x86_64). Deduplicate while preserving order.
+    """
+    seen = set()
+    names = []
+    for n in removed_libs:
+        if n not in seen:
+            seen.add(n)
+            names.append(n)
     if extract_result.openssl_lib:
         bn = os.path.basename(extract_result.openssl_lib)
-        if bn not in names:
+        if bn not in seen:
+            seen.add(bn)
             names.append(bn)
     if extract_result.openssl_ssl:
         bn = os.path.basename(extract_result.openssl_ssl)
-        if bn not in names:
+        if bn not in seen:
+            seen.add(bn)
             names.append(bn)
     return names
 
@@ -296,15 +308,23 @@ def detect_static_providers(scan_result):
                             for g in scan_result.files_detail
                             if basename in g.direct_deps
                             and os.path.basename(g.path) != basename})
+        reason = fr.static_openssl_confidence_reason or ''
         providers.append({
             'file': basename,
             'confidence': fr.static_openssl_confidence,
             'symbols': sym_count,
             'consumers': consumers,
+            'hidden': reason.startswith('fingerprint:'),
         })
 
     has_shared = any(p['consumers'] for p in providers)
-    bundled_str = 'Yes (static, shared)' if has_shared else 'Yes (static)'
+    all_hidden = all(p.get('hidden', False) for p in providers)
+    if has_shared:
+        bundled_str = 'Yes (static, shared)'
+    elif all_hidden:
+        bundled_str = 'Yes (static, hidden)'
+    else:
+        bundled_str = 'Yes (static)'
     return bundled_str, providers
 
 
@@ -580,6 +600,14 @@ def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
     else:
         pkg_name = source
 
+    max_fp_score = 0.0
+    for fr in result.files_detail:
+        fp = getattr(fr, 'fingerprint_detail', None) or {}
+        s = fp.get('score', 0)
+        if s > max_fp_score:
+            max_fp_score = s
+    fp_str = f'{max_fp_score:.1f}' if max_fp_score > 0 else ''
+
     return {
         'pkg_name': pkg_name,
         'pkg_type': pi.get('package_type', ''),
@@ -597,6 +625,7 @@ def build_hap_summary_row(result, pkg_path, method, s_syms, d_syms, dl_syms,
         'dlopen_libs': ', '.join(result.dlopen_libs_detected),
         'custom_match': (custom_result.summary_text() if custom_result
                          else pi.get('custom_match', '')),
+        'fingerprint': fp_str,
     }
 
 
@@ -692,7 +721,19 @@ def generate_hap_summary(all_results, scanned_packages, output_dir,
         'other_cats': sum(r.get('other_cats', 0) for r in rows),
         'dlopen_libs': '',
         'custom_match': '',
+        'fingerprint': '',
     }
+    fp_scores = []
+    for r in rows:
+        fp_val = r.get('fingerprint', '')
+        if fp_val:
+            try:
+                fp_scores.append(float(fp_val))
+            except (ValueError, TypeError):
+                pass
+    if fp_scores:
+        total_data['fingerprint'] = f'{max(fp_scores):.1f}'
+
     for cat in _HAP_HIGHLIGHT_CATS:
         total_data[cat] = sum(r.get(cat, 0) for r in rows)
 
@@ -753,6 +794,7 @@ def load_scan_result_from_json(json_path):
             dlsym_symbols=dlopen_det.get('dlopen_symbols', []),
             dlopen_libs=dlopen_det.get('dlopen_libs', []),
             dlopen_confidence=dlopen_det.get('confidence', 'high'),
+            fingerprint_detail=fd.get('fingerprint_detail'),
         )
         files_detail.append(fr)
 

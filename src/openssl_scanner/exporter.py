@@ -58,6 +58,7 @@ class ExcelExporter:
         self._create_category_sheet(wb, data)
         self._create_depth_sheet(wb, data)
         self._create_dep_tree_sheet(wb, data)
+        self._create_fingerprint_sheet(wb, data)
         self._create_errors_sheet(wb, data)
 
         del wb['Sheet']
@@ -560,6 +561,80 @@ class ExcelExporter:
 
         for child in node.get('children', []):
             self._flatten_tree(child, node.get('name'), depth + 1, rows)
+
+    def _create_fingerprint_sheet(self, wb, data: Dict) -> None:
+        """Create fingerprint detection sheet showing per-SO scoring detail."""
+        files = data.get('files_detail', [])
+        fp_files = [f for f in files if f.get('fingerprint_detail')]
+        if not fp_files:
+            return
+
+        ws = wb.create_sheet("Fingerprint")
+
+        headers = ["SO File", "Score", "Confidence",
+                    "Matched", "Total", "Category",
+                    "Cat Matched", "Cat Total", "Cat Raw", "Cat Capped"]
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=header)
+        self._style_header(ws, 1, len(headers))
+
+        max_score = 0.0
+        max_file = ''
+
+        row_idx = 2
+        for fd in fp_files:
+            fp = fd['fingerprint_detail']
+            so_name = os.path.basename(fd.get('path', ''))
+            score = fp.get('score', 0)
+            if score > max_score:
+                max_score = score
+                max_file = so_name
+
+            cats = fp.get('categories', {})
+            if not cats:
+                ws.cell(row=row_idx, column=1, value=so_name)
+                ws.cell(row=row_idx, column=2, value=score)
+                ws.cell(row=row_idx, column=3, value=fp.get('confidence', ''))
+                ws.cell(row=row_idx, column=4, value=fp.get('matched_count', 0))
+                ws.cell(row=row_idx, column=5, value=fp.get('total_candidates', 0))
+                row_idx += 1
+                continue
+
+            first = True
+            for cat_name in sorted(cats.keys()):
+                cat = cats[cat_name]
+                if first:
+                    ws.cell(row=row_idx, column=1, value=so_name)
+                    ws.cell(row=row_idx, column=2, value=score)
+                    ws.cell(row=row_idx, column=3, value=fp.get('confidence', ''))
+                    ws.cell(row=row_idx, column=4, value=fp.get('matched_count', 0))
+                    ws.cell(row=row_idx, column=5, value=fp.get('total_candidates', 0))
+                    first = False
+                ws.cell(row=row_idx, column=6, value=cat_name)
+                ws.cell(row=row_idx, column=7, value=cat.get('matched', 0))
+                ws.cell(row=row_idx, column=8, value=cat.get('total', 0))
+                ws.cell(row=row_idx, column=9, value=cat.get('raw', 0))
+                ws.cell(row=row_idx, column=10, value=cat.get('capped', 0))
+                row_idx += 1
+
+        if max_file:
+            row_idx += 1
+            ws.cell(row=row_idx, column=1, value='HAP Max Score')
+            ws.cell(row=row_idx, column=2, value=max_score)
+            ws.cell(row=row_idx, column=3, value=max_file)
+            for col in range(1, 4):
+                ws.cell(row=row_idx, column=col).font = self._header_font
+
+        ws.column_dimensions['A'].width = 35
+        ws.column_dimensions['B'].width = 10
+        ws.column_dimensions['C'].width = 12
+        ws.column_dimensions['D'].width = 10
+        ws.column_dimensions['E'].width = 10
+        ws.column_dimensions['F'].width = 22
+        ws.column_dimensions['G'].width = 12
+        ws.column_dimensions['H'].width = 10
+        ws.column_dimensions['I'].width = 10
+        ws.column_dimensions['J'].width = 10
 
     def _create_errors_sheet(self, wb, data: Dict) -> None:
         """Create errors sheet."""

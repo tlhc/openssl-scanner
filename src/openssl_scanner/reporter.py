@@ -293,6 +293,8 @@ class Reporter:
                 'dlopen_libs': file_result.dlopen_libs,
                 'confidence': file_result.dlopen_confidence,
             }
+        if file_result.fingerprint_detail:
+            d['fingerprint_detail'] = file_result.fingerprint_detail
         return d
 
     def _format_by_depth(self, result) -> dict:

@@ -15,7 +15,8 @@ from .elf_analyzer import ELFAnalyzer, ELFInfo
 from .dependency_resolver import DependencyResolver, DependencyNode
 from .dependency_graph import DependencyGraph, ImportChain, DepthInfo
 from .openssl_matcher import OpenSSLMatcher
-from .static_detector import detect_static_openssl, detect_static_ssl, scan_hidden_static_symbols
+from .static_detector import (detect_static_openssl, detect_static_ssl,
+                              scan_hidden_static_symbols, score_openssl_fingerprint)
 from .constants import OPENSSL_LIBRARY_PATTERNS
 from . import __version__
 
@@ -217,6 +218,7 @@ class _StaticDetection:
     hidden_static: bool = False
     extra_symbols: List[str] = field(default_factory=list)
     force_direct: bool = False
+    fingerprint_detail: Optional[dict] = None
 
 
 @dataclass
@@ -307,6 +309,37 @@ def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
                 "Static %s signature in %s: %s (signals=%s, hidden=%s)",
                 ssl_result.library, os.path.basename(path),
                 ssl_result.version, ssl_result.signals, result.hidden_static)
+
+    fp_result = score_openssl_fingerprint(path)
+    if fp_result.matched_count > 0:
+        result.fingerprint_detail = {
+            'score': fp_result.score,
+            'confidence': fp_result.confidence,
+            'library': fp_result.library,
+            'matched_count': fp_result.matched_count,
+            'total_candidates': fp_result.total_candidates,
+            'categories': fp_result.category_scores,
+        }
+
+    if not result.detected and not openssl_libs and fp_result.confidence:
+        result.detected = True
+        result.library = fp_result.library or 'OpenSSL'
+        result.hidden_static = True
+        result.force_direct = True
+        result.confidence = fp_result.confidence
+        result.confidence_reason = (
+            'fingerprint: score=%.1f matched=%d/%d'
+            % (fp_result.score, fp_result.matched_count,
+               fp_result.total_candidates))
+        if openssl_exports:
+            hidden_syms = scan_hidden_static_symbols(
+                path, openssl_exports)
+            if hidden_syms:
+                result.extra_symbols = hidden_syms
+        logger.debug(
+            "Fingerprint OpenSSL in %s: score=%.1f conf=%s matched=%d",
+            os.path.basename(path), fp_result.score,
+            fp_result.confidence, fp_result.matched_count)
 
     if result.detected and not result.confidence:
         confidence, reason = _compute_static_confidence(
@@ -432,6 +465,7 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
         dlsym_symbols=dlopen.dlsym_symbols,
         dlopen_libs=dlopen.dlopen_libs,
         dlopen_confidence=dlopen.confidence,
+        fingerprint_detail=static.fingerprint_detail,
     )
 
 
@@ -457,6 +491,7 @@ class FileResult:
     dlsym_symbols: List[str] = field(default_factory=list)
     dlopen_libs: List[str] = field(default_factory=list)
     dlopen_confidence: str = 'high'
+    fingerprint_detail: Optional[dict] = None
     custom_hit_symbols: Set[str] = field(default_factory=set)
 
 
@@ -902,8 +937,7 @@ class Scanner:
         for fr in file_results:
             if fr.error or fr.openssl_direct:
                 continue
-            paths = graph.find_all_paths_to_openssl(fr.path)
-            if paths:
+            if graph.has_path_to_openssl(fr.path):
                 fr.openssl_transitive = True
                 transitive_count += 1
         if transitive_count:

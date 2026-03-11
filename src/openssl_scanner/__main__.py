@@ -1083,12 +1083,13 @@ def cmd_hap(args) -> int:
 
             to_scan.append((pkg_idx, entry))
 
-        use_parallel = per_package and len(to_scan) > 1 and args.jobs != 1
+        use_parallel = len(to_scan) > 1 and args.jobs != 1
         if use_parallel:
             parallel = min(len(to_scan), args.jobs)
+            per_pkg_jobs = 1
         else:
             parallel = 1
-        per_pkg_jobs = 1
+            per_pkg_jobs = args.jobs
 
         logger_name = logger.name
         scan_total = len(to_scan)
@@ -1302,8 +1303,16 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
         )
 
         matcher = OpenSSLMatcher()
-        count = matcher.load_builtin_symbols()
-        logger.info("Loaded %d built-in OpenSSL symbols", count)
+        if args.openssl_lib:
+            libcrypto = os.path.abspath(args.openssl_lib)
+            try:
+                count = matcher.load_openssl_symbols(libcrypto)
+                logger.info("Loaded %d OpenSSL symbols from %s", count, libcrypto)
+            except (FileNotFoundError, ValueError) as e:
+                logger.warning("Failed to load %s: %s; using built-in", libcrypto, e)
+        if not matcher.is_loaded():
+            count = matcher.load_builtin_symbols()
+            logger.info("Loaded %d built-in OpenSSL symbols", count)
 
         removed = 0
         removed_libs = []
@@ -1392,8 +1401,8 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                 'entry_key': entry_key, 'no_native': False, 'failed': False,
                 'message': msg}
 
-    except (ValueError, zipfile.BadZipFile) as e:
-        logger.error("Failed to extract %s: %s", entry.display_name, e)
+    except (ValueError, zipfile.BadZipFile, OSError) as e:
+        logger.error("Failed to process %s: %s", entry.display_name, e)
         return {'result': None, 'custom_result': None,
                 'entry_key': entry_key, 'no_native': False, 'failed': True,
                 'message': f"{entry.display_name} -> FAILED ({e})"}

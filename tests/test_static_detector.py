@@ -4,6 +4,8 @@ import tempfile
 from openssl_scanner.static_detector import (
     detect_static_openssl,
     detect_static_ssl,
+    score_openssl_fingerprint,
+    FingerprintResult,
     StaticSSLResult,
 )
 
@@ -499,5 +501,430 @@ class TestBoringSSLUniqueErrors:
             r = detect_static_ssl(path)
             assert r.detected is True
             assert r.library == 'BoringSSL'
+        finally:
+            os.unlink(path)
+
+
+class TestFingerprintScoring:
+    """Tests for score_openssl_fingerprint() function."""
+
+    def _write_file(self, content):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(content)
+            return f.name
+
+    def _build_openssl_binary(self, strings):
+        """Build fake binary with NUL-separated strings."""
+        parts = []
+        for s in strings:
+            if isinstance(s, str):
+                s = s.encode('ascii')
+            parts.append(s)
+        return b'\x00'.join(parts)
+
+    def test_empty_file(self):
+        path = self._write_file(b'')
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.score == 0.0
+            assert r.confidence == ''
+        finally:
+            os.unlink(path)
+
+    def test_no_matches(self):
+        path = self._write_file(b'\x00hello world\x00foo bar\x00')
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.score == 0.0
+            assert r.confidence == ''
+            assert r.matched_count == 0
+        finally:
+            os.unlink(path)
+
+    def test_high_confidence_openssl(self):
+        """OpenSSL-style strings across all 7 categories should yield high confidence."""
+        t1a = [
+            "BIO routines", "Diffie-Hellman routines", "ECDH routines",
+            "ECDSA routines", "HMAC routines", "OCSP routines",
+            "PEM routines", "PKCS7 routines", "SSL routines",
+            "UI routines", "X509 V3 routines", "bignum routines",
+            "common libcrypto routines", "configuration file routines",
+            "elliptic curve routines", "memory buffer routines",
+            "object identifier routines",
+            "asn1 encoding routines", "digital envelope routines",
+            "dsa routines", "engine routines", "rsa routines",
+            "x509 certificate routines",
+        ]
+        t1b = [
+            "X509v3 Basic Constraints", "X509v3 Key Usage",
+            "X509v3 Subject Key Identifier", "X509v3 Authority Key Identifier",
+            "X509v3 Subject Alternative Name", "X509v3 Extended Key Usage",
+            "X509v3 CRL Distribution Points", "X509v3 Certificate Policies",
+            "X509v3 CRL Number", "X509v3 CRL Reason Code",
+            "X509v3 Issuer Alternative Name", "X509v3 Name Constraints",
+            "X509v3 Policy Constraints", "X509v3 Inhibit Any Policy",
+            "X509v3 Delta CRL Indicator", "X509v3 Freshest CRL",
+        ]
+        t2a = [
+            "prime256v1", "secp384r1", "secp521r1",
+            "RSA-SHA256", "RSA-SHA384", "RSA-SHA512",
+            "ecdsa-with-SHA256", "ecdsa-with-SHA384",
+            "sha256WithRSAEncryption", "sha384WithRSAEncryption",
+            "id-ecPublicKey", "rsaEncryption",
+            "AES-256-CBC", "AES-128-CBC", "ChaCha20-Poly1305",
+        ]
+        t2b = [
+            "basicConstraints", "subjectKeyIdentifier",
+            "authorityKeyIdentifier", "keyUsage", "extendedKeyUsage",
+            "subjectAltName", "TLS Web Server Authentication",
+            "TLS Web Client Authentication", "OCSP Signing",
+        ]
+        t3a = [
+            "ASN1_ANY", "ASN1_BIT_STRING", "ASN1_BOOLEAN",
+            "ASN1_ENUMERATED", "ASN1_FBOOLEAN", "ASN1_GENERALIZEDTIME",
+            "ASN1_IA5STRING", "ASN1_INTEGER", "ASN1_NULL",
+            "ASN1_OBJECT", "ASN1_OCTET_STRING", "ASN1_PRINTABLE",
+            "ASN1_SEQUENCE", "ASN1_TIME", "ASN1_UTF8STRING",
+        ]
+        t3b = [
+            "certificate chain too long", "certificate has expired",
+            "certificate is not yet valid", "certificate not trusted",
+            "certificate rejected", "unable to verify the first certificate",
+        ]
+        t4a = [
+            "crypto/asn1/tasn_dec.c", "crypto/asn1/tasn_enc.c",
+            "crypto/pem/pem_lib.c", "crypto/stack/stack.c",
+            "crypto/x509/by_dir.c",
+        ]
+        t4b = [
+            "sslv3 alert handshake failure", "sslv3 alert bad certificate",
+            "sslv3 alert certificate expired", "sslv3 alert unexpected message",
+            "tlsv1 alert unknown ca", "tlsv1 alert protocol version",
+            "tlsv1 alert internal error", "tlsv1 alert insufficient security",
+            "tlsv13 alert certificate required", "tlsv13 alert missing extension",
+            "ssl handshake failure", "no shared cipher",
+            "wrong version number", "inappropriate fallback",
+        ]
+        all_strings = t1a + t1b + t2a + t2b + t3a + t3b + t4a + t4b
+        content = self._build_openssl_binary(all_strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == 'high', \
+                f"Expected high, got {r.confidence} (score={r.score})"
+            assert r.score >= 60
+            assert len(r.category_scores) == 8
+            assert 'T1A_err_lib' in r.category_scores
+            assert 'T1B_x509v3_ext' in r.category_scores
+            assert 'T2A_oid_names' in r.category_scores
+            assert 'T4B_protocol_errs_openssl' in r.category_scores
+            assert r.library == 'OpenSSL'
+        finally:
+            os.unlink(path)
+
+    def test_high_confidence_boringssl(self):
+        """BoringSSL-variant strings should also yield high confidence."""
+        t1a = [
+            "BIO routines", "Diffie-Hellman routines", "ECDH routines",
+            "ECDSA routines", "HMAC routines", "OCSP routines",
+            "PEM routines", "PKCS7 routines", "SSL routines",
+            "UI routines", "X509 V3 routines", "bignum routines",
+            "common libcrypto routines", "configuration file routines",
+            "elliptic curve routines", "memory buffer routines",
+            "object identifier routines",
+            "ASN.1 encoding routines", "COMP routines", "ENGINE routines",
+            "PKCS8 routines", "RSA routines", "X.509 certificate routines",
+            "public key routines",
+        ]
+        t1b = [
+            "X509v3 Basic Constraints", "X509v3 Key Usage",
+            "X509v3 Subject Key Identifier", "X509v3 Authority Key Identifier",
+            "X509v3 Subject Alternative Name", "X509v3 Extended Key Usage",
+            "X509v3 CRL Distribution Points", "X509v3 Certificate Policies",
+            "X509v3 CRL Number", "X509v3 CRL Reason Code",
+            "X509v3 Issuer Alternative Name", "X509v3 Name Constraints",
+            "X509v3 Policy Constraints", "X509v3 Inhibit Any Policy",
+            "X509v3 Delta CRL Indicator", "X509v3 Freshest CRL",
+        ]
+        t2a = [
+            "prime256v1", "secp384r1", "secp521r1", "secp256k1",
+            "RSA-SHA256", "RSA-SHA384", "RSA-SHA512", "RSA-SHA1",
+            "ecdsa-with-SHA256", "ecdsa-with-SHA384", "ecdsa-with-SHA512",
+            "sha256WithRSAEncryption", "sha384WithRSAEncryption",
+            "sha512WithRSAEncryption", "id-ecPublicKey", "rsaEncryption",
+            "id-aes256-GCM", "id-aes128-GCM", "id-aes256-wrap", "id-aes128-wrap",
+            "hmacWithSHA256", "hmacWithSHA384", "hmacWithSHA512",
+            "AES-256-CBC", "AES-128-CBC", "AES-256-CTR", "AES-128-CTR",
+            "ChaCha20-Poly1305", "pkcs7-data", "pkcs7-signedData",
+            "pkcs7-envelopedData",
+        ]
+        t3a = [
+            "ASN1_ANY", "ASN1_BIT_STRING", "ASN1_BOOLEAN",
+            "ASN1_ENUMERATED", "ASN1_FBOOLEAN", "ASN1_GENERALIZEDTIME",
+            "ASN1_IA5STRING", "ASN1_INTEGER", "ASN1_NULL",
+            "ASN1_OBJECT", "ASN1_OCTET_STRING", "ASN1_PRINTABLE",
+            "ASN1_SEQUENCE", "ASN1_TIME", "ASN1_UTF8STRING",
+        ]
+        t3b = [
+            "certificate chain too long", "certificate has expired",
+            "certificate is not yet valid", "certificate not trusted",
+            "certificate rejected", "unable to verify the first certificate",
+            "unable to get local issuer certificate",
+            "unable to decode issuer public key",
+            "self signed certificate",
+        ]
+        t4a_boring = [
+            "../../flutter/third_party/boringssl/src/crypto/asn1/tasn_dec.c",
+            "../../flutter/third_party/boringssl/src/crypto/asn1/tasn_enc.c",
+            "../../flutter/third_party/boringssl/src/crypto/pem/pem_lib.c",
+            "../../flutter/third_party/boringssl/src/crypto/stack/stack.c",
+            "../../flutter/third_party/boringssl/src/crypto/x509/by_dir.c",
+        ]
+        t4b_boring = [
+            "SSLV3_ALERT_BAD_CERTIFICATE", "SSLV3_ALERT_CERTIFICATE_EXPIRED",
+            "SSLV3_ALERT_CERTIFICATE_REVOKED", "SSLV3_ALERT_HANDSHAKE_FAILURE",
+            "SSLV3_ALERT_ILLEGAL_PARAMETER", "SSLV3_ALERT_UNEXPECTED_MESSAGE",
+            "TLSV1_ALERT_UNKNOWN_CA", "TLSV1_ALERT_PROTOCOL_VERSION",
+            "TLSV1_ALERT_INTERNAL_ERROR", "TLSV1_ALERT_INSUFFICIENT_SECURITY",
+            "TLSV1_ALERT_CERTIFICATE_REQUIRED",
+            "SSL_HANDSHAKE_FAILURE", "NO_SHARED_CIPHER",
+            "WRONG_VERSION_NUMBER", "INAPPROPRIATE_FALLBACK",
+            "BAD_CHANGE_CIPHER_SPEC",
+        ]
+        all_strings = t1a + t1b + t2a + t3a + t3b + t4a_boring + t4b_boring
+        content = self._build_openssl_binary(all_strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == 'high', \
+                f"Expected high, got {r.confidence} (score={r.score})"
+            assert r.score >= 60
+            assert 'T4A_src_paths' in r.category_scores, \
+                "BoringSSL-prefixed paths should match via substring"
+            assert 'T4B_protocol_errs_boringssl' in r.category_scores, \
+                "BoringSSL UPPERCASE protocol alerts should match"
+            assert r.library == 'BoringSSL', \
+                f"Expected BoringSSL, got {r.library}"
+        finally:
+            os.unlink(path)
+
+    def test_medium_confidence(self):
+        """Moderate coverage across 5 categories yields medium."""
+        t1a = [
+            "BIO routines", "SSL routines", "PEM routines",
+            "OCSP routines", "HMAC routines", "PKCS7 routines",
+            "UI routines", "X509 V3 routines",
+            "bignum routines", "common libcrypto routines",
+            "elliptic curve routines", "memory buffer routines",
+            "object identifier routines",
+        ]
+        t1b = [
+            "X509v3 Basic Constraints", "X509v3 Key Usage",
+            "X509v3 Subject Key Identifier", "X509v3 Authority Key Identifier",
+            "X509v3 Subject Alternative Name", "X509v3 Extended Key Usage",
+        ]
+        t2a = [
+            "prime256v1", "secp384r1", "RSA-SHA256",
+            "ecdsa-with-SHA256", "sha256WithRSAEncryption",
+            "id-ecPublicKey", "rsaEncryption",
+            "AES-256-CBC", "AES-128-CBC", "ChaCha20-Poly1305",
+        ]
+        t2b = [
+            "basicConstraints", "subjectKeyIdentifier",
+            "authorityKeyIdentifier", "keyUsage", "extendedKeyUsage",
+        ]
+        t3a = [
+            "ASN1_INTEGER", "ASN1_OBJECT", "ASN1_BOOLEAN",
+            "ASN1_OCTET_STRING", "ASN1_NULL", "ASN1_TIME",
+            "ASN1_SEQUENCE",
+        ]
+        all_strings = t1a + t1b + t2a + t2b + t3a
+        content = self._build_openssl_binary(all_strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == 'medium', \
+                f"Expected medium, got {r.confidence} (score={r.score})"
+            assert r.score >= 30
+        finally:
+            os.unlink(path)
+
+    def test_low_confidence(self):
+        """Sparse coverage across a few categories yields low confidence."""
+        strings = [
+            "BIO routines", "SSL routines", "PEM routines",
+            "OCSP routines", "HMAC routines",
+            "PKCS7 routines", "bignum routines",
+            "common libcrypto routines", "elliptic curve routines",
+            "memory buffer routines", "object identifier routines",
+            "prime256v1", "secp384r1", "RSA-SHA256",
+            "ecdsa-with-SHA256", "sha256WithRSAEncryption",
+            "id-ecPublicKey",
+            "ASN1_INTEGER", "ASN1_OBJECT", "ASN1_BOOLEAN",
+            "ASN1_NULL", "ASN1_TIME",
+        ]
+        content = self._build_openssl_binary(strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == 'low', \
+                f"Expected low, got {r.confidence} (score={r.score})"
+            assert r.score >= 15
+        finally:
+            os.unlink(path)
+
+    def test_below_threshold(self):
+        """Very few matches should yield no confidence."""
+        strings = ["ASN1_INTEGER", "ASN1_OBJECT", "BIO routines"]
+        content = self._build_openssl_binary(strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == '', \
+                f"Expected none, got {r.confidence} (score={r.score})"
+            assert r.score < 15
+        finally:
+            os.unlink(path)
+
+    def test_category_cap(self):
+        """Per-category cap prevents single category from dominating."""
+        all_err = [
+            "BIO routines", "Diffie-Hellman routines", "ECDH routines",
+            "ECDSA routines", "HMAC routines", "OCSP routines",
+            "PEM routines", "PKCS7 routines", "SSL routines",
+            "UI routines", "X509 V3 routines", "bignum routines",
+            "common libcrypto routines", "configuration file routines",
+            "elliptic curve routines", "memory buffer routines",
+            "object identifier routines",
+            "ASN.1 encoding routines", "COMP routines", "ENGINE routines",
+            "PKCS8 routines", "RSA routines", "X.509 certificate routines",
+            "public key routines",
+            "asn1 encoding routines", "digital envelope routines",
+            "dsa routines", "engine routines", "rsa routines",
+            "x509 certificate routines",
+        ]
+        content = self._build_openssl_binary(all_err)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            t1a = r.category_scores.get('T1A_err_lib', {})
+            assert t1a.get('capped', 0) <= 20, \
+                f"T1A_err_lib exceeded cap: {t1a}"
+            assert t1a.get('raw', 0) > 20, \
+                f"Expected raw > cap, got {t1a}"
+        finally:
+            os.unlink(path)
+
+    def test_nonexistent_file(self):
+        r = score_openssl_fingerprint('/nonexistent/file.so')
+        assert r.score == 0.0
+        assert r.confidence == ''
+
+    def test_result_dataclass_fields(self):
+        r = FingerprintResult()
+        assert r.score == 0.0
+        assert r.confidence == ''
+        assert r.category_scores == {}
+        assert r.matched_count == 0
+        assert r.total_candidates == 0
+
+    def test_boringssl_unique_errs_category(self):
+        """T5A BoringSSL-unique errors contribute to library inference."""
+        base = [
+            "BIO routines", "SSL routines", "PEM routines",
+            "OCSP routines", "HMAC routines", "PKCS7 routines",
+            "UI routines", "X509 V3 routines", "bignum routines",
+            "common libcrypto routines", "elliptic curve routines",
+            "memory buffer routines", "object identifier routines",
+            "X509v3 Basic Constraints", "X509v3 Key Usage",
+            "X509v3 Subject Key Identifier", "X509v3 Authority Key Identifier",
+            "X509v3 Subject Alternative Name", "X509v3 Extended Key Usage",
+            "prime256v1", "secp384r1", "RSA-SHA256",
+            "ecdsa-with-SHA256", "sha256WithRSAEncryption",
+            "id-ecPublicKey", "rsaEncryption",
+            "AES-256-CBC", "AES-128-CBC", "ChaCha20-Poly1305",
+            "basicConstraints", "subjectKeyIdentifier",
+            "authorityKeyIdentifier", "keyUsage", "extendedKeyUsage",
+            "ASN1_INTEGER", "ASN1_OBJECT", "ASN1_BOOLEAN",
+            "ASN1_OCTET_STRING", "ASN1_NULL", "ASN1_TIME",
+            "ASN1_SEQUENCE",
+        ]
+        boring_unique = [
+            "ECH_REJECTED", "CHANNEL_ID_NOT_P256",
+            "ALPS_MISMATCH_ON_EARLY_DATA",
+        ]
+        content = self._build_openssl_binary(base + boring_unique)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence in ('medium', 'high'), \
+                f"Expected medium+, got {r.confidence} (score={r.score})"
+            assert 'T5A_boringssl_unique_errs' in r.category_scores
+            assert r.library == 'BoringSSL', \
+                f"Expected BoringSSL from T5A, got {r.library}"
+        finally:
+            os.unlink(path)
+
+    def test_library_inference_shared_only(self):
+        """Shared-only categories default library to OpenSSL."""
+        strings = [
+            "BIO routines", "SSL routines", "PEM routines",
+            "OCSP routines", "HMAC routines",
+            "PKCS7 routines", "bignum routines",
+            "common libcrypto routines", "elliptic curve routines",
+            "memory buffer routines", "object identifier routines",
+            "prime256v1", "secp384r1", "RSA-SHA256",
+            "ecdsa-with-SHA256", "sha256WithRSAEncryption",
+            "id-ecPublicKey",
+            "ASN1_INTEGER", "ASN1_OBJECT", "ASN1_BOOLEAN",
+            "ASN1_NULL", "ASN1_TIME",
+        ]
+        content = self._build_openssl_binary(strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == 'low'
+            assert r.library == 'OpenSSL', \
+                "Shared-only categories should default to OpenSSL"
+        finally:
+            os.unlink(path)
+
+    def test_library_tag_in_category_scores(self):
+        """Library-tagged categories carry 'library' key in category_scores."""
+        strings = [
+            "BIO routines", "SSL routines", "PEM routines",
+            "OCSP routines", "HMAC routines", "PKCS7 routines",
+            "UI routines", "X509 V3 routines", "bignum routines",
+            "common libcrypto routines", "elliptic curve routines",
+            "memory buffer routines", "object identifier routines",
+            "SSLV3_ALERT_BAD_CERTIFICATE", "SSLV3_ALERT_HANDSHAKE_FAILURE",
+            "TLSV1_ALERT_UNKNOWN_CA", "SSL_HANDSHAKE_FAILURE",
+        ]
+        content = self._build_openssl_binary(strings)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            t4b_b = r.category_scores.get('T4B_protocol_errs_boringssl', {})
+            assert t4b_b.get('library') == 'BoringSSL'
+            t1a = r.category_scores.get('T1A_err_lib', {})
+            assert 'library' not in t1a, \
+                "Shared categories should not have library tag"
+        finally:
+            os.unlink(path)
+
+    def test_no_false_positive_openhitls(self):
+        """Generic TLS strings should NOT trigger OpenSSL fingerprint."""
+        non_ossl = [
+            "TLS handshake failed",
+            "certificate verify failed",
+            "connection reset by peer",
+            "SSL_ERROR_SYSCALL",
+        ]
+        content = self._build_openssl_binary(non_ossl)
+        path = self._write_file(content)
+        try:
+            r = score_openssl_fingerprint(path)
+            assert r.confidence == '', \
+                f"False positive: {r.confidence} (score={r.score})"
         finally:
             os.unlink(path)
