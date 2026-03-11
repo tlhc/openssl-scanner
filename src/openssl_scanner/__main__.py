@@ -1089,7 +1089,7 @@ def cmd_hap(args) -> int:
             per_pkg_jobs = 1
         else:
             parallel = 1
-            per_pkg_jobs = args.jobs
+            per_pkg_jobs = min(args.jobs, os.cpu_count() or 4)
 
         logger_name = logger.name
         scan_total = len(to_scan)

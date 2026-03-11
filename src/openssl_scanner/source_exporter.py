@@ -14,6 +14,8 @@ from .source_analyzer import SourceScanResult
 
 logger = logging.getLogger(__name__)
 
+XLSX_MAX_ROW = 1048576
+
 COLUMNS = [
     ('file_path',         60, 'File Path'),
     ('file_name',         25, 'File Name'),
@@ -55,25 +57,37 @@ class SourceExcelExporter:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
 
+        base_title = "OpenSSL Call Sites"
         wb = Workbook()
-        ws = wb.active
-        ws.title = "OpenSSL Call Sites"
+        ws_first = wb.active
+        ws_first.title = base_title
 
         header_font = Font(bold=True)
         header_fill = PatternFill(
             start_color="E8F4FC", end_color="E8F4FC", fill_type="solid"
         )
 
-        for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
-            cell = ws.cell(row=1, column=col_idx, value=title)
-            cell.font = header_font
-            cell.fill = header_fill
-            ws.column_dimensions[
-                chr(64 + col_idx) if col_idx <= 26
-                else 'A' + chr(64 + col_idx - 26)
-            ].width = width
+        def _init_sheet(ws_target):
+            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
+                cell = ws_target.cell(row=1, column=col_idx, value=title)
+                cell.font = header_font
+                cell.fill = header_fill
+                ws_target.column_dimensions[
+                    chr(64 + col_idx) if col_idx <= 26
+                    else 'A' + chr(64 + col_idx - 26)
+                ].width = width
 
-        for row_idx, cs in enumerate(result.call_sites, 2):
+        _init_sheet(ws_first)
+        ws = ws_first
+
+        row_idx = 2
+        sheet_num = 1
+        for cs in result.call_sites:
+            if row_idx > XLSX_MAX_ROW:
+                sheet_num += 1
+                ws = wb.create_sheet(f"{base_title} ({sheet_num})")
+                _init_sheet(ws)
+                row_idx = 2
             ws.cell(row=row_idx, column=1, value=cs.file_path)
             ws.cell(row=row_idx, column=2, value=cs.file_name)
             ws.cell(row=row_idx, column=3, value=cs.caller_function)
@@ -83,10 +97,15 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=7, value=cs.call_args)
             ws.cell(row=row_idx, column=8,
                     value=getattr(cs, 'detection_method', 'dynamic-link'))
+            row_idx += 1
 
         if result.call_sites:
-            last_row = len(result.call_sites) + 1
-            ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last_row}"
+            last_row = min(len(result.call_sites) + 1, XLSX_MAX_ROW)
+            ws_first.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last_row}"
+
+        if sheet_num > 1:
+            logger.info("Call Sites split across %d sheets (%d rows)",
+                        sheet_num, len(result.call_sites))
 
         self._write_symbol_summary(wb, result, header_font, header_fill)
 
@@ -271,27 +290,45 @@ class SourceMergeExporter:
         has_files_scanned = any(
             p['files_scanned'] != '--' for p in project_data)
 
+        def _init_project_sheet(target_ws):
+            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
+                cell = target_ws.cell(row=1, column=col_idx, value=title)
+                cell.font = header_font
+                cell.fill = header_fill
+                target_ws.column_dimensions[
+                    chr(64 + col_idx) if col_idx <= 26
+                    else 'A' + chr(64 + col_idx - 26)
+                ].width = width
+
         for idx, pdata in enumerate(project_data):
             sheet_name = names[idx]
             rows = pdata['rows']
             files_scanned = pdata['files_scanned']
 
-            ws = wb.create_sheet(title=sheet_name)
-            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
-                cell = ws.cell(row=1, column=col_idx, value=title)
-                cell.font = header_font
-                cell.fill = header_fill
-                ws.column_dimensions[
-                    chr(64 + col_idx) if col_idx <= 26
-                    else 'A' + chr(64 + col_idx - 26)
-                ].width = width
+            ws_first = wb.create_sheet(title=sheet_name)
+            _init_project_sheet(ws_first)
+            ws = ws_first
 
-            for row_idx, row_data in enumerate(rows, 2):
+            row_idx = 2
+            sheet_num = 1
+            for row_data in rows:
+                if row_idx > XLSX_MAX_ROW:
+                    sheet_num += 1
+                    overflow_name = f"{sheet_name[:25]} ({sheet_num})"
+                    ws = wb.create_sheet(title=overflow_name)
+                    _init_project_sheet(ws)
+                    row_idx = 2
                 for col_idx, value in enumerate(row_data, 1):
                     ws.cell(row=row_idx, column=col_idx, value=value)
+                row_idx += 1
 
             if rows:
-                ws.auto_filter.ref = f"A1:{LAST_COL_LETTER}{len(rows) + 1}"
+                last = min(len(rows) + 1, XLSX_MAX_ROW)
+                ws_first.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last}"
+
+            if sheet_num > 1:
+                logger.info("Project '%s' split across %d sheets (%d rows)",
+                            sheet_name, sheet_num, len(rows))
 
             cat_counts = self._count_categories(rows)
             top_cat, top_count = '', 0
@@ -353,20 +390,26 @@ class SourceMergeExporter:
     def _read_xlsx(self, path: str) -> Tuple[str, str, List[List]]:
         """Read call site rows from a source scan XLSX.
 
+        Reads all sheets whose title starts with "OpenSSL Call Sites"
+        to handle overflow continuation sheets.
+
         Returns:
             (project_name, files_scanned_placeholder, list_of_row_values)
         """
         from . import _vendor  # noqa: F401
         from openpyxl import load_workbook
 
+        base_title = "OpenSSL Call Sites"
         wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
         rows = []
-        for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
-            if row_idx == 0:
-                continue
-            if any(v is not None for v in row):
-                rows.append(list(row[:len(COLUMNS)]))
+        for sn in wb.sheetnames:
+            if sn == base_title or sn.startswith(base_title + " ("):
+                ws = wb[sn]
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                    if row_idx == 0:
+                        continue
+                    if any(v is not None for v in row):
+                        rows.append(list(row[:len(COLUMNS)]))
         wb.close()
 
         name = os.path.splitext(os.path.basename(path))[0]

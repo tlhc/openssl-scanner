@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+XLSX_MAX_ROW = 1048576
+
 
 class DiffStatus(str, Enum):
     ADDED = "added"
@@ -1203,7 +1205,7 @@ class SourceDiffExcelExporter:
         _set_auto_filter(ws, row, num_cols)
 
     def _write_callsite_sheet(self, wb, result, header_font, header_fill):
-        ws = wb.create_sheet("Call Site Delta")
+        base_title = "Call Site Delta"
         is_combo = result.is_combo
         if is_combo:
             columns = [
@@ -1218,7 +1220,11 @@ class SourceDiffExcelExporter:
                 (35, "OpenSSL Symbol"), (20, "Category"), (10, "Old Line"),
                 (10, "New Line"), (30, "Old Args"), (30, "New Args"),
             ]
-        num_cols = _write_header(ws, columns, header_font, header_fill)
+
+        ws_first = wb.create_sheet(base_title)
+        num_cols = _write_header(ws_first, columns, header_font, header_fill)
+        ws = ws_first
+        sheet_num = 1
 
         all_cs: List[Tuple[str, CallSiteDelta]] = []
         for proj in result.projects:
@@ -1240,6 +1246,11 @@ class SourceDiffExcelExporter:
             if not csd.arg_deltas:
                 continue
             for ad in csd.arg_deltas:
+                if row > XLSX_MAX_ROW:
+                    sheet_num += 1
+                    ws = wb.create_sheet(f"{base_title} ({sheet_num})")
+                    _write_header(ws, columns, header_font, header_fill)
+                    row = 2
                 col = 1
                 if is_combo:
                     ws.cell(row=row, column=col, value=_safe_cell(proj_name))
@@ -1268,7 +1279,12 @@ class SourceDiffExcelExporter:
                 ws.cell(row=row, column=col, value=_safe_cell(ad.new_args))
                 row += 1
 
-        _set_auto_filter(ws, row, num_cols)
+        if sheet_num == 1:
+            _set_auto_filter(ws_first, row, num_cols)
+        else:
+            _set_auto_filter(ws_first, XLSX_MAX_ROW + 1, num_cols)
+            _set_auto_filter(ws, row, num_cols)
+            logger.info("Call Site Delta split across %d sheets", sheet_num)
 
     def _write_project_sheet(self, wb, result, header_font, header_fill):
         ws = wb.create_sheet("Project Delta")

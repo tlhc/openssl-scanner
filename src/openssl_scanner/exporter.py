@@ -15,6 +15,9 @@ from importlib import resources
 logger = logging.getLogger(__name__)
 
 
+XLSX_MAX_ROW = 1048576
+
+
 class ExcelExporter:
     """
     Export report to Excel with comprehensive data sheets.
@@ -214,6 +217,17 @@ class ExcelExporter:
         for col, width in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(col)].width = width
 
+    def _new_sheet_with_header(self, wb, title, headers, col_widths):
+        """Create a new worksheet with styled headers and column widths."""
+        from openpyxl.utils import get_column_letter
+        ws = wb.create_sheet(title)
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=header)
+        self._style_header(ws, 1, len(headers))
+        for col_idx, w in enumerate(col_widths, 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = w
+        return ws
+
     def _create_file_symbol_sheet(self, wb, data: Dict) -> None:
         """
         Create flat file-symbol table for pivot analysis.
@@ -221,16 +235,33 @@ class ExcelExporter:
         Each row is one (component/file, binary, symbol) tuple - ideal for pivot tables.
         For single scans: Component = File Path, Binary = File Name
         For aggregated scans: Component = component name, Binary = executable name
+
+        Overflows to continuation sheets when row count exceeds Excel limit.
         """
-        ws = wb.create_sheet("File-Symbol")
+        headers = ["Component", "Binary", "Symbol", "Category", "Detection"]
+        col_widths = [60, 25, 35, 18, 12]
+
+        sheet_num = 1
+        ws = self._new_sheet_with_header(wb, "File-Symbol", headers, col_widths)
+        row_idx = 2
+        total_rows = 0
+
+        def _emit_row(c1, c2, c3, c4, c5):
+            nonlocal ws, row_idx, sheet_num, total_rows
+            if row_idx > XLSX_MAX_ROW:
+                sheet_num += 1
+                title = f"File-Symbol ({sheet_num})"
+                ws = self._new_sheet_with_header(wb, title, headers, col_widths)
+                row_idx = 2
+            ws.cell(row=row_idx, column=1, value=c1)
+            ws.cell(row=row_idx, column=2, value=c2)
+            ws.cell(row=row_idx, column=3, value=c3)
+            ws.cell(row=row_idx, column=4, value=c4)
+            ws.cell(row=row_idx, column=5, value=c5)
+            row_idx += 1
+            total_rows += 1
 
         report_type = data.get('meta', {}).get('report_type', 'single')
-        is_aggregated = report_type == 'aggregated'
-
-        headers = ["Component", "Binary", "Symbol", "Category", "Detection"]
-        for col, header in enumerate(headers, 1):
-            ws.cell(row=1, column=col, value=header)
-        self._style_header(ws, 1, len(headers))
 
         by_category = data.get('openssl_symbols', {}).get('by_category', {})
         symbol_to_category = {}
@@ -268,8 +299,6 @@ class ExcelExporter:
                 return 'static-link'
             return 'dynamic-link'
 
-        row_idx = 2
-
         by_file = data.get('openssl_symbols', {}).get('by_file', {})
         if by_file:
             for path, info in by_file.items():
@@ -278,15 +307,10 @@ class ExcelExporter:
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
                     detection = _detection_label(path, sym)
-                    ws.cell(row=row_idx, column=1, value=path)
-                    ws.cell(row=row_idx, column=2, value=filename)
-                    ws.cell(row=row_idx, column=3, value=sym)
-                    ws.cell(row=row_idx, column=4, value=category)
-                    ws.cell(row=row_idx, column=5, value=detection)
-                    row_idx += 1
+                    _emit_row(path, filename, sym, category, detection)
 
         files_detail = data.get('files_detail', [])
-        if files_detail and row_idx == 2:
+        if files_detail and total_rows == 0:
             for f in files_detail:
                 path = f.get('path', '')
                 filename = os.path.basename(path)
@@ -294,14 +318,9 @@ class ExcelExporter:
                 for sym in sorted(symbols):
                     category = symbol_to_category.get(sym, 'other')
                     detection = _detection_label(path, sym)
-                    ws.cell(row=row_idx, column=1, value=path)
-                    ws.cell(row=row_idx, column=2, value=filename)
-                    ws.cell(row=row_idx, column=3, value=sym)
-                    ws.cell(row=row_idx, column=4, value=category)
-                    ws.cell(row=row_idx, column=5, value=detection)
-                    row_idx += 1
+                    _emit_row(path, filename, sym, category, detection)
 
-        if components and row_idx == 2:
+        if components and total_rows == 0:
             for comp_name, comp_data in components.items():
                 exec_detail = comp_data.get('executables_detail', {})
                 if exec_detail:
@@ -309,31 +328,19 @@ class ExcelExporter:
                         for cat, cat_data in bin_data.get('by_category', {}).items():
                             symbols = cat_data.get('symbols', []) if isinstance(cat_data, dict) else []
                             for sym in sorted(symbols):
-                                ws.cell(row=row_idx, column=1, value=comp_name)
-                                ws.cell(row=row_idx, column=2, value=bin_name)
-                                ws.cell(row=row_idx, column=3, value=sym)
-                                ws.cell(row=row_idx, column=4, value=cat)
-                                ws.cell(row=row_idx, column=5, value='dynamic-link')
-                                row_idx += 1
+                                _emit_row(comp_name, bin_name, sym, cat, 'dynamic-link')
                 else:
                     for cat, cat_data in comp_data.get('by_category', {}).items():
                         symbols = cat_data.get('symbols', []) if isinstance(cat_data, dict) else []
                         for sym in sorted(symbols):
-                            ws.cell(row=row_idx, column=1, value=comp_name)
-                            ws.cell(row=row_idx, column=2, value=comp_name)
-                            ws.cell(row=row_idx, column=3, value=sym)
-                            ws.cell(row=row_idx, column=4, value=cat)
-                            ws.cell(row=row_idx, column=5, value='direct')
-                            row_idx += 1
+                            _emit_row(comp_name, comp_name, sym, cat, 'direct')
 
-        if row_idx == 2:
+        if total_rows == 0:
             ws.cell(row=2, column=1, value="No file-symbol data available")
 
-        ws.column_dimensions['A'].width = 60
-        ws.column_dimensions['B'].width = 25
-        ws.column_dimensions['C'].width = 35
-        ws.column_dimensions['D'].width = 18
-        ws.column_dimensions['E'].width = 12
+        if sheet_num > 1:
+            logger.info("File-Symbol data split across %d sheets (%d rows)",
+                        sheet_num, total_rows)
 
     def _create_import_chains_sheet(self, wb, data: Dict) -> None:
         """
@@ -343,12 +350,13 @@ class ExcelExporter:
         - Detailed: {symbol: [{source_file, chain, depth}, ...]}
         - Legacy: {symbol: [chain_string, ...]}
         """
-        ws = wb.create_sheet("Import Chains")
-
         headers = ["Source File", "File Name", "Symbol", "Category", "Import Chain", "Depth"]
-        for col, header in enumerate(headers, 1):
-            ws.cell(row=1, column=col, value=header)
-        self._style_header(ws, 1, len(headers))
+        col_widths = [50, 20, 35, 15, 80, 10]
+
+        sheet_num = 1
+        ws = self._new_sheet_with_header(wb, "Import Chains", headers, col_widths)
+        row_idx = 2
+        total_rows = 0
 
         import_chains = data.get('openssl_symbols', {}).get('import_chains', {})
         by_category = data.get('openssl_symbols', {}).get('by_category', {})
@@ -359,7 +367,6 @@ class ExcelExporter:
                 for sym in cat_data.get('symbols', []):
                     symbol_to_category[sym] = cat
 
-        row_idx = 2
         for symbol, chains in sorted(import_chains.items()):
             category = symbol_to_category.get(symbol, 'other')
 
@@ -379,6 +386,12 @@ class ExcelExporter:
 
                 file_name = os.path.basename(source_file) if source_file else ''
 
+                if row_idx > XLSX_MAX_ROW:
+                    sheet_num += 1
+                    title = f"Import Chains ({sheet_num})"
+                    ws = self._new_sheet_with_header(wb, title, headers, col_widths)
+                    row_idx = 2
+
                 ws.cell(row=row_idx, column=1, value=source_file)
                 ws.cell(row=row_idx, column=2, value=file_name)
                 ws.cell(row=row_idx, column=3, value=symbol)
@@ -386,16 +399,14 @@ class ExcelExporter:
                 ws.cell(row=row_idx, column=5, value=chain_str)
                 ws.cell(row=row_idx, column=6, value=depth)
                 row_idx += 1
+                total_rows += 1
 
-        if row_idx == 2:
+        if total_rows == 0:
             ws.cell(row=2, column=1, value="No import chain data available")
 
-        ws.column_dimensions['A'].width = 50
-        ws.column_dimensions['B'].width = 20
-        ws.column_dimensions['C'].width = 35
-        ws.column_dimensions['D'].width = 15
-        ws.column_dimensions['E'].width = 80
-        ws.column_dimensions['F'].width = 10
+        if sheet_num > 1:
+            logger.info("Import Chains data split across %d sheets (%d rows)",
+                        sheet_num, total_rows)
 
     def _create_category_sheet(self, wb, data: Dict) -> None:
         """Create category statistics sheet."""
