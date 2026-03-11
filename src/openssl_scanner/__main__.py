@@ -1109,7 +1109,10 @@ def cmd_hap(args) -> int:
             completed += 1
             bar = _hap_progress_bar(completed, scan_total, scan_start)
             msg = ret.get('message', '')
+            elapsed = ret.get('elapsed')
             if msg:
+                if elapsed is not None:
+                    msg = f"{msg}  [{elapsed:.2f}s]"
                 _hap_print_progress(f"  {msg}", bar, is_tty)
             elif is_tty:
                 sys.stdout.write('\r\033[K' + bar)
@@ -1312,6 +1315,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
     entry_key = entry.display_name
     jobs = per_pkg_jobs if per_pkg_jobs is not None else args.jobs
     tmp_file = None
+    pkg_start = time.time()
     try:
         pkg_path, tmp_file = _extract_pkg_entry(entry, logger)
         logger.info("Extracting: %s", entry.display_name)
@@ -1324,6 +1328,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                 extractor.cleanup(extract_result)
             return {'result': None, 'custom_result': None,
                     'entry_key': entry_key, 'no_native': True, 'failed': False,
+                    'elapsed': time.time() - pkg_start,
                     'message': f"{entry.display_name} -> NO NATIVE LIBS"}
 
         logger.info(
@@ -1416,26 +1421,30 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
         pkg_name = meta.bundle_name or entry.display_name
         sym_count = len(result.all_unique_symbols)
         file_count = result.files_with_openssl
+        err_count = len(result.errors) if hasattr(result, 'errors') else 0
+        err_suffix = f", {err_count} errors" if err_count else ""
 
         if per_package:
             _hap_write_single_report(
                 result, entry_key, out_names[entry_key], reporter, args.json_only
             )
             out_name = os.path.basename(out_names[entry_key])
-            msg = f"{pkg_name} -> {out_name} ({sym_count} symbols, {file_count} files)"
+            msg = f"{pkg_name} -> {out_name} ({sym_count} symbols, {file_count} files{err_suffix})"
         elif not args.json_only:
-            msg = f"{pkg_name} | {sym_count} OpenSSL symbols | {file_count} files"
+            msg = f"{pkg_name} | {sym_count} OpenSSL symbols | {file_count} files{err_suffix}"
         else:
             msg = ''
 
         return {'result': result, 'custom_result': custom_result,
                 'entry_key': entry_key, 'no_native': False, 'failed': False,
+                'elapsed': time.time() - pkg_start,
                 'message': msg}
 
     except (ValueError, zipfile.BadZipFile, OSError) as e:
         logger.debug("Failed to process %s: %s", entry.display_name, e)
         return {'result': None, 'custom_result': None,
                 'entry_key': entry_key, 'no_native': False, 'failed': True,
+                'elapsed': time.time() - pkg_start,
                 'message': f"{entry.display_name} -> FAILED ({e})"}
     finally:
         if tmp_file and os.path.exists(tmp_file):
