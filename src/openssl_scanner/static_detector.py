@@ -143,7 +143,8 @@ def detect_boringssl_weak_symbols(symbol_names):
     return len(BORINGSSL_WEAK & set(symbol_names)) >= 2
 
 
-def detect_static_ssl(file_path: str) -> StaticSSLResult:
+def detect_static_ssl(file_path: str, *, _raw_data=None,
+                      _strings=None) -> StaticSSLResult:
     """
     Detect statically linked SSL library with full signal details.
 
@@ -157,10 +158,15 @@ def detect_static_ssl(file_path: str) -> StaticSSLResult:
 
     Args:
         file_path: Path to the binary file.
+        _raw_data: Pre-loaded file bytes (skips file open if provided).
+        _strings: Pre-extracted printable strings (avoids re-extraction).
 
     Returns:
         StaticSSLResult with detection details.
     """
+    if _raw_data is not None:
+        return _scan_data(_raw_data, _strings=_strings)
+
     try:
         with open(file_path, 'rb') as f:
             file_size = f.seek(0, 2)
@@ -172,23 +178,26 @@ def detect_static_ssl(file_path: str) -> StaticSSLResult:
             if file_size > _MAX_SCAN_SIZE:
                 try:
                     with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                        return _scan_data(mm)
+                        return _scan_data(mm, _strings=_strings)
                 except ValueError:
                     return StaticSSLResult()
             else:
                 data = f.read()
-                return _scan_data(data)
+                return _scan_data(data, _strings=_strings)
 
     except (IOError, OSError) as e:
         logger.debug("Failed to scan %s for static SSL: %s", file_path, e)
         return StaticSSLResult()
 
 
-def _scan_data(data) -> StaticSSLResult:
+def _scan_data(data, *, _strings=None) -> StaticSSLResult:
     """Scan bytes for SSL library signatures.
 
     Reordered for early exit: check cheap banner regexes first, only run
     expensive corroboration if a banner is found.
+
+    If _strings is provided, reuses the pre-extracted string set for
+    corroboration instead of re-scanning raw data.
     """
 
     match = OPENSSL_STRICT_PATTERN.search(data)
@@ -197,7 +206,7 @@ def _scan_data(data) -> StaticSSLResult:
         has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
         has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
         has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
-        sym_count, found_syms = _count_corroborating(data)
+        sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['version_banner_strict']
         if has_fvisibility:
             signals.append('fvisibility_hidden')
@@ -222,7 +231,7 @@ def _scan_data(data) -> StaticSSLResult:
     if boringssl_src_paths >= 3:
         is_boringssl = True
         has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
-        sym_count, found_syms = _count_corroborating(data)
+        sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['boringssl_src_paths']
         if has_fvisibility:
             signals.append('fvisibility_hidden')
@@ -237,7 +246,7 @@ def _scan_data(data) -> StaticSSLResult:
     if boringssl_unique_errors >= 2:
         is_boringssl = True
         has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
-        sym_count, found_syms = _count_corroborating(data)
+        sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['boringssl_unique_errors']
         if has_fvisibility:
             signals.append('fvisibility_hidden')
@@ -259,7 +268,7 @@ def _scan_data(data) -> StaticSSLResult:
     has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
     has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
     has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
-    sym_count, found_syms = _count_corroborating(data)
+    sym_count, found_syms = _count_corroborating(data, _strings=_strings)
 
     if is_boringssl:
         if sym_count >= MIN_CORROBORATING_COUNT or has_fvisibility:
@@ -396,11 +405,14 @@ def _load_probe_symbols():
     _CORROBORATING_LOADED = True
 
 
-def _count_corroborating(data):
+def _count_corroborating(data, _strings=None):
     """Count and return corroborating symbol strings present in data.
 
     Uses regex-based string extraction + set intersection: O(file_size + |symbols|).
     Works on both bytes and mmap.mmap objects.
+
+    If _strings is provided, reuses the pre-extracted string set instead of
+    re-scanning the raw data.
     """
     global CORROBORATING_SYMBOLS
     _load_probe_symbols()
@@ -410,7 +422,10 @@ def _count_corroborating(data):
     for sym in CORROBORATING_SYMBOLS:
         probe_strs.add(sym.decode('ascii') if isinstance(sym, bytes) else sym)
 
-    strings = _extract_printable_strings(data)
+    if _strings is not None:
+        strings = _strings
+    else:
+        strings = _extract_printable_strings(data)
 
     found = sorted(strings & probe_strs)
     return len(found), found
@@ -469,7 +484,7 @@ def _read_strings_from_file(file_path):
         return None
 
 
-def scan_hidden_static_symbols(file_path, openssl_exports):
+def scan_hidden_static_symbols(file_path, openssl_exports, *, _strings=None):
     """Scan binary for all OpenSSL symbol name strings.
 
     Single-pass extraction: regex-iterate non-NUL chunks, decode printable
@@ -479,11 +494,15 @@ def scan_hidden_static_symbols(file_path, openssl_exports):
     Args:
         file_path: Path to the binary file.
         openssl_exports: Full set of known OpenSSL export names (str).
+        _strings: Pre-extracted printable strings (avoids re-reading file).
 
     Returns:
         Sorted list of OpenSSL symbol names found as strings.
     """
-    strings = _read_strings_from_file(file_path)
+    if _strings is not None:
+        strings = _strings
+    else:
+        strings = _read_strings_from_file(file_path)
     if strings is None:
         return []
     found = strings & set(openssl_exports)
@@ -541,7 +560,7 @@ def _infer_library_from_fingerprint(cat_scores):
     return max(lib_scores, key=lib_scores.get)
 
 
-def score_openssl_fingerprint(file_path):
+def score_openssl_fingerprint(file_path, *, _strings=None):
     """Score a binary for OpenSSL-family fingerprint strings in .rodata.
 
     Extracts NUL-terminated strings from the file and matches against
@@ -556,6 +575,7 @@ def score_openssl_fingerprint(file_path):
 
     Args:
         file_path: Path to the binary file.
+        _strings: Pre-extracted printable strings (avoids re-reading file).
 
     Returns:
         FingerprintResult with score, confidence, and per-category breakdown.
@@ -569,7 +589,10 @@ def score_openssl_fingerprint(file_path):
     if not categories:
         return FingerprintResult()
 
-    strings = _read_strings_from_file(file_path)
+    if _strings is not None:
+        strings = _strings
+    else:
+        strings = _read_strings_from_file(file_path)
     if strings is None:
         return FingerprintResult()
 

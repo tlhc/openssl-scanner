@@ -284,7 +284,7 @@ class TestDynamicLinkSuppression:
                 signals=['version_banner_strict', 'corroborating_symbols_5'],
             )
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: banner_result)
+                      lambda path, **kw: banner_result)
             result = self._run(info)
         assert result.static_openssl is False
         assert result.openssl_direct is True
@@ -300,7 +300,7 @@ class TestDynamicLinkSuppression:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult())
+                      lambda path, **kw: StaticSSLResult())
             result = self._run(info)
         assert result.static_openssl is False
         assert result.openssl_direct is True
@@ -319,7 +319,7 @@ class TestDynamicLinkSuppression:
                 signals=['version_banner_strict'],
             )
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: banner_result)
+                      lambda path, **kw: banner_result)
             result = self._run(info)
         assert result.static_openssl is True
         assert result.static_openssl_version == '3.0.9'
@@ -338,9 +338,9 @@ class TestDynamicLinkSuppression:
                 signals=['boringssl_banner', 'fvisibility_hidden'],
             )
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: banner_result)
+                      lambda path, **kw: banner_result)
             m.setattr('openssl_scanner.scanner.scan_hidden_static_symbols',
-                      lambda path, exports: ['SSL_CTX_new', 'SSL_connect'])
+                      lambda path, exports, **kw: ['SSL_CTX_new', 'SSL_connect'])
             result = self._run(info)
         assert result.static_openssl is True
         assert result.openssl_direct is True
@@ -362,7 +362,7 @@ class TestDynamicLinkSuppression:
             with pytest.MonkeyPatch.context() as m:
                 from openssl_scanner.static_detector import StaticSSLResult
                 m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                          lambda path: StaticSSLResult(
+                          lambda path, **kw: StaticSSLResult(
                               detected=True, library='OpenSSL', version='3.0.9',
                               signals=['version_banner_strict']))
                 result = self._run(info)
@@ -390,7 +390,7 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult())
+                      lambda path, **kw: StaticSSLResult())
             result = _detect_static_phase(
                 '/test.so', info, [], [], [], set())
         assert result.detected is False
@@ -405,7 +405,7 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult())
+                      lambda path, **kw: StaticSSLResult())
             result = _detect_static_phase(
                 '/test.so', info,
                 ['SSL_connect'], ['EVP_sha256'],
@@ -421,7 +421,7 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult(
+                      lambda path, **kw: StaticSSLResult(
                           detected=True, library='OpenSSL', version='3.0.9',
                           signals=['version_banner_strict']))
             result = _detect_static_phase(
@@ -437,7 +437,7 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult(
+                      lambda path, **kw: StaticSSLResult(
                           detected=True, library='OpenSSL', version='3.0.9',
                           signals=['version_banner_strict']))
             result = _detect_static_phase(
@@ -454,11 +454,11 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult(
+                      lambda path, **kw: StaticSSLResult(
                           detected=True, library='BoringSSL', version=None,
                           signals=['boringssl_banner']))
             m.setattr('openssl_scanner.scanner.scan_hidden_static_symbols',
-                      lambda path, exports: ['SSL_CTX_new'])
+                      lambda path, exports, **kw: ['SSL_CTX_new'])
             result = _detect_static_phase(
                 '/test.so', info,
                 ['malloc'], [],
@@ -477,7 +477,7 @@ class TestDetectStaticPhase:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda path: StaticSSLResult())
+                      lambda path, **kw: StaticSSLResult())
             _detect_static_phase('/test.so', info, ossl_syms, ossl_def,
                                   [], {'SSL_connect', 'EVP_sha256'})
         assert ossl_syms == original_syms
@@ -613,7 +613,7 @@ class TestBuildFileResultOrchestration:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda p: StaticSSLResult())
+                      lambda p, **kw: StaticSSLResult())
             result = _build_file_result(
                 '/test.so', info,
                 ['SSL_connect'], [], ['libcrypto.so'], exports)
@@ -631,7 +631,7 @@ class TestBuildFileResultOrchestration:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda p: StaticSSLResult())
+                      lambda p, **kw: StaticSSLResult())
             result = _build_file_result(
                 '/test.so', info,
                 ['SSL_connect'], ['EVP_sha256'], [], exports)
@@ -649,7 +649,7 @@ class TestBuildFileResultOrchestration:
             from openssl_scanner.static_detector import StaticSSLResult
             from openssl_scanner.dlopen_analyzer import DlopenResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda p: StaticSSLResult())
+                      lambda p, **kw: StaticSSLResult())
             m.setattr('openssl_scanner.dlopen_analyzer.detect_dlopen_openssl',
                       lambda *a, **kw: DlopenResult(
                           dlsym_symbols=['EVP_sha256'],
@@ -667,7 +667,7 @@ class TestBuildFileResultOrchestration:
         with pytest.MonkeyPatch.context() as m:
             from openssl_scanner.static_detector import StaticSSLResult
             m.setattr('openssl_scanner.scanner.detect_static_ssl',
-                      lambda p: StaticSSLResult())
+                      lambda p, **kw: StaticSSLResult())
             result = _build_file_result(
                 '/test.so', info, [], [], [], set())
         assert result.path == '/test.so'

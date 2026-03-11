@@ -184,19 +184,23 @@ def _analyze_file_worker(item: WorkItem) -> 'FileResult':
     openssl_libs = [lib for lib in info.needed_libs
                     if any(lib.lower().startswith(p)
                            for p in OPENSSL_LIBRARY_PATTERNS)]
+
+    raw_data, strings = _preload_file_data(path)
+
     file_result = _build_file_result(path, info, openssl_symbols, openssl_defined,
-                                     openssl_libs, openssl_exports)
+                                     openssl_libs, openssl_exports,
+                                     _raw_data=raw_data, _strings=strings)
 
     if custom_patterns:
         basename = os.path.basename(path)
         if basename.endswith('.so') or '.so.' in basename:
             try:
-                from .elf_analyzer import extract_rodata_matches
                 und_set = set(undefined_names)
                 def_set = set(defined_names)
                 hits = (und_set | def_set) & custom_patterns
                 remaining = custom_patterns - hits
                 if remaining:
+                    from .elf_analyzer import extract_rodata_matches
                     rodata_hits = extract_rodata_matches(path, remaining)
                     hits = hits | rodata_hits
                 file_result.custom_hit_symbols = hits
@@ -230,8 +234,36 @@ class _DlopenDetection:
     confidence: str = 'high'
 
 
+def _preload_file_data(path):
+    """Read file once, return (raw_data, strings) for all detection phases.
+
+    Eliminates redundant file reads across detect_static_ssl,
+    score_openssl_fingerprint, and scan_hidden_static_symbols.
+    Each of those functions accepts optional pre-loaded data via
+    keyword arguments (_raw_data, _strings).
+
+    Memory: the full file is read into bytes. For a 346 MB .so this
+    allocates ~346 MB per worker process.  This is acceptable because
+    (a) workers process one file at a time and exit afterward, so the
+    OS reclaims all memory, and (b) the baseline code opened the same
+    file 4-5 times across detection phases, producing overlapping
+    buffers with similar peak RSS.
+    """
+    from .static_detector import _extract_printable_strings
+    try:
+        with open(path, 'rb') as f:
+            raw_data = f.read()
+        if not raw_data:
+            return None, None
+        strings = _extract_printable_strings(raw_data)
+        return raw_data, strings
+    except (IOError, OSError):
+        return None, None
+
+
 def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
-                          openssl_libs, openssl_exports):
+                          openssl_libs, openssl_exports,
+                          _raw_data=None, _strings=None):
     """Detect statically linked OpenSSL/BoringSSL.
 
     Runs banner detection, BoringSSL weak-symbol fallback,
@@ -239,11 +271,14 @@ def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
 
     Does NOT mutate openssl_symbols or openssl_defined.
 
+    If _raw_data and _strings are provided, passes them to downstream
+    detection functions to avoid redundant file reads.
+
     Returns:
         _StaticDetection with results.
     """
     result = _StaticDetection()
-    ssl_result = detect_static_ssl(path)
+    ssl_result = detect_static_ssl(path, _raw_data=_raw_data, _strings=_strings)
 
     if not ssl_result.detected:
         try:
@@ -302,7 +337,7 @@ def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
                 result.force_direct = True
                 if openssl_exports:
                     hidden_syms = scan_hidden_static_symbols(
-                        path, openssl_exports)
+                        path, openssl_exports, _strings=_strings)
                     if hidden_syms:
                         result.extra_symbols = hidden_syms
             logger.debug(
@@ -310,7 +345,7 @@ def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
                 ssl_result.library, os.path.basename(path),
                 ssl_result.version, ssl_result.signals, result.hidden_static)
 
-    fp_result = score_openssl_fingerprint(path)
+    fp_result = score_openssl_fingerprint(path, _strings=_strings)
     if fp_result.matched_count > 0:
         result.fingerprint_detail = {
             'score': fp_result.score,
@@ -333,7 +368,7 @@ def _detect_static_phase(path, info, openssl_symbols, openssl_defined,
                fp_result.total_candidates))
         if openssl_exports:
             hidden_syms = scan_hidden_static_symbols(
-                path, openssl_exports)
+                path, openssl_exports, _strings=_strings)
             if hidden_syms:
                 result.extra_symbols = hidden_syms
         logger.debug(
@@ -408,7 +443,8 @@ def _detect_dlopen_phase(path, info, openssl_symbols, openssl_defined,
 
 
 def _build_file_result(path, info, openssl_symbols, openssl_defined,
-                       openssl_libs, openssl_exports):
+                       openssl_libs, openssl_exports,
+                       _raw_data=None, _strings=None):
     """Shared classification logic for ELF file analysis.
 
     Orchestrates static and dlopen detection phases, then assembles
@@ -423,6 +459,8 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
         openssl_defined: OpenSSL symbols from .dynsym DEF (list).
         openssl_libs: OpenSSL libs from DT_NEEDED (list).
         openssl_exports: Full set of known OpenSSL export names.
+        _raw_data: Pre-loaded file bytes (avoids redundant file reads).
+        _strings: Pre-extracted printable strings (avoids redundant extraction).
 
     Returns:
         FileResult with detection results.
@@ -431,7 +469,8 @@ def _build_file_result(path, info, openssl_symbols, openssl_defined,
 
     static = _detect_static_phase(path, info, openssl_symbols,
                                    openssl_defined, openssl_libs,
-                                   openssl_exports)
+                                   openssl_exports,
+                                   _raw_data=_raw_data, _strings=_strings)
 
     if static.extra_symbols:
         openssl_symbols = static.extra_symbols
@@ -657,8 +696,10 @@ class Scanner:
                         if self._matcher.is_openssl_library(lib)]
 
         openssl_exports = self._matcher.get_openssl_exports()
+        raw_data, strings = _preload_file_data(path)
         return _build_file_result(path, info, openssl_symbols, openssl_defined,
-                                  openssl_libs, openssl_exports)
+                                  openssl_libs, openssl_exports,
+                                  _raw_data=raw_data, _strings=strings)
 
     def scan_tree(self, root_path: str) -> ScanResult:
         """
