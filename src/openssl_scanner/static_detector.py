@@ -48,6 +48,10 @@ ENGINESDIR_PATTERN = re.compile(rb"ENGINESDIR:")
 
 BORINGSSL_SRC_PATTERN = re.compile(rb'boringssl/src/(?:crypto|ssl)/')
 
+_DETECT_KW_RE = re.compile(
+    r'OpenSSL|BoringSSL|LibreSSL|boringssl/src/|-fvisibility=hidden|OPENSSLDIR:|ENGINESDIR:'
+)
+
 # BoringSSL-unique TLS error reason strings. Verified against:
 #   BoringSSL: crypto/err/ssl.errordata (Feb 2026)
 #   OpenSSL master/3.5/3.4/3.2/1.1.1w: crypto/err/openssl.txt + include/openssl/sslerr.h
@@ -63,6 +67,10 @@ BORINGSSL_UNIQUE_ERRORS = [
     b'ECH_SERVER_WOULD_HAVE_NO_RETRY_CONFIGS', # ECH: BoringSSL-specific variant, not in OpenSSL
     b'COULD_NOT_PARSE_HINTS',                 # Split-handshake hints: BoringSSL only
 ]
+
+_BORING_ERROR_STRS = frozenset(
+    e.decode('ascii') for e in BORINGSSL_UNIQUE_ERRORS
+)
 
 CORROBORATING_SYMBOLS = None
 _CORROBORATING_LOADED = False
@@ -190,22 +198,93 @@ def detect_static_ssl(file_path: str, *, _raw_data=None,
         return StaticSSLResult()
 
 
+def _classify_ssl_strings(strings):
+    """Single-pass classification of pre-extracted strings for SSL detection.
+
+    Iterates the string set once using a compiled alternation regex to
+    categorize strings by SSL library keyword. Replaces 9+ individual
+    pattern.search() calls on the full raw binary data (each ~90ms on
+    346MB) with one pass over the string set (~125ms) plus regex on
+    <30 candidates (~0ms).
+    """
+    openssl = []
+    boringssl = []
+    libressl = []
+    boring_src = 0
+    has_fvisibility = False
+    has_openssldir = False
+    has_enginesdir = False
+
+    for s in strings:
+        if 'SSL' not in s and 'ssl' not in s and '-fvisibility' not in s and 'ENGINESDIR' not in s:
+            continue
+        m = _DETECT_KW_RE.search(s)
+        if not m:
+            continue
+        kw = m.group()
+        if kw == 'OpenSSL':
+            openssl.append(s)
+            if 'BoringSSL' in s:
+                boringssl.append(s)
+        elif kw == 'BoringSSL':
+            boringssl.append(s)
+        elif kw == 'LibreSSL':
+            libressl.append(s)
+        elif kw == 'boringssl/src/':
+            if BORINGSSL_SRC_PATTERN.search(s.encode('ascii')):
+                boring_src += 1
+        elif kw == '-fvisibility=hidden':
+            has_fvisibility = True
+        elif kw == 'OPENSSLDIR:':
+            has_openssldir = True
+        elif kw == 'ENGINESDIR:':
+            has_enginesdir = True
+
+    boring_errors = len(_BORING_ERROR_STRS & strings)
+
+    return {
+        'openssl': openssl,
+        'boringssl': boringssl,
+        'libressl': libressl,
+        'boring_src': boring_src,
+        'boring_errors': boring_errors,
+        'has_fvisibility': has_fvisibility,
+        'has_openssldir': has_openssldir,
+        'has_enginesdir': has_enginesdir,
+    }
+
+
 def _scan_data(data, *, _strings=None) -> StaticSSLResult:
     """Scan bytes for SSL library signatures.
 
-    Reordered for early exit: check cheap banner regexes first, only run
-    expensive corroboration if a banner is found.
+    When _strings is provided, classifies the string set in a single pass
+    and runs pattern regex only on small candidate lists (~125ms total
+    instead of ~1200ms for 9+ pattern scans on 346MB raw data).
 
-    If _strings is provided, reuses the pre-extracted string set for
-    corroboration instead of re-scanning raw data.
+    Falls back to direct raw-data scanning when _strings is not available.
     """
+    cl = _classify_ssl_strings(_strings) if _strings is not None else None
 
-    match = OPENSSL_STRICT_PATTERN.search(data)
+    def _pat_search(pattern, cl_key):
+        if cl is not None:
+            for s in cl[cl_key]:
+                m = pattern.search(s.encode('ascii'))
+                if m:
+                    return m
+            return None
+        return pattern.search(data)
+
+    def _pat_bool(cl_key, pattern):
+        if cl is not None:
+            return cl[cl_key]
+        return bool(pattern.search(data))
+
+    match = _pat_search(OPENSSL_STRICT_PATTERN, 'openssl')
     if match:
         version = match.group(1).decode('ascii')
-        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
-        has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
-        has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
+        has_fvisibility = _pat_bool('has_fvisibility', FVISIBILITY_HIDDEN_PATTERN)
+        has_openssldir = _pat_bool('has_openssldir', OPENSSLDIR_PATTERN)
+        has_enginesdir = _pat_bool('has_enginesdir', ENGINESDIR_PATTERN)
         sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['version_banner_strict']
         if has_fvisibility:
@@ -222,15 +301,20 @@ def _scan_data(data, *, _strings=None) -> StaticSSLResult:
             found_symbols=found_syms,
         )
 
-    boringssl_src_paths = len(BORINGSSL_SRC_PATTERN.findall(data))
-    boringssl_unique_errors = sum(1 for err in BORINGSSL_UNIQUE_ERRORS if err in data)
-
-    is_boringssl = (BORINGSSL_COMPAT_PATTERN.search(data)
-                    or BORINGSSL_BARE_PATTERN.search(data))
+    if cl is not None:
+        boringssl_src_paths = cl['boring_src']
+        boringssl_unique_errors = cl['boring_errors']
+        is_boringssl = bool(cl['boringssl'])
+    else:
+        boringssl_src_paths = len(BORINGSSL_SRC_PATTERN.findall(data))
+        boringssl_unique_errors = sum(
+            1 for err in BORINGSSL_UNIQUE_ERRORS if err in data)
+        is_boringssl = bool(BORINGSSL_COMPAT_PATTERN.search(data)
+                            or BORINGSSL_BARE_PATTERN.search(data))
 
     if boringssl_src_paths >= 3:
         is_boringssl = True
-        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+        has_fvisibility = _pat_bool('has_fvisibility', FVISIBILITY_HIDDEN_PATTERN)
         sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['boringssl_src_paths']
         if has_fvisibility:
@@ -245,7 +329,7 @@ def _scan_data(data, *, _strings=None) -> StaticSSLResult:
 
     if boringssl_unique_errors >= 2:
         is_boringssl = True
-        has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
+        has_fvisibility = _pat_bool('has_fvisibility', FVISIBILITY_HIDDEN_PATTERN)
         sym_count, found_syms = _count_corroborating(data, _strings=_strings)
         signals = ['boringssl_unique_errors']
         if has_fvisibility:
@@ -258,16 +342,16 @@ def _scan_data(data, *, _strings=None) -> StaticSSLResult:
             found_symbols=found_syms,
         )
 
-    libre_match = LIBRESSL_PATTERN.search(data)
+    libre_match = _pat_search(LIBRESSL_PATTERN, 'libressl')
 
-    loose_match = OPENSSL_LOOSE_PATTERN.search(data)
+    loose_match = _pat_search(OPENSSL_LOOSE_PATTERN, 'openssl')
 
     if not is_boringssl and not libre_match and not loose_match:
         return StaticSSLResult()
 
-    has_fvisibility = bool(FVISIBILITY_HIDDEN_PATTERN.search(data))
-    has_openssldir = bool(OPENSSLDIR_PATTERN.search(data))
-    has_enginesdir = bool(ENGINESDIR_PATTERN.search(data))
+    has_fvisibility = _pat_bool('has_fvisibility', FVISIBILITY_HIDDEN_PATTERN)
+    has_openssldir = _pat_bool('has_openssldir', OPENSSLDIR_PATTERN)
+    has_enginesdir = _pat_bool('has_enginesdir', ENGINESDIR_PATTERN)
     sym_count, found_syms = _count_corroborating(data, _strings=_strings)
 
     if is_boringssl:

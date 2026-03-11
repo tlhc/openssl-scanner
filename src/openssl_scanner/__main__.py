@@ -173,7 +173,9 @@ Examples:
     scan_parser.add_argument(
         '-j', '--jobs',
         type=int,
+        nargs='?',
         default=os.cpu_count() or 4,
+        const=os.cpu_count() or 4,
         help=f'Number of parallel workers (default: {os.cpu_count() or 4})',
     )
 
@@ -268,7 +270,9 @@ Examples:
     proc_parser.add_argument(
         '-j', '--jobs',
         type=int,
+        nargs='?',
         default=os.cpu_count() or 4,
+        const=os.cpu_count() or 4,
         help=f'Number of parallel workers (default: {os.cpu_count() or 4})',
     )
 
@@ -373,7 +377,7 @@ Examples:
         help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
     )
 
-    _default_hap_jobs = (os.cpu_count() or 4) * 5
+    _default_hap_jobs = os.cpu_count() or 4
     hap_parser.add_argument(
         '-j', '--jobs',
         type=int,
@@ -493,7 +497,9 @@ Examples:
     src_parser.add_argument(
         '-j', '--jobs',
         type=int,
+        nargs='?',
         default=os.cpu_count() or 4,
+        const=os.cpu_count() or 4,
         help=f'Number of parallel workers (default: {os.cpu_count() or 4})',
     )
 
@@ -2267,7 +2273,9 @@ Pipeline:
     parser.add_argument(
         '-j', '--jobs',
         type=int,
+        nargs='?',
         default=os.cpu_count() or 4,
+        const=os.cpu_count() or 4,
         help=f'Workers per project (default: {os.cpu_count() or 4})',
     )
 
