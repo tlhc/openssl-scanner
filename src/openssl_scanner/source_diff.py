@@ -93,6 +93,7 @@ class ProjectDelta:
     call_site_delta: List[CallSiteDelta] = field(default_factory=list)
     symbol_delta: List[SymbolDelta] = field(default_factory=list)
     file_delta: List[FileDelta] = field(default_factory=list)
+    has_call_site_changes: bool = False
 
 
 @dataclass
@@ -106,6 +107,8 @@ class DiffResult:
 
     def is_empty(self) -> bool:
         for proj in self.projects:
+            if proj.has_call_site_changes:
+                return False
             for m in proj.metrics:
                 if m.delta != 0:
                     return False
@@ -633,6 +636,10 @@ def diff_single(
     new_summary = new_data.get("summary", {})
     metrics = _compute_metrics(old_summary, new_summary, old_cs, new_cs)
 
+    has_cs_changes = any(
+        d.status != DiffStatus.UNCHANGED for d in call_deltas
+    )
+
     if summary_only:
         call_deltas = []
 
@@ -642,6 +649,7 @@ def diff_single(
         call_site_delta=call_deltas,
         symbol_delta=symbol_deltas,
         file_delta=file_deltas,
+        has_call_site_changes=has_cs_changes,
     )
 
 
@@ -898,6 +906,21 @@ def format_console(result: DiffResult) -> str:
                     f"  {fd.old_call_count} -> {fd.new_call_count} calls"
                     f" ({sign}{delta})"
                 )
+
+        cs_added = [csd for csd in pd.call_site_delta
+                    if csd.status == DiffStatus.ADDED]
+        cs_removed = [csd for csd in pd.call_site_delta
+                      if csd.status == DiffStatus.REMOVED]
+        if cs_added:
+            lines.append(f"  Call Sites Added ({len(cs_added)}):")
+            for csd in cs_added:
+                fp, caller, sym = csd.identity_key
+                lines.append(f"    + {fp} :: {caller} :: {sym}")
+        if cs_removed:
+            lines.append(f"  Call Sites Removed ({len(cs_removed)}):")
+            for csd in cs_removed:
+                fp, caller, sym = csd.identity_key
+                lines.append(f"    - {fp} :: {caller} :: {sym}")
 
         args_changed = []
         for csd in pd.call_site_delta:

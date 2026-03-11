@@ -8,6 +8,7 @@ Multi-sheet merge: combine multiple XLSX reports into one workbook.
 import json
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Tuple
 
 from .source_analyzer import SourceScanResult
@@ -445,16 +446,20 @@ class SourceMergeExporter:
 
     def _resolve_sheet_names(self, names: List[str]) -> List[str]:
         """Ensure unique sheet names within Excel's 31-char limit."""
+        _INVALID_RE = re.compile(r'[\[\]:*?/\\]')
         result = []
-        seen = {}
+        used = set()
+        counter = {}
         for name in names:
-            short = name[:31]
-            if short in seen:
-                seen[short] += 1
-                suffix = f"_{seen[short]}"
-                short = short[:31 - len(suffix)] + suffix
-            else:
-                seen[short] = 0
+            short = _INVALID_RE.sub('_', name)[:31]
+            if short in used:
+                base = short
+                counter.setdefault(base, 0)
+                while short in used:
+                    counter[base] += 1
+                    suffix = f"_{counter[base]}"
+                    short = base[:31 - len(suffix)] + suffix
+            used.add(short)
             result.append(short)
         return result
 

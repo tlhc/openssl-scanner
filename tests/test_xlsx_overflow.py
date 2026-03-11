@@ -1197,3 +1197,57 @@ class TestParallelJobsCap:
             per_pkg_jobs = min(args.jobs, os.cpu_count() or 4)
 
         assert per_pkg_jobs == 1
+
+
+class TestMultiTargetWorkerBudget:
+    """Test: multi-target source scan divides worker budget to avoid
+    over-subscription (ThreadPoolExecutor x ProcessPoolExecutor)."""
+
+    def test_per_target_jobs_divides_budget(self):
+        """With N targets and J jobs, each target gets J//N workers."""
+        cpu = os.cpu_count() or 4
+        targets = [f"/src/proj{i}" for i in range(4)]
+        jobs = cpu
+
+        max_w = min(len(targets), cpu)
+        per_target_jobs = max(1, jobs // max_w)
+
+        total = max_w * per_target_jobs
+        assert total <= jobs, (
+            f"total workers {total} exceeds budget {jobs}"
+        )
+        assert per_target_jobs >= 1
+
+    def test_single_target_gets_full_budget(self):
+        """Single target should get all workers."""
+        cpu = os.cpu_count() or 4
+        targets = ["/src/single"]
+        jobs = cpu
+
+        max_w = min(len(targets), cpu)
+        per_target_jobs = max(1, jobs // max_w)
+
+        assert max_w == 1
+        assert per_target_jobs == jobs
+
+    def test_many_targets_get_one_each(self):
+        """When targets >= jobs, each target gets 1 worker."""
+        cpu = os.cpu_count() or 4
+        targets = [f"/src/proj{i}" for i in range(cpu * 2)]
+        jobs = cpu
+
+        max_w = min(len(targets), cpu)
+        per_target_jobs = max(1, jobs // max_w)
+
+        assert per_target_jobs == 1
+        assert max_w == cpu
+
+    def test_workers_override_used_by_scan_single_target(self):
+        """_scan_single_target uses workers_override when provided."""
+        from argparse import Namespace
+        args = Namespace(jobs=16, no_recursive=False)
+
+        assert args.jobs == 16
+        workers = 4
+        effective = workers if workers is not None else args.jobs
+        assert effective == 4

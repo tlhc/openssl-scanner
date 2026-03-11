@@ -1557,8 +1557,9 @@ def _resolve_output_names(targets, output_arg, ext):
             for i in range(len(targets))}
 
 
-def _scan_single_target(analyzer, target, args):
+def _scan_single_target(analyzer, target, args, workers_override=None):
     """Scan a single target (file or directory), return SourceScanResult."""
+    workers = workers_override if workers_override is not None else args.jobs
     if os.path.isfile(target):
         call_sites = analyzer.scan_file(target)
         scan_time = time.strftime('%Y-%m-%dT%H:%M:%S')
@@ -1567,7 +1568,7 @@ def _scan_single_target(analyzer, target, args):
         return analyzer.scan_directory(
             target,
             recursive=not args.no_recursive,
-            workers=args.jobs,
+            workers=workers,
         )
 
 
@@ -1705,13 +1706,18 @@ def cmd_source(args) -> int:
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
+            max_w = min(len(targets), os.cpu_count() or 4, args.jobs)
+            per_target_jobs = max(1, args.jobs // max_w)
+
             if not args.json_only:
                 print(f"\n  Scanning {len(targets)} targets in parallel "
-                      f"({args.jobs} workers each)...")
+                      f"({max_w} threads, {per_target_jobs} workers each)...")
 
             def _scan_and_export(target):
                 start = time.time()
-                result = _scan_single_target(analyzer, target, args)
+                result = _scan_single_target(
+                    analyzer, target, args,
+                    workers_override=per_target_jobs)
                 output_path = output_map[target]
                 _export_result(result, output_path)
                 elapsed = time.time() - start
@@ -1720,7 +1726,6 @@ def cmd_source(args) -> int:
             results_ordered = [None] * len(targets)
             target_to_idx = {t: i for i, t in enumerate(targets)}
 
-            max_w = min(len(targets), os.cpu_count() or 4)
             with ThreadPoolExecutor(max_workers=max_w) as pool:
                 futures = {
                     pool.submit(_scan_and_export, t): t
