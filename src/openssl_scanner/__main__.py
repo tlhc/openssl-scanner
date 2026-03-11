@@ -1117,11 +1117,17 @@ def cmd_hap(args) -> int:
 
         if use_parallel:
             from concurrent.futures import ProcessPoolExecutor, as_completed
-            pool_kw = {'max_workers': parallel}
+            _log_file = getattr(args, 'log_file', None)
+            pool_kw = {'max_workers': parallel,
+                        'initializer': _worker_logging_init,
+                        'initargs': (_log_file, args.verbose)}
             if sys.version_info >= (3, 11):
                 pool_kw['max_tasks_per_child'] = 1
             print(f"\n  Scanning {scan_total} packages ({parallel} workers)",
                   flush=True)
+            if args.verbose and not _log_file:
+                print("  (use --log-file for per-package details in parallel mode)",
+                      flush=True)
             with ProcessPoolExecutor(**pool_kw) as pool:
                 futures = {}
                 for idx, ent in to_scan:
@@ -1242,6 +1248,31 @@ from .hap_report import (
 )
 
 
+def _worker_logging_init(log_file=None, verbose=0):
+    """Configure logging in child processes.
+
+    Child processes must not write to stderr (corrupts parent's progress
+    bar).  If --log-file is set, child logs go to that file; otherwise
+    only a NullHandler is installed to suppress the lastResort fallback.
+    """
+    root = logging.getLogger()
+    root.handlers.clear()
+    if log_file:
+        if isinstance(verbose, bool):
+            verbose = 1 if verbose else 0
+        verbose = verbose or 0
+        level = logging.DEBUG if verbose >= 2 else (
+            logging.INFO if verbose >= 1 else logging.WARNING)
+        root.setLevel(level)
+        fmt = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter(fmt))
+        root.addHandler(fh)
+    else:
+        root.addHandler(logging.NullHandler())
+
+
 def _hap_progress_bar(completed, total, start_time):
     """Build a single-line progress bar string."""
     pct = completed * 100 // total if total else 0
@@ -1288,7 +1319,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
         extract_result = extractor.extract(pkg_path, abi=args.abi)
 
         if not extract_result.so_files:
-            logger.warning("No native libraries found in %s", entry.display_name)
+            logger.debug("No native libraries found in %s", entry.display_name)
             if not args.keep_extracted:
                 extractor.cleanup(extract_result)
             return {'result': None, 'custom_result': None,
@@ -1402,7 +1433,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                 'message': msg}
 
     except (ValueError, zipfile.BadZipFile, OSError) as e:
-        logger.error("Failed to process %s: %s", entry.display_name, e)
+        logger.debug("Failed to process %s: %s", entry.display_name, e)
         return {'result': None, 'custom_result': None,
                 'entry_key': entry_key, 'no_native': False, 'failed': True,
                 'message': f"{entry.display_name} -> FAILED ({e})"}
@@ -1412,6 +1443,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             logger.debug("Cleaned up temp: %s", tmp_file)
 
 _scan_one_hap.__module__ = 'openssl_scanner.__main__'
+_worker_logging_init.__module__ = 'openssl_scanner.__main__'
 sys.modules.setdefault('openssl_scanner.__main__', sys.modules[__name__])
 
 
