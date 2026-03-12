@@ -12,7 +12,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .hitls_compat import HiTLSCompat
 
 logger = logging.getLogger(__name__)
 
@@ -712,6 +715,9 @@ _METRIC_LABELS = {
 class SourceDiffJsonExporter:
     """Export a DiffResult to JSON."""
 
+    def __init__(self, hitls_compat: Optional['HiTLSCompat'] = None):
+        self._hitls_compat = hitls_compat
+
     def export(self, result: DiffResult, output_path: str) -> None:
         parent = os.path.dirname(output_path)
         if parent:
@@ -748,16 +754,20 @@ class SourceDiffJsonExporter:
                 "delta": m.delta,
             }
 
-        symbol_delta = [
-            {
+        symbol_delta = []
+        for sd in pd.symbol_delta:
+            sd_entry = {
                 "status": sd.status.value,
                 "symbol": sd.symbol,
                 "category": sd.category,
                 "old_count": sd.old_count,
                 "new_count": sd.new_count,
             }
-            for sd in pd.symbol_delta
-        ]
+            if self._hitls_compat is not None:
+                h_status, h_equiv = self._hitls_compat.lookup(sd.symbol)
+                sd_entry["hitls_status"] = h_status
+                sd_entry["hitls_equiv"] = h_equiv
+            symbol_delta.append(sd_entry)
 
         file_delta = [
             {
@@ -1016,8 +1026,10 @@ def _set_auto_filter(ws, row, num_cols):
 class SourceDiffExcelExporter:
     """Export a DiffResult to XLSX with conditional coloring."""
 
-    def __init__(self, include_unchanged: bool = False):
+    def __init__(self, include_unchanged: bool = False,
+                 hitls_compat: Optional['HiTLSCompat'] = None):
         self._include_unchanged = include_unchanged
+        self._hitls_compat = hitls_compat
 
     def export(self, result: DiffResult, output_path: str) -> None:
         from . import _vendor  # noqa: F401
@@ -1134,6 +1146,9 @@ class SourceDiffExcelExporter:
             (35, "OpenSSL Symbol"), (20, "Category"), (12, "Status"),
             (12, "Old Calls"), (12, "New Calls"), (10, "Delta"),
         ]
+        if self._hitls_compat is not None:
+            columns.append((15, "HiTLS Status"))
+            columns.append((30, "HiTLS Equivalent"))
         num_cols = _write_header(ws, columns, header_font, header_fill)
 
         all_symbols: Dict[str, SymbolDelta] = {}
@@ -1178,6 +1193,10 @@ class SourceDiffExcelExporter:
             delta = sd.new_count - sd.old_count
             delta_cell = ws.cell(row=row, column=6, value=delta)
             delta_cell.font = _delta_font(delta)
+            if self._hitls_compat is not None:
+                h_status, h_equiv = self._hitls_compat.lookup(sd.symbol)
+                ws.cell(row=row, column=7, value=h_status)
+                ws.cell(row=row, column=8, value=h_equiv or '')
             row += 1
 
         _set_auto_filter(ws, row, num_cols)

@@ -9,9 +9,12 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .source_analyzer import SourceScanResult
+
+if TYPE_CHECKING:
+    from .hitls_compat import HiTLSCompat
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +56,17 @@ MERGE_SUMMARY_SHEET_COLUMNS = [
 class SourceExcelExporter:
     """Export SourceScanResult to XLSX with call sites and symbol summary."""
 
-    def export(self, result: SourceScanResult, output_path: str) -> None:
+    def export(self, result: SourceScanResult, output_path: str,
+               hitls_compat: Optional['HiTLSCompat'] = None) -> None:
         from . import _vendor  # noqa: F401
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
+
+        cols = list(COLUMNS)
+        if hitls_compat is not None:
+            cols.insert(6, ('hitls_status', 15, 'HiTLS Status'))
+            cols.insert(7, ('hitls_equiv', 30, 'HiTLS Equivalent'))
+        last_col = chr(64 + len(cols)) if len(cols) <= 26 else 'A' + chr(64 + len(cols) - 26)
 
         base_title = "OpenSSL Call Sites"
         wb = Workbook()
@@ -69,7 +79,7 @@ class SourceExcelExporter:
         )
 
         def _init_sheet(ws_target):
-            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
+            for col_idx, (_, width, title) in enumerate(cols, 1):
                 cell = ws_target.cell(row=1, column=col_idx, value=title)
                 cell.font = header_font
                 cell.fill = header_fill
@@ -95,30 +105,45 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=4, value=cs.line_number)
             ws.cell(row=row_idx, column=5, value=cs.ossl_symbol)
             ws.cell(row=row_idx, column=6, value=cs.category)
-            ws.cell(row=row_idx, column=7, value=cs.call_args)
-            ws.cell(row=row_idx, column=8,
-                    value=getattr(cs, 'detection_method', 'dynamic-link'))
+            if hitls_compat is not None:
+                h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
+                ws.cell(row=row_idx, column=7, value=h_status)
+                ws.cell(row=row_idx, column=8, value=h_equiv or '')
+                ws.cell(row=row_idx, column=9, value=cs.call_args)
+                ws.cell(row=row_idx, column=10,
+                        value=getattr(cs, 'detection_method', 'dynamic-link'))
+            else:
+                ws.cell(row=row_idx, column=7, value=cs.call_args)
+                ws.cell(row=row_idx, column=8,
+                        value=getattr(cs, 'detection_method', 'dynamic-link'))
             row_idx += 1
 
         if result.call_sites:
             last_row = min(len(result.call_sites) + 1, XLSX_MAX_ROW)
-            ws_first.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last_row}"
+            ws_first.auto_filter.ref = f"A1:{last_col}{last_row}"
 
         if sheet_num > 1:
             logger.info("Call Sites split across %d sheets (%d rows)",
                         sheet_num, len(result.call_sites))
 
-        self._write_symbol_summary(wb, result, header_font, header_fill)
+        self._write_symbol_summary(wb, result, header_font, header_fill,
+                                   hitls_compat=hitls_compat)
 
         wb.save(output_path)
         logger.info("XLSX report saved to: %s", output_path)
 
     def _write_symbol_summary(self, wb, result: SourceScanResult,
-                              header_font, header_fill) -> None:
+                              header_font, header_fill,
+                              hitls_compat: Optional['HiTLSCompat'] = None) -> None:
         """Write Symbol Summary sheet: one row per unique symbol."""
         ws = wb.create_sheet(title="Symbol Summary")
 
-        for col_idx, (_, width, title) in enumerate(SUMMARY_SHEET_COLUMNS, 1):
+        cols = list(SUMMARY_SHEET_COLUMNS)
+        if hitls_compat is not None:
+            cols.append(('hitls_status', 15, 'HiTLS Status'))
+            cols.append(('hitls_equiv', 30, 'HiTLS Equivalent'))
+
+        for col_idx, (_, width, title) in enumerate(cols, 1):
             cell = ws.cell(row=1, column=col_idx, value=title)
             cell.font = header_font
             cell.fill = header_fill
@@ -148,16 +173,54 @@ class SourceExcelExporter:
             ws.cell(row=row_idx, column=3, value=info['calls'])
             ws.cell(row=row_idx, column=4, value=len(info['files']))
             ws.cell(row=row_idx, column=5, value=file_list)
+            if hitls_compat is not None:
+                h_status, h_equiv = hitls_compat.lookup(symbol)
+                ws.cell(row=row_idx, column=6, value=h_status)
+                ws.cell(row=row_idx, column=7, value=h_equiv or '')
 
+        last_letter = chr(64 + len(cols))
         if rows:
-            ws.auto_filter.ref = f"A1:E{len(rows) + 1}"
+            ws.auto_filter.ref = f"A1:{last_letter}{len(rows) + 1}"
 
 
 class SourceJsonExporter:
     """Export SourceScanResult to JSON."""
 
     def export(self, result: SourceScanResult,
-               output_path: Optional[str] = None) -> str:
+               output_path: Optional[str] = None,
+               hitls_compat: Optional['HiTLSCompat'] = None) -> str:
+        call_sites = []
+        for cs in result.call_sites:
+            entry = {
+                'file_path': cs.file_path,
+                'file_name': cs.file_name,
+                'caller_function': cs.caller_function,
+                'line_number': cs.line_number,
+                'column': cs.column,
+                'ossl_symbol': cs.ossl_symbol,
+                'category': cs.category,
+                'call_args': cs.call_args,
+                'language': cs.language,
+                'detection_method': getattr(cs, 'detection_method', 'dynamic-link'),
+            }
+            if hitls_compat is not None:
+                h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
+                entry['hitls_status'] = h_status
+                entry['hitls_equiv'] = h_equiv
+            call_sites.append(entry)
+
+        summary = {
+            'total_files_scanned': result.total_files_scanned,
+            'files_with_calls': result.files_with_calls,
+            'total_call_sites': result.total_call_sites,
+            'unique_symbols_count': len(result.unique_symbols),
+            'unique_symbols': result.unique_symbols,
+            'symbols_by_category': result.symbols_by_category,
+        }
+        if hitls_compat is not None:
+            summary['hitls_coverage'] = hitls_compat.get_coverage_stats(
+                set(result.unique_symbols))
+
         data = {
             'meta': {
                 'tool_version': result.tool_version,
@@ -165,29 +228,8 @@ class SourceJsonExporter:
                 'scan_time': result.scan_time,
                 'target': result.target,
             },
-            'summary': {
-                'total_files_scanned': result.total_files_scanned,
-                'files_with_calls': result.files_with_calls,
-                'total_call_sites': result.total_call_sites,
-                'unique_symbols_count': len(result.unique_symbols),
-                'unique_symbols': result.unique_symbols,
-                'symbols_by_category': result.symbols_by_category,
-            },
-            'call_sites': [
-                {
-                    'file_path': cs.file_path,
-                    'file_name': cs.file_name,
-                    'caller_function': cs.caller_function,
-                    'line_number': cs.line_number,
-                    'column': cs.column,
-                    'ossl_symbol': cs.ossl_symbol,
-                    'category': cs.category,
-                    'call_args': cs.call_args,
-                    'language': cs.language,
-                    'detection_method': getattr(cs, 'detection_method', 'dynamic-link'),
-                }
-                for cs in result.call_sites
-            ],
+            'summary': summary,
+            'call_sites': call_sites,
             'errors': result.errors,
         }
 
@@ -215,7 +257,8 @@ SUMMARY_COLUMNS = [
 class SourceMergeExporter:
     """Merge multiple source scan XLSX reports into one multi-sheet workbook."""
 
-    def merge(self, input_paths: List[str], output_path: str) -> Dict:
+    def merge(self, input_paths: List[str], output_path: str,
+              hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
         """Read XLSX reports and write a merged workbook.
 
         Returns:
@@ -225,17 +268,20 @@ class SourceMergeExporter:
         project_data = self._load_projects(input_paths, self._read_xlsx)
         for pdata, path in zip(project_data, input_paths):
             pdata['source'] = path
-        return self._merge_to_workbook(project_data, output_path)
+        return self._merge_to_workbook(project_data, output_path,
+                                       hitls_compat=hitls_compat)
 
     def merge_from_json(self, input_paths: List[str],
-                        output_path: str) -> Dict:
+                        output_path: str,
+                        hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
         """Read JSON reports and write a merged XLSX (or JSON) workbook.
 
         Unlike merge() which reads XLSX, this reads the faster JSON format
         and preserves total_files_scanned (not '--').
         """
         project_data = self._load_projects(input_paths, self._read_json)
-        return self._merge_to_workbook(project_data, output_path)
+        return self._merge_to_workbook(project_data, output_path,
+                                       hitls_compat=hitls_compat)
 
     def _load_projects(self, input_paths, reader):
         """Load project data from input files using the given reader.
@@ -253,7 +299,8 @@ class SourceMergeExporter:
         return project_data
 
     def _merge_to_workbook(self, project_data: List[Dict],
-                           output_path: str) -> Dict:
+                           output_path: str,
+                           hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
         """Shared implementation for all XLSX merge paths.
 
         Args:
@@ -382,7 +429,8 @@ class SourceMergeExporter:
                         value=len(all_symbols)).font = total_font
 
         self._write_symbol_summary_from_rows(
-            wb, "Symbol Summary", all_rows, header_font, header_fill)
+            wb, "Symbol Summary", all_rows, header_font, header_fill,
+            hitls_compat=hitls_compat)
 
         wb.save(output_path)
         logger.info("Merged XLSX report saved to: %s", output_path)
@@ -403,14 +451,26 @@ class SourceMergeExporter:
         base_title = "OpenSSL Call Sites"
         wb = load_workbook(path, read_only=True, data_only=True)
         rows = []
+        base_col_count = len(COLUMNS)
         for sn in wb.sheetnames:
             if sn == base_title or sn.startswith(base_title + " ("):
                 ws = wb[sn]
+                col_map = None
                 for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
                     if row_idx == 0:
+                        headers = [str(v) if v else '' for v in row]
+                        if 'HiTLS Status' in headers:
+                            hi = headers.index('HiTLS Status')
+                            col_map = list(range(hi)) + list(
+                                range(hi + 2, len(headers)))
                         continue
                     if any(v is not None for v in row):
-                        rows.append(list(row[:len(COLUMNS)]))
+                        if col_map is not None:
+                            vals = [row[i] if i < len(row) else None
+                                    for i in col_map]
+                            rows.append(vals[:base_col_count])
+                        else:
+                            rows.append(list(row[:base_col_count]))
         wb.close()
 
         name = os.path.splitext(os.path.basename(path))[0]
@@ -477,7 +537,8 @@ class SourceMergeExporter:
 
     def _write_symbol_summary_from_rows(self, wb, sheet_name: str,
                                         rows: List[List],
-                                        header_font, header_fill) -> None:
+                                        header_font, header_fill,
+                                        hitls_compat: Optional['HiTLSCompat'] = None) -> None:
         """Write Symbol Summary sheet from tagged call site rows.
 
         Each row is expected to have a project name appended as the last
@@ -485,7 +546,11 @@ class SourceMergeExporter:
         """
         ws = wb.create_sheet(title=sheet_name)
 
-        columns = MERGE_SUMMARY_SHEET_COLUMNS
+        columns = list(MERGE_SUMMARY_SHEET_COLUMNS)
+        if hitls_compat is not None:
+            columns.append(('hitls_status', 15, 'HiTLS Status'))
+            columns.append(('hitls_equiv', 30, 'HiTLS Equivalent'))
+
         for col_idx, (_, width, title) in enumerate(columns, 1):
             cell = ws.cell(row=1, column=col_idx, value=title)
             cell.font = header_font
@@ -527,12 +592,18 @@ class SourceMergeExporter:
             ws.cell(row=row_idx, column=5, value=file_list)
             ws.cell(row=row_idx, column=6, value=len(info['projects']))
             ws.cell(row=row_idx, column=7, value=project_list)
+            if hitls_compat is not None:
+                h_status, h_equiv = hitls_compat.lookup(symbol)
+                ws.cell(row=row_idx, column=8, value=h_status)
+                ws.cell(row=row_idx, column=9, value=h_equiv or '')
 
+        last_letter = chr(64 + len(columns))
         if sorted_rows:
-            ws.auto_filter.ref = f"A1:G{len(sorted_rows) + 1}"
+            ws.auto_filter.ref = f"A1:{last_letter}{len(sorted_rows) + 1}"
 
     def merge_from_results(self, named_results: List[Tuple[str, 'SourceScanResult']],
-                           output_path: str) -> Dict:
+                           output_path: str,
+                           hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
         """Merge from in-memory SourceScanResult objects.
 
         Args:
@@ -544,7 +615,8 @@ class SourceMergeExporter:
         """
         ext = os.path.splitext(output_path)[1].lower()
         if ext == '.json':
-            return self._merge_to_json(named_results, output_path)
+            return self._merge_to_json(named_results, output_path,
+                                       hitls_compat=hitls_compat)
 
         project_data = []
         for name, result in named_results:
@@ -554,7 +626,8 @@ class SourceMergeExporter:
                 'files_scanned': result.total_files_scanned,
                 'rows': rows,
             })
-        return self._merge_to_workbook(project_data, output_path)
+        return self._merge_to_workbook(project_data, output_path,
+                                       hitls_compat=hitls_compat)
 
     def _result_to_rows(self, result: 'SourceScanResult') -> List[List]:
         """Convert SourceScanResult.call_sites to row lists."""
@@ -565,13 +638,32 @@ class SourceMergeExporter:
             for cs in result.call_sites
         ]
 
-    def _merge_to_json(self, named_results, output_path):
+    def _merge_to_json(self, named_results, output_path,
+                       hitls_compat: Optional['HiTLSCompat'] = None):
         """Merge results to a single JSON file."""
         projects = []
         all_symbols = set()
         stats = []
 
         for name, result in named_results:
+            call_sites = []
+            for cs in result.call_sites:
+                cs_entry = {
+                    'file_path': cs.file_path,
+                    'file_name': cs.file_name,
+                    'caller_function': cs.caller_function,
+                    'line_number': cs.line_number,
+                    'ossl_symbol': cs.ossl_symbol,
+                    'category': cs.category,
+                    'call_args': cs.call_args,
+                    'detection_method': getattr(cs, 'detection_method',
+                                                'dynamic-link'),
+                }
+                if hitls_compat is not None:
+                    h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
+                    cs_entry['hitls_status'] = h_status
+                    cs_entry['hitls_equiv'] = h_equiv
+                call_sites.append(cs_entry)
             entry = {
                 'project': name,
                 'target': result.target,
@@ -580,20 +672,7 @@ class SourceMergeExporter:
                 'total_call_sites': result.total_call_sites,
                 'unique_symbols': result.unique_symbols,
                 'symbols_by_category': result.symbols_by_category,
-                'call_sites': [
-                    {
-                        'file_path': cs.file_path,
-                        'file_name': cs.file_name,
-                        'caller_function': cs.caller_function,
-                        'line_number': cs.line_number,
-                        'ossl_symbol': cs.ossl_symbol,
-                        'category': cs.category,
-                        'call_args': cs.call_args,
-                        'detection_method': getattr(cs, 'detection_method',
-                                                    'dynamic-link'),
-                    }
-                    for cs in result.call_sites
-                ],
+                'call_sites': call_sites,
             }
             projects.append(entry)
             all_symbols.update(result.unique_symbols)
@@ -617,15 +696,16 @@ class SourceMergeExporter:
                 'top_cat_symbols': top_count,
             })
 
-        merged = {
-            'meta': {
-                'report_type': 'combo_scan',
-                'total_projects': len(projects),
-                'total_call_sites': sum(p['total_call_sites'] for p in projects),
-                'total_unique_symbols': len(all_symbols),
-            },
-            'projects': projects,
+        meta = {
+            'report_type': 'combo_scan',
+            'total_projects': len(projects),
+            'total_call_sites': sum(p['total_call_sites'] for p in projects),
+            'total_unique_symbols': len(all_symbols),
         }
+        if hitls_compat is not None:
+            meta['hitls_coverage'] = hitls_compat.get_coverage_stats(
+                all_symbols)
+        merged = {'meta': meta, 'projects': projects}
 
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(merged, f, indent=2, ensure_ascii=False)

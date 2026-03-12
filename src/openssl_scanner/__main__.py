@@ -40,6 +40,22 @@ SOURCE_EXTS = {'.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.rs'}
 SOURCE_GLOBS = ['*.c', '*.h', '*.cpp', '*.hpp', '*.cc', '*.cxx', '*.hxx', '*.rs']
 
 
+def _load_hitls_compat(args):
+    """Create HiTLSCompat from CLI args if --hitls-compat is set.
+
+    Returns HiTLSCompat instance or None.
+    """
+    if not getattr(args, 'hitls_compat', False):
+        return None
+    from .hitls_compat import HiTLSCompat
+    compat = HiTLSCompat()
+    path = getattr(args, 'hitls_map', None)
+    count = compat.load(path)
+    logger = logging.getLogger(__name__)
+    logger.info("HiTLS compat: %d mappings loaded", count)
+    return compat
+
+
 def setup_logging(verbose, log_file: Optional[str] = None) -> None:
     """Configure logging handlers.
 
@@ -527,6 +543,18 @@ Examples:
         help='Write logs to file',
     )
 
+    src_parser.add_argument(
+        '--hitls-compat',
+        action='store_true',
+        default=False,
+        help='Add openHiTLS compatibility columns to output',
+    )
+
+    src_parser.add_argument(
+        '--hitls-map',
+        help='Custom HiTLS mapping JSON file (default: built-in)',
+    )
+
 
 def create_source_merge_parser(subparsers) -> None:
     """Create parser for source-merge command."""
@@ -566,6 +594,18 @@ Examples:
     parser.add_argument(
         '--log-file',
         help='Write logs to file',
+    )
+
+    parser.add_argument(
+        '--hitls-compat',
+        action='store_true',
+        default=False,
+        help='Add openHiTLS compatibility columns to merged output',
+    )
+
+    parser.add_argument(
+        '--hitls-map',
+        help='Custom HiTLS mapping JSON file (default: built-in)',
     )
 
 
@@ -1572,7 +1612,7 @@ def _scan_single_target(analyzer, target, args, workers_override=None):
         )
 
 
-def _export_result(result, output_path):
+def _export_result(result, output_path, hitls_compat=None):
     """Export scan result based on file extension.
 
     XLSX output automatically generates a companion JSON file with the
@@ -1586,11 +1626,14 @@ def _export_result(result, output_path):
 
     ext = os.path.splitext(output_path)[1].lower()
     if ext == '.json':
-        SourceJsonExporter().export(result, output_path)
+        SourceJsonExporter().export(result, output_path,
+                                    hitls_compat=hitls_compat)
     else:
-        SourceExcelExporter().export(result, output_path)
+        SourceExcelExporter().export(result, output_path,
+                                     hitls_compat=hitls_compat)
         json_path = os.path.splitext(output_path)[0] + '.json'
-        SourceJsonExporter().export(result, json_path)
+        SourceJsonExporter().export(result, json_path,
+                                    hitls_compat=hitls_compat)
 
 
 def _print_source_summary(result, output_path, elapsed, prefix=""):
@@ -1667,6 +1710,8 @@ def cmd_source(args) -> int:
     from .constants import SYMBOL_CATEGORIES
     analyzer = SourceAnalyzer(symbols, SYMBOL_CATEGORIES, macro_symbols=macros)
 
+    hitls_compat = _load_hitls_compat(args)
+
     multi = len(targets) > 1
     output_arg = args.output
 
@@ -1699,7 +1744,7 @@ def cmd_source(args) -> int:
                 output_path = os.path.join(raw_out, base + fmt_ext)
             else:
                 output_path = raw_out
-            _export_result(result, output_path)
+            _export_result(result, output_path, hitls_compat=hitls_compat)
 
             if not args.json_only:
                 _print_source_summary(result, output_path, elapsed)
@@ -1719,7 +1764,7 @@ def cmd_source(args) -> int:
                     analyzer, target, args,
                     workers_override=per_target_jobs)
                 output_path = output_map[target]
-                _export_result(result, output_path)
+                _export_result(result, output_path, hitls_compat=hitls_compat)
                 elapsed = time.time() - start
                 return target, result, output_path, elapsed
 
@@ -2125,9 +2170,12 @@ def cmd_source_merge(args) -> int:
     if not output_path.lower().endswith('.xlsx'):
         output_path += '.xlsx'
 
+    hitls_compat = _load_hitls_compat(args)
+
     try:
         merger = SourceMergeExporter()
-        result = merger.merge(input_paths, output_path)
+        result = merger.merge(input_paths, output_path,
+                              hitls_compat=hitls_compat)
 
         stats = result['sheets']
         total_calls = sum(s['call_sites'] for s in stats)
@@ -2238,6 +2286,18 @@ Examples:
         help='Write logs to file',
     )
 
+    parser.add_argument(
+        '--hitls-compat',
+        action='store_true',
+        default=False,
+        help='Add openHiTLS compatibility columns to diff output',
+    )
+
+    parser.add_argument(
+        '--hitls-map',
+        help='Custom HiTLS mapping JSON file (default: built-in)',
+    )
+
 
 def create_combo_scan_parser(subparsers) -> None:
     """Create parser for combo-scan command."""
@@ -2315,6 +2375,18 @@ Pipeline:
         help='Write logs to file',
     )
 
+    parser.add_argument(
+        '--hitls-compat',
+        action='store_true',
+        default=False,
+        help='Add openHiTLS compatibility columns to output',
+    )
+
+    parser.add_argument(
+        '--hitls-map',
+        help='Custom HiTLS mapping JSON file (default: built-in)',
+    )
+
 
 def cmd_combo_scan(args) -> int:
     """Execute combo-scan: probe + scan + merge in one step."""
@@ -2337,6 +2409,7 @@ def cmd_combo_scan(args) -> int:
         return 1
 
     ossl_set = matcher.get_combined_set()
+    hitls_compat = _load_hitls_compat(args)
     total_start = time.time()
 
     if not args.json_only:
@@ -2502,7 +2575,8 @@ def cmd_combo_scan(args) -> int:
         if args.json_only:
             if not output_path.lower().endswith('.json'):
                 output_path += '.json'
-            merge_stats = _combo_merge_json(json_files, output_path)
+            merge_stats = _combo_merge_json(json_files, output_path,
+                                                hitls_compat=hitls_compat)
         else:
             if json_files:
                 print(f"\n  Phase 3: Merging {len(json_files)} reports ...")
@@ -2510,7 +2584,8 @@ def cmd_combo_scan(args) -> int:
                 output_path += '.xlsx'
             from .source_exporter import SourceMergeExporter
             merger = SourceMergeExporter()
-            merge_stats = merger.merge_from_json(json_files, output_path)
+            merge_stats = merger.merge_from_json(json_files, output_path,
+                                                 hitls_compat=hitls_compat)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -2585,7 +2660,7 @@ def _resolve_combo_names(project_dirs, root):
     return names
 
 
-def _combo_merge_json(json_files, output_path):
+def _combo_merge_json(json_files, output_path, hitls_compat=None):
     """Merge per-project JSON reports into a single combined JSON."""
     import json as _json
     projects = []
@@ -2597,6 +2672,14 @@ def _combo_merge_json(json_files, output_path):
             data = _json.load(f)
         name = os.path.splitext(os.path.basename(path))[0]
         summary = data.get('summary', {})
+        call_sites = data.get('call_sites', [])
+        if hitls_compat is not None:
+            for cs in call_sites:
+                if 'hitls_status' not in cs:
+                    h_status, h_equiv = hitls_compat.lookup(
+                        cs.get('ossl_symbol', ''))
+                    cs['hitls_status'] = h_status
+                    cs['hitls_equiv'] = h_equiv
         entry = {
             'project': name,
             'target': data.get('meta', {}).get('target', ''),
@@ -2605,7 +2688,7 @@ def _combo_merge_json(json_files, output_path):
             'total_call_sites': summary.get('total_call_sites', 0),
             'unique_symbols': summary.get('unique_symbols', []),
             'symbols_by_category': summary.get('symbols_by_category', {}),
-            'call_sites': data.get('call_sites', []),
+            'call_sites': call_sites,
         }
         projects.append(entry)
 
@@ -2637,16 +2720,17 @@ def _combo_merge_json(json_files, output_path):
             'top_cat_symbols': top_count,
         })
 
-    merged = {
-        'meta': {
-            'report_type': 'combo_scan',
-            'merge_time': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            'total_projects': len(projects),
-            'total_call_sites': sum(p['total_call_sites'] for p in projects),
-            'total_unique_symbols': len(all_symbols),
-        },
-        'projects': projects,
+    meta = {
+        'report_type': 'combo_scan',
+        'merge_time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'total_projects': len(projects),
+        'total_call_sites': sum(p['total_call_sites'] for p in projects),
+        'total_unique_symbols': len(all_symbols),
     }
+    if hitls_compat is not None:
+        meta['hitls_coverage'] = hitls_compat.get_coverage_stats(all_symbols)
+
+    merged = {'meta': meta, 'projects': projects}
 
     with open(output_path, 'w', encoding='utf-8') as f:
         _json.dump(merged, f, indent=2, ensure_ascii=False)
@@ -3273,14 +3357,19 @@ def cmd_source_diff(args) -> int:
             new_scan_time=new_report.get("scan_time", ""),
         )
 
+    hitls_compat = _load_hitls_compat(args)
+
     output = getattr(args, 'output', None)
     if not output:
         print(format_console(result))
     elif output.lower().endswith('.json'):
-        SourceDiffJsonExporter().export(result, output)
+        SourceDiffJsonExporter(hitls_compat=hitls_compat).export(result, output)
         logger.info("Diff exported to %s", output)
     elif output.lower().endswith('.xlsx'):
-        SourceDiffExcelExporter(include_unchanged=include_unchanged).export(result, output)
+        SourceDiffExcelExporter(
+            include_unchanged=include_unchanged,
+            hitls_compat=hitls_compat,
+        ).export(result, output)
         logger.info("Diff exported to %s", output)
     else:
         logger.error("Unsupported output format: %s (use .json or .xlsx)", output)
