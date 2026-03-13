@@ -119,7 +119,7 @@ class TestHapSubcommandCLI:
         assert ret == 1
 
     def test_hap_no_native_libs(self):
-        """HAP with no native libs should warn and return 1."""
+        """HAP with no native libs should still produce a report with zero symbols."""
         hap_path = os.path.join(self.tmpdir, "no_native.hap")
         with zipfile.ZipFile(hap_path, 'w') as zf:
             zf.writestr("module.json", json.dumps({
@@ -129,7 +129,13 @@ class TestHapSubcommandCLI:
 
         output = os.path.join(self.tmpdir, "report.json")
         ret = main(['hap', hap_path, '-o', output, '--json-only'])
-        assert ret == 1
+        assert ret == 0
+        assert os.path.isfile(output)
+        with open(output) as f:
+            report = json.load(f)
+        assert report['meta']['package']['bundle_name'] == 'com.test.empty'
+        assert report['meta']['package']['native_libs_count'] == 0
+        assert report['summary']['total_files_scanned'] == 0
 
     def test_hap_no_openssl_scans_with_builtin(self):
         """HAP with native libs but no bundled OpenSSL should scan using built-in symbols."""

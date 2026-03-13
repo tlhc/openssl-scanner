@@ -28,7 +28,7 @@ import zipfile
 from typing import List, Optional
 
 from . import __version__
-from .scanner import Scanner
+from .scanner import Scanner, ScanResult
 from .reporter import Reporter
 from .openssl_matcher import OpenSSLMatcher
 from .openssl_discovery import OpenSSLDiscovery
@@ -1106,8 +1106,8 @@ def cmd_hap(args) -> int:
         out_names = _resolve_hap_output_names(pkg_names_for_output, output_path, fmt_ext)
 
     skipped = 0
-    no_native = 0
     failed = 0
+    no_native = 0
     is_tty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
     try:
         to_scan = []
@@ -1143,15 +1143,16 @@ def cmd_hap(args) -> int:
         completed = 0
 
         def _collect_result(ret):
-            nonlocal no_native, failed, completed
+            nonlocal failed, completed, no_native
             if ret['failed']:
                 failed += 1
-            elif ret['no_native']:
-                no_native += 1
             elif ret['result'] is not None:
                 all_results.append(ret['result'])
                 all_custom_results.append(ret['custom_result'])
                 scanned_packages.append(ret['entry_key'])
+                pi = ret['result'].package_info or {}
+                if pi.get('native_libs_count', -1) == 0:
+                    no_native += 1
             completed += 1
             bar = _hap_progress_bar(completed, scan_total, scan_start)
             msg = ret.get('message', '')
@@ -1195,7 +1196,7 @@ def cmd_hap(args) -> int:
                         ret = {
                             'result': None, 'custom_result': None,
                             'entry_key': ent.display_name,
-                            'no_native': False, 'failed': True,
+                            'failed': True,
                             'message': f"{ent.display_name} -> FAILED ({e})",
                         }
                     _collect_result(ret)
@@ -1355,7 +1356,7 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
                   per_pkg_jobs=None):
     """Scan a single HAP package. Process-safe: all mutable state is local.
 
-    Returns dict with keys: result, custom_result, entry_key, no_native, failed
+    Returns dict with keys: result, custom_result, entry_key, failed
     """
     logger = logging.getLogger(logger_name)
     entry_key = entry.display_name
@@ -1372,10 +1373,46 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             logger.debug("No native libraries found in %s", entry.display_name)
             if not args.keep_extracted:
                 extractor.cleanup(extract_result)
-            return {'result': None, 'custom_result': None,
-                    'entry_key': entry_key, 'no_native': True, 'failed': False,
+            meta = extract_result.metadata
+            result = ScanResult(
+                target=meta.package_path,
+                scan_time=time.strftime('%Y-%m-%dT%H:%M:%S'),
+                tool_version=__version__,
+                arch='',
+                report_type='package',
+            )
+            result.package_info = {
+                'package_path': entry.container or meta.package_path,
+                'package_type': meta.package_type,
+                'bundle_name': meta.bundle_name or entry.display_name,
+                'module_name': meta.module_name,
+                'module_type': meta.module_type,
+                'version_name': meta.version_name,
+                'version_code': meta.version_code,
+                'min_api_version': meta.min_api_version,
+                'device_types': meta.device_types,
+                'scanned_abi': [],
+                'abis_available': [],
+                'native_libs_count': 0,
+                'bundled_openssl': False,
+                'bundled_openssl_files': [],
+                'static_openssl_providers': [],
+                'custom_match': '',
+                'custom_match_groups': {},
+            }
+            pkg_name = meta.bundle_name or entry.display_name
+            if per_package:
+                _hap_write_single_report(
+                    result, entry_key, out_names[entry_key],
+                    reporter, args.json_only)
+                out_name = os.path.basename(out_names[entry_key])
+                msg = f"{pkg_name} -> {out_name} (no native libs)"
+            else:
+                msg = f"{pkg_name} | no native libs"
+            return {'result': result, 'custom_result': None,
+                    'entry_key': entry_key, 'failed': False,
                     'elapsed': time.time() - pkg_start,
-                    'message': f"{entry.display_name} -> NO NATIVE LIBS"}
+                    'message': msg}
 
         logger.info(
             "Package: %s | ABI: %s | Native libs: %d",
@@ -1482,14 +1519,14 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             msg = ''
 
         return {'result': result, 'custom_result': custom_result,
-                'entry_key': entry_key, 'no_native': False, 'failed': False,
+                'entry_key': entry_key, 'failed': False,
                 'elapsed': time.time() - pkg_start,
                 'message': msg}
 
     except (ValueError, zipfile.BadZipFile, OSError) as e:
         logger.debug("Failed to process %s: %s", entry.display_name, e)
         return {'result': None, 'custom_result': None,
-                'entry_key': entry_key, 'no_native': False, 'failed': True,
+                'entry_key': entry_key, 'failed': True,
                 'elapsed': time.time() - pkg_start,
                 'message': f"{entry.display_name} -> FAILED ({e})"}
     finally:
@@ -1557,8 +1594,13 @@ def cmd_hap_summary(args) -> int:
     if tmp_path != output_path:
         os.replace(tmp_path, output_path)
 
-    print(f"Summary generated: {output_path}"
-          f" ({len(all_results)} packages)")
+    no_native_count = sum(
+        1 for r in all_results
+        if (r.package_info or {}).get('native_libs_count', -1) == 0)
+    parts = [f"{len(all_results)} packages"]
+    if no_native_count:
+        parts.append(f"{no_native_count} no-native")
+    print(f"Summary generated: {output_path} ({', '.join(parts)})")
     return 0
 
 
