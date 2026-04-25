@@ -1,0 +1,184 @@
+# openHiTLS Compatibility Validation Batch 245
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `SSL_*` family lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a broad `SSL` family across:
+  - `SSL_SESSION_*`
+  - `SSL_client_hello_*`
+  - `SSL_get0_*`
+  - `SSL_set0_*` / `SSL_set1_*`
+  - `SSL_is_*`
+  - `SSL_renegotiate*`
+  - `SSL_peek_ex`
+  - `SSL_verify_client_post_handshake`
+  - assorted QUIC, DANE, SRP, CT, early-data, and stream helpers
+- openHiTLS public installed TLS surface exposes a narrower but real subset:
+  - session object APIs:
+    - `HITLS_SESS_Dup`
+    - `HITLS_SESS_GetCipherSuite`
+    - `HITLS_SESS_SetTimeout`
+    - `HITLS_SESS_GetTimeout`
+    - `HITLS_SESS_GetUserData`
+    - `HITLS_SESS_SetUserData`
+  - client hello helpers:
+    - `HITLS_ClientHelloGetLegacyVersion`
+    - `HITLS_ClientHelloGetRandom`
+    - `HITLS_ClientHelloGetSessionID`
+    - `HITLS_ClientHelloGetCiphers`
+    - `HITLS_ClientHelloGetExtensionsPresent`
+    - `HITLS_ClientHelloGetExtension`
+  - ctx/introspection helpers:
+    - `HITLS_IsDtls`
+    - `HITLS_IsServer`
+    - `HITLS_IsHandShaking`
+    - `HITLS_IsBeforeHandShake`
+    - `HITLS_IsSessionReused`
+    - `HITLS_GetClientVersion`
+    - `HITLS_Peek`
+    - `HITLS_KeyUpdate`
+    - `HITLS_Renegotiate`
+    - `HITLS_GetRenegotiationState`
+    - `HITLS_SetReadUio`
+    - `HITLS_SetTmpDh`
+    - `HITLS_SetSecurityExData`
+    - `HITLS_GetSecurityExData`
+    - `HITLS_VerifyClientPostHandshake`
+- openHiTLS public installed tree does not expose:
+  - QUIC-specific `SSL_*` APIs
+  - DANE-specific `SSL_*` APIs
+  - SRP-specific `SSL_*` APIs
+  - certificate compression APIs
+  - CT/SCT helpers
+  - host-param APIs at the `SSL *` layer
+  - separate write-UIO setter
+  - `SSL_SESSION` print/keylog/start-time/ticket-appdata helpers
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 27`
+- adjust to `not_available = 105`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path:
+  - session:
+    - `SSL_SESSION_get0_cipher`
+    - `SSL_SESSION_up_ref`
+  - client hello:
+    - `SSL_client_hello_get0_ciphers`
+    - `SSL_client_hello_get0_ext`
+    - `SSL_client_hello_get0_legacy_version`
+    - `SSL_client_hello_get0_random`
+    - `SSL_client_hello_get0_session_id`
+    - `SSL_client_hello_get1_extensions_present`
+    - `SSL_client_version`
+  - ctx/introspection:
+    - `SSL_get0_security_ex_data`
+    - `SSL_in_before`
+    - `SSL_in_init`
+    - `SSL_is_dtls`
+    - `SSL_is_server`
+    - `SSL_is_tls`
+    - `SSL_key_update`
+    - `SSL_peek_ex`
+    - `SSL_renegotiate`
+    - `SSL_renegotiate_pending`
+    - `SSL_session_reused`
+  - `SSL_set0_rbio`
+  - `SSL_set0_security_ex_data`
+  - `SSL_set0_tmp_dh_pkey`
+  - `SSL_set1_host`
+  - `SSL_add1_host`
+  - `SSL_get0_peername`
+  - `SSL_verify_client_post_handshake`
+- These remain `partial` because:
+  - openHiTLS uses `HITLS_Ctx *`, `HITLS_Session *`, `BSL_UIO *`, and raw integers/bools, not OpenSSL `SSL *`, `SSL_SESSION *`, `BIO *`, and wrapper objects
+  - several replacements are compositional or contract-reduced:
+    - `SSL_is_tls` derives TLS state from `HITLS_IsDtls`
+    - `SSL_SESSION_get0_cipher` yields cipher-suite ID, not `SSL_CIPHER *`
+    - `SSL_SESSION_up_ref` maps to session duplication, not the same refcount API
+    - `SSL_set0_rbio` has read-UIO coverage only
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - `SSL_SESSION` time / ticket-appdata / print / keylog helpers
+  - `SSL_set0_wbio`
+  - `SSL_set1_param`
+  - CA-list helpers
+  - DANE / SRP / CT / certificate-compression families
+  - QUIC-specific stream/net helpers
+  - `SSL_write_early_data`
+  - `SSL_write_ex2`
+  - `SSL_alert_*`
+  - `SSL_dup`
+  - `SSL_export_keying_material*`
+  - `SSL_use_RSAPrivateKey*`
+  - `SSL_use_cert_and_key`
+
+Representative evidence:
+- OpenSSL declarations:
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1656)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1750)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1761)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1791)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1863)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L1970)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L2010)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L2067)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L2072)
+- OpenSSL implementation evidence:
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L977)
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L1600)
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L2656)
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L3061)
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L6326)
+  - [ssl_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_lib.c#L7022)
+  - [ssl_sess.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_sess.c#L876)
+  - [ssl_sess.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/ssl_sess.c#L1008)
+  - [statem.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/statem/statem.c#L84)
+  - [statem.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/ssl/statem/statem.c#L104)
+- openHiTLS public declarations:
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L90)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L216)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L399)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L441)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L760)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L782)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L839)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L871)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1025)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1172)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1188)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1592)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1636)
+  - [hitls.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls.h#L1703)
+  - [hitls_session.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls_session.h#L394)
+  - [hitls_session.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls_session.h#L489)
+  - [hitls_session.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls_session.h#L575)
+  - [hitls_security.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls_security.h#L255)
+  - [hitls_security.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/tls/hitls_security.h#L264)
+- openHiTLS implementation evidence:
+  - [conn_create.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_create.c#L234)
+  - [conn_read.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_read.c#L515)
+  - [conn_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_ctrl.c#L93)
+  - [conn_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_ctrl.c#L103)
+  - [conn_establish.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_establish.c#L644)
+  - [conn_establish.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_establish.c#L658)
+  - [conn_establish.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_establish.c#L760)
+  - [conn_establish.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_establish.c#L832)
+  - [conn_establish.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/cm/src/conn_establish.c#L878)
+  - [parse.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/handshake/parse/src/parse.c#L508)
+  - [session.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/feature/session/src/session.c#L72)
+  - [session.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/tls/feature/session/src/session.c#L537)
+
+Batch 245 inventory:
+- total interfaces: `132`
+- `partial = 27`
+- `not_available = 105`

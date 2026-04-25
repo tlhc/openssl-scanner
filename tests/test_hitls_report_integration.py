@@ -72,9 +72,9 @@ class TestExcelWithHiTLS:
             ws = wb["OpenSSL Call Sites"]
             headers = [cell.value for cell in next(ws.iter_rows(max_row=1))]
             assert "HiTLS Status" in headers
-            assert "HiTLS Equivalent" in headers
+            assert "HiTLS Replacement" in headers
             hi_idx = headers.index("HiTLS Status")
-            he_idx = headers.index("HiTLS Equivalent")
+            he_idx = headers.index("HiTLS Replacement")
             assert hi_idx == 6
             assert he_idx == 7
 
@@ -85,7 +85,13 @@ class TestExcelWithHiTLS:
             ws_sym = wb["Symbol Summary"]
             sym_headers = [cell.value for cell in next(ws_sym.iter_rows(max_row=1))]
             assert "HiTLS Status" in sym_headers
-            assert "HiTLS Equivalent" in sym_headers
+            assert "HiTLS Replacement" in sym_headers
+
+            ws_cov = wb["HiTLS Coverage"]
+            coverage_rows = list(ws_cov.iter_rows(min_row=1, max_row=8, values_only=True))
+            assert coverage_rows[0] == ("Metric", "Value")
+            assert ("Direct Replace Ratio (%)", 66.67) in coverage_rows
+            assert ("Direct+Partial Replace Ratio (%)", 66.67) in coverage_rows
             wb.close()
         finally:
             os.unlink(path)
@@ -102,8 +108,10 @@ class TestExcelWithHiTLS:
             ws = wb["OpenSSL Call Sites"]
             headers = [cell.value for cell in next(ws.iter_rows(max_row=1))]
             assert "HiTLS Status" not in headers
-            assert "HiTLS Equivalent" not in headers
-            assert len(headers) == 8
+            assert "HiTLS Replacement" not in headers
+            assert "Detection" not in headers
+            assert len(headers) == 7
+            assert "HiTLS Coverage" not in wb.sheetnames
             wb.close()
         finally:
             os.unlink(path)
@@ -120,26 +128,32 @@ class TestJsonWithHiTLS:
         cs0 = data['call_sites'][0]
         assert cs0['hitls_status'] == 'available'
         assert cs0['hitls_equiv'] == 'HITLS_CFG_NewTLSConfig'
+        assert cs0['hitls_replacement'] == 'HITLS_CFG_NewTLSConfig'
 
         cs1 = data['call_sites'][1]
         assert cs1['hitls_status'] == 'available'
         assert cs1['hitls_equiv'] == 'CRYPT_EAL_MdInit'
+        assert cs1['hitls_replacement'] == 'CRYPT_EAL_MdInit'
 
         cs2 = data['call_sites'][2]
         assert cs2['hitls_status'] == 'not_available'
         assert cs2['hitls_equiv'] is None
+        assert cs2['hitls_replacement'] is None
 
         cov = data['summary']['hitls_coverage']
         assert cov['available'] == 2
         assert cov['partial'] == 0
         assert cov['not_available'] == 1
         assert cov['unknown'] == 0
+        assert data['summary']['hitls_direct_replace_ratio'] == 66.67
+        assert data['summary']['hitls_direct_or_partial_replace_ratio'] == 66.67
 
     def test_json_without_hitls_no_fields(self):
         result = _make_result()
         json_str = SourceJsonExporter().export(result)
         data = json.loads(json_str)
         assert 'hitls_status' not in data['call_sites'][0]
+        assert 'hitls_replacement' not in data['call_sites'][0]
         assert 'hitls_coverage' not in data['summary']
 
 
@@ -164,7 +178,8 @@ class TestMergeWithHiTLS:
             ws_sym = wb["Symbol Summary"]
             sym_headers = [cell.value for cell in next(ws_sym.iter_rows(max_row=1))]
             assert "HiTLS Status" in sym_headers
-            assert "HiTLS Equivalent" in sym_headers
+            assert "HiTLS Replacement" in sym_headers
+            assert "HiTLS Coverage" in wb.sheetnames
             wb.close()
 
     def test_merge_from_json_without_hitls(self):
@@ -368,7 +383,8 @@ class TestMergeXlsxWithHiTLS:
             ws_sym = wb["Symbol Summary"]
             headers = [cell.value for cell in next(ws_sym.iter_rows(max_row=1))]
             assert "HiTLS Status" in headers
-            assert "HiTLS Equivalent" in headers
+            assert "HiTLS Replacement" in headers
+            assert "HiTLS Coverage" in wb.sheetnames
             wb.close()
 
 

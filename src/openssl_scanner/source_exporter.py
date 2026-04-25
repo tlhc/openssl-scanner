@@ -5,11 +5,13 @@ Single-sheet XLSX with call site details, matching existing exporter styling.
 Multi-sheet merge: combine multiple XLSX reports into one workbook.
 """
 
+# ruff: noqa: I001
+
 import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from .source_analyzer import SourceScanResult
 
@@ -28,7 +30,6 @@ COLUMNS = [
     ('ossl_symbol',       35, 'OpenSSL Symbol'),
     ('category',          20, 'Category'),
     ('call_args',         60, 'Call Arguments'),
-    ('detection_method',  12, 'Detection'),
 ]
 
 LAST_COL_LETTER = chr(64 + len(COLUMNS))
@@ -52,6 +53,74 @@ MERGE_SUMMARY_SHEET_COLUMNS = [
     ('project_list',   40, 'Project List'),
 ]
 
+HITLS_COVERAGE_ROWS = [
+    ('total_symbols', 'Unique OpenSSL Symbols'),
+    ('available', 'Available'),
+    ('partial', 'Partial'),
+    ('not_available', 'Not Available'),
+    ('unknown', 'Unknown'),
+    ('direct_replace_ratio', 'Direct Replace Ratio (%)'),
+    ('direct_or_partial_replace_ratio', 'Direct+Partial Replace Ratio (%)'),
+]
+
+RECOVERY_COLUMNS = [
+    ('extraction_source', 24, 'Extraction Source'),
+    ('confidence', 14, 'Confidence'),
+    ('parser_diagnostic_class', 28, 'Parser Diagnostic Class'),
+]
+
+
+def _has_fallback_sites(result: SourceScanResult) -> bool:
+    return any(cs.extraction_source != 'ast' for cs in result.call_sites)
+
+
+def _row_has_recovery(row: List) -> bool:
+    return len(row) >= len(COLUMNS) + len(RECOVERY_COLUMNS)
+
+
+def _row_columns(rows: List[List]) -> List[Tuple[str, int, str]]:
+    if any(_row_has_recovery(row) for row in rows):
+        return COLUMNS + RECOVERY_COLUMNS
+    return COLUMNS
+
+
+def _call_site_row(cs: Any, include_recovery: bool = False) -> List:
+    row = [
+        cs.file_path, cs.file_name, cs.caller_function,
+        cs.line_number, cs.ossl_symbol, cs.category, cs.call_args,
+    ]
+    if include_recovery:
+        row.extend([
+            cs.extraction_source if cs.extraction_source != 'ast' else '',
+            cs.confidence if cs.extraction_source != 'ast' else '',
+            cs.parser_diagnostic_class if cs.extraction_source != 'ast' else '',
+        ])
+    return row
+
+
+def _write_hitls_coverage_sheet(wb, symbols, header_font, hitls_compat) -> None:
+    """Write HiTLS overall replacement coverage sheet."""
+    from openpyxl.styles import PatternFill
+
+    if hitls_compat is None or not hitls_compat.is_loaded():
+        return
+
+    ws = wb.create_sheet(title="HiTLS Coverage")
+    summary_fill = PatternFill(
+        start_color="F0F8E8", end_color="F0F8E8", fill_type="solid"
+    )
+    ws.cell(row=1, column=1, value='Metric').font = header_font
+    ws.cell(row=1, column=2, value='Value').font = header_font
+    ws.cell(row=1, column=1).fill = summary_fill
+    ws.cell(row=1, column=2).fill = summary_fill
+    ws.column_dimensions['A'].width = 32
+    ws.column_dimensions['B'].width = 18
+
+    coverage = hitls_compat.get_coverage_summary(symbols)
+    for row_idx, (key, title) in enumerate(HITLS_COVERAGE_ROWS, 2):
+        ws.cell(row=row_idx, column=1, value=title)
+        ws.cell(row=row_idx, column=2, value=coverage[key])
+
 
 class SourceExcelExporter:
     """Export SourceScanResult to XLSX with call sites and symbol summary."""
@@ -62,10 +131,13 @@ class SourceExcelExporter:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
 
+        include_recovery = _has_fallback_sites(result)
         cols = list(COLUMNS)
         if hitls_compat is not None:
             cols.insert(6, ('hitls_status', 15, 'HiTLS Status'))
-            cols.insert(7, ('hitls_equiv', 30, 'HiTLS Equivalent'))
+            cols.insert(7, ('hitls_equiv', 30, 'HiTLS Replacement'))
+        if include_recovery:
+            cols.extend(RECOVERY_COLUMNS)
         last_col = chr(64 + len(cols)) if len(cols) <= 26 else 'A' + chr(64 + len(cols) - 26)
 
         base_title = "OpenSSL Call Sites"
@@ -110,12 +182,17 @@ class SourceExcelExporter:
                 ws.cell(row=row_idx, column=7, value=h_status)
                 ws.cell(row=row_idx, column=8, value=h_equiv or '')
                 ws.cell(row=row_idx, column=9, value=cs.call_args)
-                ws.cell(row=row_idx, column=10,
-                        value=getattr(cs, 'detection_method', 'dynamic-link'))
+                next_col = 10
             else:
                 ws.cell(row=row_idx, column=7, value=cs.call_args)
-                ws.cell(row=row_idx, column=8,
-                        value=getattr(cs, 'detection_method', 'dynamic-link'))
+                next_col = 8
+            if include_recovery:
+                ws.cell(row=row_idx, column=next_col, value=cs.extraction_source)
+                ws.cell(row=row_idx, column=next_col + 1, value=cs.confidence)
+                ws.cell(
+                    row=row_idx, column=next_col + 2,
+                    value=cs.parser_diagnostic_class,
+                )
             row_idx += 1
 
         if result.call_sites:
@@ -128,6 +205,10 @@ class SourceExcelExporter:
 
         self._write_symbol_summary(wb, result, header_font, header_fill,
                                    hitls_compat=hitls_compat)
+        if hitls_compat is not None:
+            _write_hitls_coverage_sheet(
+                wb, set(result.unique_symbols), header_font, hitls_compat,
+            )
 
         wb.save(output_path)
         logger.info("XLSX report saved to: %s", output_path)
@@ -141,7 +222,7 @@ class SourceExcelExporter:
         cols = list(SUMMARY_SHEET_COLUMNS)
         if hitls_compat is not None:
             cols.append(('hitls_status', 15, 'HiTLS Status'))
-            cols.append(('hitls_equiv', 30, 'HiTLS Equivalent'))
+            cols.append(('hitls_equiv', 30, 'HiTLS Replacement'))
 
         for col_idx, (_, width, title) in enumerate(cols, 1):
             cell = ws.cell(row=1, column=col_idx, value=title)
@@ -201,12 +282,16 @@ class SourceJsonExporter:
                 'category': cs.category,
                 'call_args': cs.call_args,
                 'language': cs.language,
-                'detection_method': getattr(cs, 'detection_method', 'dynamic-link'),
             }
+            if cs.extraction_source != 'ast':
+                entry['extraction_source'] = cs.extraction_source
+                entry['confidence'] = cs.confidence
+                entry['parser_diagnostic_class'] = cs.parser_diagnostic_class
             if hitls_compat is not None:
                 h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
                 entry['hitls_status'] = h_status
                 entry['hitls_equiv'] = h_equiv
+                entry['hitls_replacement'] = h_equiv
             call_sites.append(entry)
 
         summary = {
@@ -217,9 +302,29 @@ class SourceJsonExporter:
             'unique_symbols': result.unique_symbols,
             'symbols_by_category': result.symbols_by_category,
         }
+        fallback_count = sum(
+            1 for cs in result.call_sites if cs.extraction_source != 'ast'
+        )
+        if fallback_count:
+            summary['fallback_call_sites'] = fallback_count
+            summary['files_with_fallback_call_sites'] = len({
+                cs.file_path
+                for cs in result.call_sites
+                if cs.extraction_source != 'ast'
+            })
         if hitls_compat is not None:
-            summary['hitls_coverage'] = hitls_compat.get_coverage_stats(
+            coverage = hitls_compat.get_coverage_summary(
                 set(result.unique_symbols))
+            summary['hitls_coverage'] = {
+                key: coverage[key]
+                for key in ('available', 'partial', 'not_available', 'unknown')
+            }
+            summary['hitls_direct_replace_ratio'] = (
+                coverage['direct_replace_ratio']
+            )
+            summary['hitls_direct_or_partial_replace_ratio'] = (
+                coverage['direct_or_partial_replace_ratio']
+            )
 
         data = {
             'meta': {
@@ -338,8 +443,8 @@ class SourceMergeExporter:
         has_files_scanned = any(
             p['files_scanned'] != '--' for p in project_data)
 
-        def _init_project_sheet(target_ws):
-            for col_idx, (_, width, title) in enumerate(COLUMNS, 1):
+        def _init_project_sheet(target_ws, columns):
+            for col_idx, (_, width, title) in enumerate(columns, 1):
                 cell = target_ws.cell(row=1, column=col_idx, value=title)
                 cell.font = header_font
                 cell.fill = header_fill
@@ -352,9 +457,10 @@ class SourceMergeExporter:
             sheet_name = names[idx]
             rows = pdata['rows']
             files_scanned = pdata['files_scanned']
+            project_columns = _row_columns(rows)
 
             ws_first = wb.create_sheet(title=sheet_name)
-            _init_project_sheet(ws_first)
+            _init_project_sheet(ws_first, project_columns)
             ws = ws_first
 
             row_idx = 2
@@ -364,7 +470,7 @@ class SourceMergeExporter:
                     sheet_num += 1
                     overflow_name = f"{sheet_name[:25]} ({sheet_num})"
                     ws = wb.create_sheet(title=overflow_name)
-                    _init_project_sheet(ws)
+                    _init_project_sheet(ws, project_columns)
                     row_idx = 2
                 for col_idx, value in enumerate(row_data, 1):
                     ws.cell(row=row_idx, column=col_idx, value=value)
@@ -372,7 +478,8 @@ class SourceMergeExporter:
 
             if rows:
                 last = min(len(rows) + 1, XLSX_MAX_ROW)
-                ws_first.auto_filter.ref = f"A1:{LAST_COL_LETTER}{last}"
+                last_col = chr(64 + len(project_columns))
+                ws_first.auto_filter.ref = f"A1:{last_col}{last}"
 
             if sheet_num > 1:
                 logger.info("Project '%s' split across %d sheets (%d rows)",
@@ -381,7 +488,7 @@ class SourceMergeExporter:
             cat_counts = self._count_categories(rows)
             top_cat, top_count = '', 0
             if cat_counts:
-                top_cat = max(cat_counts, key=cat_counts.get)
+                top_cat = max(cat_counts, key=lambda cat: cat_counts[cat])
                 top_count = cat_counts[top_cat]
 
             symbols = set()
@@ -431,6 +538,10 @@ class SourceMergeExporter:
         self._write_symbol_summary_from_rows(
             wb, "Symbol Summary", all_rows, header_font, header_fill,
             hitls_compat=hitls_compat)
+        if hitls_compat is not None:
+            _write_hitls_coverage_sheet(
+                wb, all_symbols, header_font, hitls_compat,
+            )
 
         wb.save(output_path)
         logger.info("Merged XLSX report saved to: %s", output_path)
@@ -451,26 +562,29 @@ class SourceMergeExporter:
         base_title = "OpenSSL Call Sites"
         wb = load_workbook(path, read_only=True, data_only=True)
         rows = []
-        base_col_count = len(COLUMNS)
+        base_titles = [title for _, _, title in COLUMNS]
+        recovery_titles = [title for _, _, title in RECOVERY_COLUMNS]
         for sn in wb.sheetnames:
             if sn == base_title or sn.startswith(base_title + " ("):
                 ws = wb[sn]
-                col_map = None
+                col_map = []
                 for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
                     if row_idx == 0:
                         headers = [str(v) if v else '' for v in row]
-                        if 'HiTLS Status' in headers:
-                            hi = headers.index('HiTLS Status')
-                            col_map = list(range(hi)) + list(
-                                range(hi + 2, len(headers)))
+                        titles = list(base_titles)
+                        if 'Extraction Source' in headers:
+                            titles.extend(recovery_titles)
+                        col_map = [
+                            headers.index(title) if title in headers else None
+                            for title in titles
+                        ]
                         continue
                     if any(v is not None for v in row):
-                        if col_map is not None:
-                            vals = [row[i] if i < len(row) else None
-                                    for i in col_map]
-                            rows.append(vals[:base_col_count])
-                        else:
-                            rows.append(list(row[:base_col_count]))
+                        vals = [
+                            row[i] if i is not None and i < len(row) else ''
+                            for i in col_map
+                        ]
+                        rows.append(vals)
         wb.close()
 
         name = os.path.splitext(os.path.basename(path))[0]
@@ -484,7 +598,7 @@ class SourceMergeExporter:
         Row format matches XLSX: [file_path, file_name, caller_function,
             line_number, ossl_symbol, category, call_args]
         """
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             data = json.load(f)
 
         files_scanned = data.get('summary', {}).get('total_files_scanned', 0)
@@ -498,20 +612,25 @@ class SourceMergeExporter:
                 cs.get('ossl_symbol', ''),
                 cs.get('category', ''),
                 cs.get('call_args', ''),
-                cs.get('detection_method', 'dynamic-link'),
             ])
+            if cs.get('extraction_source') == 'parser-diagnostic-text':
+                rows[-1].extend([
+                    cs.get('extraction_source', ''),
+                    cs.get('confidence', ''),
+                    cs.get('parser_diagnostic_class', ''),
+                ])
 
         name = os.path.splitext(os.path.basename(path))[0]
         return name, files_scanned, rows
 
     def _resolve_sheet_names(self, names: List[str]) -> List[str]:
         """Ensure unique sheet names within Excel's 31-char limit."""
-        _INVALID_RE = re.compile(r'[\[\]:*?/\\]')
+        invalid_re = re.compile(r'[\[\]:*?/\\]')
         result = []
         used = set()
-        counter = {}
+        counter: Dict[str, int] = {}
         for name in names:
-            short = _INVALID_RE.sub('_', name)[:31]
+            short = invalid_re.sub('_', name)[:31]
             if short in used:
                 base = short
                 counter.setdefault(base, 0)
@@ -549,7 +668,7 @@ class SourceMergeExporter:
         columns = list(MERGE_SUMMARY_SHEET_COLUMNS)
         if hitls_compat is not None:
             columns.append(('hitls_status', 15, 'HiTLS Status'))
-            columns.append(('hitls_equiv', 30, 'HiTLS Equivalent'))
+            columns.append(('hitls_equiv', 30, 'HiTLS Replacement'))
 
         for col_idx, (_, width, title) in enumerate(columns, 1):
             cell = ws.cell(row=1, column=col_idx, value=title)
@@ -632,9 +751,7 @@ class SourceMergeExporter:
     def _result_to_rows(self, result: 'SourceScanResult') -> List[List]:
         """Convert SourceScanResult.call_sites to row lists."""
         return [
-            [cs.file_path, cs.file_name, cs.caller_function,
-             cs.line_number, cs.ossl_symbol, cs.category, cs.call_args,
-             getattr(cs, 'detection_method', 'dynamic-link')]
+            _call_site_row(cs, include_recovery=_has_fallback_sites(result))
             for cs in result.call_sites
         ]
 
@@ -656,13 +773,18 @@ class SourceMergeExporter:
                     'ossl_symbol': cs.ossl_symbol,
                     'category': cs.category,
                     'call_args': cs.call_args,
-                    'detection_method': getattr(cs, 'detection_method',
-                                                'dynamic-link'),
                 }
+                if cs.extraction_source != 'ast':
+                    cs_entry['extraction_source'] = cs.extraction_source
+                    cs_entry['confidence'] = cs.confidence
+                    cs_entry['parser_diagnostic_class'] = (
+                        cs.parser_diagnostic_class
+                    )
                 if hitls_compat is not None:
                     h_status, h_equiv = hitls_compat.lookup(cs.ossl_symbol)
                     cs_entry['hitls_status'] = h_status
                     cs_entry['hitls_equiv'] = h_equiv
+                    cs_entry['hitls_replacement'] = h_equiv
                 call_sites.append(cs_entry)
             entry = {
                 'project': name,
@@ -703,8 +825,17 @@ class SourceMergeExporter:
             'total_unique_symbols': len(all_symbols),
         }
         if hitls_compat is not None:
-            meta['hitls_coverage'] = hitls_compat.get_coverage_stats(
-                all_symbols)
+            coverage = hitls_compat.get_coverage_summary(all_symbols)
+            meta['hitls_coverage'] = {
+                key: coverage[key]
+                for key in ('available', 'partial', 'not_available', 'unknown')
+            }
+            meta['hitls_direct_replace_ratio'] = (
+                coverage['direct_replace_ratio']
+            )
+            meta['hitls_direct_or_partial_replace_ratio'] = (
+                coverage['direct_or_partial_replace_ratio']
+            )
         merged = {'meta': meta, 'projects': projects}
 
         with open(output_path, 'w', encoding='utf-8') as f:

@@ -1,0 +1,192 @@
+# openHiTLS Compatibility Validation Batch 251
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `OPENSSL_*` and `UI_*` utility families lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a mixed utility/runtime `OPENSSL_*` family across:
+  - initialization and cleanup:
+    - `OPENSSL_init`
+    - `OPENSSL_init_crypto`
+    - `OPENSSL_init_ssl`
+    - `OPENSSL_cleanup`
+    - `OPENSSL_INIT_*`
+  - config/runtime helpers:
+    - `OPENSSL_config`
+    - `OPENSSL_info`
+    - `OPENSSL_version_*`
+    - `OPENSSL_thread_stop*`
+    - `OPENSSL_DIR_*`
+    - string/hex/unicode/time helpers
+- OpenSSL also exposes a substantial `UI_*` family around:
+  - UI / UI_METHOD lifecycle:
+    - `UI_new`
+    - `UI_new_method`
+    - `UI_free`
+    - `UI_create_method`
+    - `UI_destroy_method`
+  - queued prompt model:
+    - `UI_add_input_string`
+    - `UI_add_verify_string`
+    - `UI_add_input_boolean`
+    - `UI_process`
+  - UI_STRING getters/setters:
+    - `UI_get_string_type`
+    - `UI_get_input_flags`
+    - `UI_get0_result*`
+    - `UI_get_result_*`
+    - `UI_set_result*`
+  - method/global state:
+    - `UI_get_default_method`
+    - `UI_set_default_method`
+    - `UI_get_method`
+    - `UI_set_method`
+  - utility helpers:
+    - `UI_construct_prompt`
+    - `UI_UTIL_read_pw`
+    - `UI_UTIL_read_pw_string`
+- openHiTLS public installed surface has two adjacent utility families:
+  - BSL global init:
+    - `BSL_GLOBAL_Init`
+    - `BSL_GLOBAL_DeInit`
+  - BSL UI:
+    - `BSL_UI_New`
+    - `BSL_UI_Free`
+    - `BSL_UI_MethodNew`
+    - `BSL_UI_MethodFree`
+    - `BSL_UI_GetOperMethod`
+    - `BSL_UI_SetMethod`
+    - `BSL_UI_GetMethod`
+    - `BSL_UI_ReadPwdUtil`
+    - `BSL_UI_DataCtrl`
+    - `BSL_UI_GetDataResult`
+    - `BSL_UI_ConstructPrompt`
+- openHiTLS public installed tree does not expose:
+  - OpenSSL-style global init settings objects / config flags / runtime info helpers
+  - UI's queued prompt / `UI_STRING` object model
+  - UI object `ex_data` / user-data contracts
+  - a public setter for a global default UI method
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 24`
+- adjust to `not_available = 68`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path:
+  - init / cleanup:
+    - `OPENSSL_init`
+    - `OPENSSL_init_crypto`
+    - `OPENSSL_init_ssl`
+    - `OPENSSL_cleanup`
+  - UI / method lifecycle:
+    - `UI_new`
+    - `UI_new_method`
+    - `UI_free`
+    - `UI_create_method`
+    - `UI_destroy_method`
+    - `UI_get_default_method`
+    - `UI_get_method`
+    - `UI_set_method`
+  - prompt and password utilities:
+    - `UI_construct_prompt`
+    - `UI_UTIL_read_pw`
+    - `UI_UTIL_read_pw_string`
+  - UI string/result metadata:
+    - `UI_get_string_type`
+    - `UI_get_input_flags`
+    - `UI_get0_result`
+    - `UI_get0_result_string`
+    - `UI_get0_test_string`
+    - `UI_get_result_length`
+    - `UI_get_result_string_length`
+    - `UI_set_result`
+    - `UI_set_result_ex`
+- These remain `partial` because:
+  - openHiTLS init is global and flagless; OpenSSL carries opts/settings/runtime-config semantics
+  - openHiTLS UI model is `BSL_UI` + `BSL_UI_Method` + `BSL_UI_DataPack`, not OpenSSL `UI` + `UI_METHOD` + `UI_STRING`
+  - result and metadata access are DataPack-based rather than queue/index-based
+  - method changes are achieved through explicit method objects and UI construction, not the exact OpenSSL setter contract
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - `OPENSSL_INIT_new`
+  - `OPENSSL_INIT_free`
+  - `OPENSSL_INIT_set_config_*`
+  - `OPENSSL_config`
+  - `OPENSSL_info`
+  - `OPENSSL_version_*`
+  - `OPENSSL_thread_stop*`
+  - `OPENSSL_DIR_*`
+  - string/hex/unicode/time convenience helpers
+  - `UI_add_*` / `UI_dup_*` queued prompt builders
+  - `UI_add_user_data`
+  - `UI_dup_user_data`
+  - `UI_get0_user_data`
+  - `UI_ctrl`
+  - `UI_process`
+  - `UI_OpenSSL`
+  - `UI_null`
+  - `UI_get0_output_string`
+  - `UI_get0_action_string`
+  - `UI_get_result_maxsize`
+  - `UI_get_result_minsize`
+  - `UI_get_ex_data`
+  - `UI_set_ex_data`
+  - `UI_set_default_method`
+
+Important boundary calls:
+- `UI_process` stays `not_available`
+  - OpenSSL runs a queued prompt flow over internal `UI_STRING` entries
+  - openHiTLS public surface gives one-shot `BSL_UI_ReadPwdUtil` and DataPack helpers, not the same queued processing contract
+- `UI_get_ex_data` / `UI_set_ex_data` stay `not_available`
+  - openHiTLS public UI API does not expose UI object ext-data accessors
+- `OPENSSL_INIT_*` stays `not_available`
+  - openHiTLS public init surface is `BSL_GLOBAL_Init/DeInit`
+  - it does not carry an `OPENSSL_INIT_SETTINGS` object model
+
+Representative evidence:
+- OpenSSL declarations and docs:
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L461)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L522)
+  - [ssl.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/ssl.h.in#L2780)
+  - [OPENSSL_init_crypto.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/OPENSSL_init_crypto.pod#L15)
+  - [OPENSSL_init_crypto.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/OPENSSL_init_crypto.pod#L20)
+  - [OPENSSL_config.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/OPENSSL_config.pod#L15)
+  - [OpenSSL_version.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/OpenSSL_version.pod#L31)
+  - [UI_new.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_new.pod#L21)
+  - [UI_new.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_new.pod#L25)
+  - [UI_new.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_new.pod#L46)
+  - [UI_new.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_new.pod#L56)
+  - [UI_new.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_new.pod#L60)
+  - [UI_STRING.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_STRING.pod#L27)
+  - [UI_STRING.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/UI_STRING.pod#L36)
+- openHiTLS public declarations:
+  - [bsl_init.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_init.h#L42)
+  - [bsl_init.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_init.h#L52)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L170)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L184)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L197)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L211)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L227)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L244)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L261)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L283)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L329)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L346)
+  - [bsl_ui.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_ui.h#L362)
+- openHiTLS public structure evidence:
+  - [ui_type.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/ui/include/ui_type.h#L31)
+  - [ui_type.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/ui/include/ui_type.h#L37)
+  - [ui_type.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/ui/include/ui_type.h#L46)
+
+Batch 251 inventory:
+- total interfaces: `92`
+- `partial = 24`
+- `not_available = 68`

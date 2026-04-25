@@ -1,0 +1,197 @@
+# openHiTLS Compatibility Validation Batch 252
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `ERR_*`, `CONF_*`, `NCONF_*`, and `OBJ_*` utility families lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes four sizeable utility families here:
+  - error stack helpers:
+    - `ERR_*`
+  - legacy config helpers:
+    - `CONF_*`
+    - `NCONF_*`
+  - object/OID helpers:
+    - `OBJ_*`
+- openHiTLS public installed surface exposes three adjacent BSL families:
+  - error stack:
+    - `BSL_ERR_*`
+  - config:
+    - `BSL_CONF_*`
+  - object/OID:
+    - `BSL_OBJ_*`
+- Those public families cover a useful subset of the same problem space, but they do not preserve OpenSSL object models such as:
+  - `ERR_STATE`
+  - `CONF`/`LHASH_OF(CONF_VALUE)` / `STACK_OF(CONF_VALUE)`
+  - `ASN1_OBJECT`
+  - OpenSSL module/IMODULE registries
+
+Verdict:
+- adjust to `available = 5`
+- adjust to `partial = 31`
+- adjust to `not_available = 66`
+
+Reasoning boundary:
+- `available` is justified only where openHiTLS has a direct public equivalent with matching practical semantics:
+  - `ERR_set_mark`
+    - `BSL_ERR_SetMark()`
+  - `ERR_pop_to_mark`
+    - `BSL_ERR_PopToMark()`
+  - `ERR_clear_last_mark`
+    - `BSL_ERR_ClearLastMark()`
+  - `ERR_peek_error_line`
+    - `BSL_ERR_PeekErrorFileLine(&file, &lineNo)`
+  - `ERR_peek_last_error_line`
+    - `BSL_ERR_PeekLastErrorFileLine(&file, &lineNo)`
+- `partial` is justified where openHiTLS has a practical but contract-reduced public replacement path:
+  - error helpers:
+    - `ERR_peek_error_all`
+    - `ERR_peek_last_error_all`
+    - `ERR_unload_strings`
+  - legacy config:
+    - `CONF_load`
+    - `CONF_load_bio`
+    - `CONF_load_fp`
+    - `CONF_get_section`
+    - `CONF_get_string`
+    - `CONF_get_number`
+    - `CONF_dump_bio`
+    - `CONF_dump_fp`
+    - `CONF_free`
+  - new config:
+    - `NCONF_new`
+    - `NCONF_new_ex`
+    - `NCONF_default`
+    - `NCONF_load`
+    - `NCONF_load_bio`
+    - `NCONF_load_fp`
+    - `NCONF_get_section`
+    - `NCONF_get_section_names`
+    - `NCONF_get_string`
+    - `NCONF_get_number_e`
+    - `NCONF_dump_bio`
+    - `NCONF_dump_fp`
+    - `NCONF_free`
+  - object/OID:
+    - `OBJ_create`
+    - `OBJ_add_sigid`
+    - `OBJ_nid2obj`
+    - `OBJ_txt2nid`
+    - `OBJ_get0_data`
+    - `OBJ_length`
+- These remain `partial` because:
+  - `ERR_peek_*_all` loses OpenSSL `func/data/flags` fields, but still yields code + file + line + description
+  - `CONF/NCONF` replacement uses `BSL_CONF` and `BSL_UIO`, not OpenSSL `CONF`/`BIO`/`FILE*` object models
+  - `OBJ_*` replacement uses `BslCid` and `BslOidString`, not `ASN1_OBJECT`
+  - `OBJ_txt2nid` only has a practical public path for numeric OID text, not OpenSSL short-name/long-name text resolution
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - error-state object and mutation helpers:
+    - `ERR_new`
+    - `ERR_set_debug`
+    - `ERR_set_error`
+    - `ERR_set_error_data`
+    - `ERR_vset_error`
+    - `ERR_add_error_*`
+    - `ERR_get_state`
+    - `ERR_get_next_error_library`
+    - `ERR_peek_*_data`
+    - `ERR_peek_*_func`
+    - `ERR_peek_*_line_data`
+    - `ERR_count_to_mark`
+    - `ERR_pop`
+    - `ERR_print_errors`
+    - `ERR_print_errors_cb`
+    - `ERR_remove_state`
+    - `ERR_remove_thread_state`
+    - `ERR_lib_error_string`
+  - config module/IMODULE registry helpers:
+    - `CONF_imodule_*`
+    - `CONF_module_*`
+    - `CONF_modules_*`
+    - `CONF_module_add`
+    - `CONF_set_default_method`
+    - `CONF_set_nconf`
+    - `CONF_parse_list`
+    - `CONF_get1_default_config_file`
+    - `NCONF_WIN32`
+    - `NCONF_free_data`
+    - `NCONF_get0_libctx`
+  - object name and search registries:
+    - `OBJ_NAME_*`
+    - `OBJ_bsearch_*`
+    - `OBJ_cmp`
+    - `OBJ_dup`
+    - `OBJ_ln2nid`
+    - `OBJ_sn2nid`
+    - `OBJ_new_nid`
+    - `OBJ_add_object`
+    - `OBJ_create_objects`
+    - `OBJ_find_sigid_algs`
+    - `OBJ_find_sigid_by_algs`
+    - `OBJ_sigid_free`
+
+Important boundary calls:
+- `CONF_load*` and `NCONF_load*` are `partial`
+  - openHiTLS public config subsystem exists
+  - the replacement path runs through `BSL_CONF_*` plus `BSL_UIO`, not OpenSSL `CONF` plus `BIO/FILE*`
+- `ERR_peek_error_all` and `ERR_peek_last_error_all` are `partial`
+  - openHiTLS can publicly recover code + file + line + description
+  - there is no public equivalent for OpenSSL `func/data/flags`
+- `OBJ_txt2nid` is `partial`
+  - openHiTLS public `BSL_OBJ_GetOidFromNumericString` + `BSL_OBJ_GetCID` can handle numeric OID text
+  - there is no public short-name/long-name resolution helper
+
+Representative evidence:
+- OpenSSL declarations and docs:
+  - [err.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/err.h.in#L362)
+  - [err.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/err.h.in#L408)
+  - [err.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/err.h.in#L422)
+  - [err.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/err.h.in#L434)
+  - [ERR_get_error.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/ERR_get_error.pod#L54)
+  - [ERR_set_mark.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/ERR_set_mark.pod#L20)
+  - [conf.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/conf.h.in#L81)
+  - [conf.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/conf.h.in#L108)
+  - [conf.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/conf.h.in#L120)
+  - [NCONF_new_ex.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/NCONF_new_ex.pod#L17)
+  - [objects.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/objects.h#L56)
+  - [objects.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/objects.h#L159)
+- openHiTLS public declarations:
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L82)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L133)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L165)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L211)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L247)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L271)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L284)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L298)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L313)
+  - [bsl_err.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_err.h#L326)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L46)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L56)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L76)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L90)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L103)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L118)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L133)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L148)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L163)
+  - [bsl_conf.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/conf/include/bsl_conf.h#L176)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L718)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L729)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L737)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L745)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L755)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L765)
+
+Batch 252 inventory:
+- total interfaces: `102`
+- `available = 5`
+- `partial = 31`
+- `not_available = 66`

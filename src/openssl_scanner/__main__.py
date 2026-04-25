@@ -111,6 +111,7 @@ def create_parser() -> argparse.ArgumentParser:
     create_hap_parser(subparsers)
     create_hap_summary_parser(subparsers)
     create_source_parser(subparsers)
+    create_source_summary_parser(subparsers)
     create_source_merge_parser(subparsers)
     create_source_probe_parser(subparsers)
     create_combo_scan_parser(subparsers)
@@ -555,6 +556,13 @@ Examples:
         help='Custom HiTLS mapping JSON file (default: built-in)',
     )
 
+    src_parser.add_argument(
+        '--recover-parser-diagnostics',
+        action='store_true',
+        default=False,
+        help='Recover OpenSSL symbols from parser diagnostic regions',
+    )
+
 
 def create_source_merge_parser(subparsers) -> None:
     """Create parser for source-merge command."""
@@ -606,6 +614,69 @@ Examples:
     parser.add_argument(
         '--hitls-map',
         help='Custom HiTLS mapping JSON file (default: built-in)',
+    )
+
+def create_source_summary_parser(subparsers) -> None:
+    """Create parser for source-summary command."""
+    parser = subparsers.add_parser(
+        'source-summary',
+        help='Generate repo-level workbook summary from source scan JSON reports',
+        epilog='''
+Examples:
+  # Summarize one reports directory
+  openssl-scanner source-summary /tmp/source_reports -o summary.xlsx
+
+  # Add nonzero TSV index and OpenHarmony manifest enrichment
+  openssl-scanner source-summary /tmp/source_reports -o summary.xlsx \
+    --nonzero-index repos.tsv \
+    --source-root /path/to/oh-source \
+    --manifest /path/to/oh-source/.repo/manifest.xml
+''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        'inputs',
+        nargs='+',
+        help='JSON report files or directories containing source-scan JSON reports',
+    )
+
+    parser.add_argument(
+        '-o', '--output',
+        required=True,
+        help='Output XLSX workbook path',
+    )
+
+    parser.add_argument(
+        '--nonzero-index',
+        help='Optional TSV output path for repos with nonzero OpenSSL usage',
+    )
+
+    parser.add_argument(
+        '--source-root',
+        help='Optional source root used to normalize report target paths',
+    )
+
+    parser.add_argument(
+        '--case-sensitive-source-root',
+        help='Optional alternate source root used when reports reference another mount path',
+    )
+
+    parser.add_argument(
+        '--manifest',
+        help='Optional repo manifest.xml path used to enrich repo name and URL',
+    )
+
+    parser.add_argument(
+        '-v', '--verbose',
+        action='count',
+        default=0,
+        help='Increase verbosity (-v info, -vv debug, -vvv+ trace)',
+    )
+
+    parser.add_argument(
+        '--log-file',
+        help='Write logs to file',
     )
 
 
@@ -1651,6 +1722,8 @@ def _scan_single_target(analyzer, target, args, workers_override=None):
             target,
             recursive=not args.no_recursive,
             workers=workers,
+            log_level=logging.getLogger().getEffectiveLevel(),
+            log_file=getattr(args, 'log_file', None),
         )
 
 
@@ -1750,7 +1823,14 @@ def cmd_source(args) -> int:
     symbols = matcher.get_combined_set()
     macros = matcher._openssl_macros or set()
     from .constants import SYMBOL_CATEGORIES
-    analyzer = SourceAnalyzer(symbols, SYMBOL_CATEGORIES, macro_symbols=macros)
+    analyzer = SourceAnalyzer(
+        symbols,
+        SYMBOL_CATEGORIES,
+        macro_symbols=macros,
+        recover_parser_diagnostics=getattr(
+            args, 'recover_parser_diagnostics', False,
+        ),
+    )
 
     hitls_compat = _load_hitls_compat(args)
 
@@ -2246,6 +2326,44 @@ def cmd_source_merge(args) -> int:
         return 1
 
 
+def cmd_source_summary(args) -> int:
+    """Execute source-summary command."""
+    logger = logging.getLogger(__name__)
+
+    from .source_summary import SourceSummaryBuilder
+
+    output_path = os.path.abspath(args.output)
+    if not output_path.lower().endswith('.xlsx'):
+        output_path += '.xlsx'
+
+    try:
+        builder = SourceSummaryBuilder(
+            source_root=getattr(args, 'source_root', None),
+            case_sensitive_source_root=getattr(
+                args, 'case_sensitive_source_root', None
+            ),
+            manifest_path=getattr(args, 'manifest', None),
+        )
+        rows, blockers = builder.build_from_inputs(args.inputs)
+        builder.write_workbook(rows, blockers, output_path)
+        if getattr(args, 'nonzero_index', None):
+            builder.write_nonzero_index(rows, os.path.abspath(args.nonzero_index))
+
+        nonzero_count = sum(1 for row in rows if int(row['使用OSSL接口数量']) > 0)
+        print(
+            f"Summary generated: {output_path} "
+            f"({len(rows)} repos, {nonzero_count} with OpenSSL usage, "
+            f"{len(blockers)} blocker rows)"
+        )
+        if getattr(args, 'nonzero_index', None):
+            print(f"Nonzero index: {os.path.abspath(args.nonzero_index)}")
+        return 0
+
+    except Exception as e:
+        logger.exception("Source summary failed: %s", e)
+        return 1
+
+
 def create_source_diff_parser(subparsers) -> None:
     """Create parser for source-diff command."""
     parser = subparsers.add_parser(
@@ -2429,6 +2547,13 @@ Pipeline:
         help='Custom HiTLS mapping JSON file (default: built-in)',
     )
 
+    parser.add_argument(
+        '--recover-parser-diagnostics',
+        action='store_true',
+        default=False,
+        help='Recover OpenSSL symbols from parser diagnostic regions',
+    )
+
 
 def cmd_combo_scan(args) -> int:
     """Execute combo-scan: probe + scan + merge in one step."""
@@ -2541,6 +2666,12 @@ def cmd_combo_scan(args) -> int:
                 cmd.append('--json-only')
             if args.no_recursive:
                 cmd.append('--no-recursive')
+            if getattr(args, 'recover_parser_diagnostics', False):
+                cmd.append('--recover-parser-diagnostics')
+            if args.verbose:
+                cmd.append('-' + 'v' * int(args.verbose))
+            if getattr(args, 'log_file', None):
+                cmd.extend(['--log-file', args.log_file])
 
             popen_kw = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            env=sub_env)
@@ -2576,6 +2707,9 @@ def cmd_combo_scan(args) -> int:
                           f"{names[i]:30s}  TIMEOUT ({elapsed:.0f}s)", flush=True)
                 continue
             elapsed = time.time() - start
+            if args.verbose and stderr:
+                sys.stderr.write(stderr.decode('utf-8', errors='replace'))
+                sys.stderr.flush()
 
             if want_xlsx:
                 tmp_json = os.path.splitext(tmp_out)[0] + '.json'
@@ -3282,7 +3416,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-merge', 'source-diff', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
+    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-summary', 'source-merge', 'source-diff', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
         argv = ['scan'] + argv
 
     args = parser.parse_args(argv)
@@ -3301,6 +3435,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_hap_summary(args)
     elif args.command == 'source':
         return cmd_source(args)
+    elif args.command == 'source-summary':
+        return cmd_source_summary(args)
     elif args.command == 'source-merge':
         return cmd_source_merge(args)
     elif args.command == 'source-probe':

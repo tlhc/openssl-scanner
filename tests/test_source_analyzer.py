@@ -5,23 +5,25 @@ import tempfile
 
 import pytest
 
-tree_sitter = pytest.importorskip("tree_sitter")
-
+import openssl_scanner.source_analyzer as source_analyzer
+from openssl_scanner.constants import SYMBOL_CATEGORIES
 from openssl_scanner.source_analyzer import (
-    CallSite,
     SourceAnalyzer,
     SourceScanResult,
     _categorize_symbol,
+    _make_query_executor,
     _scan_file_ast,
+    _walk_tree,
 )
-from openssl_scanner.constants import SYMBOL_CATEGORIES
+
+tree_sitter = pytest.importorskip("tree_sitter")
 
 OSSL_SYMBOLS = {
     "SSL_new", "SSL_free", "SSL_connect", "SSL_read", "SSL_write",
     "SSL_CTX_new", "SSL_CTX_free",
     "EVP_DigestInit_ex", "EVP_DigestUpdate", "EVP_DigestFinal_ex",
     "EVP_MD_CTX_new", "EVP_MD_CTX_free", "EVP_sha256",
-    "ERR_print_errors_fp",
+    "ERR_error_string", "ERR_print_errors_fp",
     "BN_new", "BN_free",
     "X509_new", "X509_free",
 }
@@ -30,6 +32,13 @@ OSSL_SYMBOLS = {
 def _write_temp(content: str, suffix: str) -> str:
     fd, path = tempfile.mkstemp(suffix=suffix)
     os.write(fd, content.encode('utf-8'))
+    os.close(fd)
+    return path
+
+
+def _write_temp_bytes(content: bytes, suffix: str) -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.write(fd, content)
     os.close(fd)
     return path
 
@@ -137,6 +146,23 @@ class TestCppCall:
         finally:
             os.unlink(path)
 
+    def test_local_same_name_definition_not_reported(self):
+        src = '''static int CMAC_Final(void *ctx) {
+    return 0;
+}
+
+int wrapper(void *ctx) {
+    return CMAC_Final(ctx);
+}
+'''
+        path = _write_temp(src, '.cpp')
+        try:
+            analyzer = SourceAnalyzer(OSSL_SYMBOLS | {"CMAC_Final"})
+            sites = analyzer.scan_file(path)
+            assert len(sites) == 0
+        finally:
+            os.unlink(path)
+
 
 class TestRustDirectCall:
     def test_direct_call(self):
@@ -152,6 +178,23 @@ class TestRustDirectCall:
             assert sites[0].ossl_symbol == "SSL_connect"
             assert sites[0].caller_function == "do_tls"
             assert sites[0].language == "rust"
+        finally:
+            os.unlink(path)
+
+    def test_local_same_name_definition_not_reported(self):
+        src = '''fn EVP_sha256() -> i32 {
+    0
+}
+
+fn do_tls() {
+    EVP_sha256();
+}
+'''
+        path = _write_temp(src, '.rs')
+        try:
+            analyzer = SourceAnalyzer(OSSL_SYMBOLS)
+            sites = analyzer.scan_file(path)
+            assert len(sites) == 0
         finally:
             os.unlink(path)
 
@@ -196,6 +239,92 @@ class TestEdgeCases:
             assert len(sites) == 0
         finally:
             os.unlink(path)
+
+    def test_walk_tree_handles_deep_nesting_without_recursion_error(self):
+        class FakeNode:
+            def __init__(self, children=None):
+                self.children = children or []
+
+        root = FakeNode()
+        current = root
+        for _ in range(2000):
+            child = FakeNode()
+            current.children = [child]
+            current = child
+
+        walked = list(_walk_tree(root))
+        assert len(walked) == 2001
+
+    def test_parser_diagnostic_recovery_is_disabled_by_default(self):
+        src = '''void f(void) {
+    ERR_error_string(
+#if OPENSSL_IS_BORINGSSL
+        (uint32_t)
+#else
+        (unsigned long)
+#endif
+        code);
+}
+'''
+        path = _write_temp(src, '.c')
+        try:
+            analyzer = SourceAnalyzer(OSSL_SYMBOLS)
+            sites = analyzer.scan_file(path)
+            assert [site.ossl_symbol for site in sites] == []
+        finally:
+            os.unlink(path)
+
+    def test_parser_diagnostic_recovery_finds_symbol_in_recovery_region(self):
+        src = '''void f(void) {
+    ERR_error_string(
+#if OPENSSL_IS_BORINGSSL
+        (uint32_t)
+#else
+        (unsigned long)
+#endif
+        code);
+}
+'''
+        path = _write_temp(src, '.c')
+        try:
+            analyzer = SourceAnalyzer(OSSL_SYMBOLS, recover_parser_diagnostics=True)
+            sites = analyzer.scan_file(path)
+            assert len(sites) == 1
+            assert sites[0].ossl_symbol == "ERR_error_string"
+            assert sites[0].extraction_source == "parser-diagnostic-text"
+            assert sites[0].confidence == "fallback"
+            assert sites[0].parser_diagnostic_class == "preprocessor-fragment"
+        finally:
+            os.unlink(path)
+
+
+class TestTreeSitterCompatibility:
+    """Compatibility behavior for older tree-sitter APIs."""
+
+    def test_make_query_executor_uses_querycursor_when_available(self, monkeypatch):
+        class FakeCursor:
+            def __init__(self, query):
+                self.query = query
+
+        monkeypatch.setattr(
+            source_analyzer, "_get_query_cursor_class", lambda: FakeCursor
+        )
+        query = object()
+        executor = _make_query_executor(query)
+        assert isinstance(executor, FakeCursor)
+        assert executor.query is query
+
+    def test_make_query_executor_falls_back_to_query_object(self, monkeypatch):
+        monkeypatch.setattr(
+            source_analyzer, "_get_query_cursor_class", lambda: None
+        )
+
+        class FakeQuery:
+            pass
+
+        query = FakeQuery()
+        executor = _make_query_executor(query)
+        assert executor is query
 
     def test_binary_file(self):
         fd, path = tempfile.mkstemp(suffix='.c')
@@ -259,32 +388,80 @@ class TestDirectoryScan:
             assert result.total_call_sites == 1
 
 
-class TestDlsymSourceDetection:
+class TestQueryCaching:
+    def test_c_queries_reused_across_files(self, monkeypatch):
+        code1 = 'void f(void *h) { SSL_connect(ssl); dlsym(h, "SSL_CTX_new"); }'
+        code2 = 'void g(void *h) { SSL_free(ssl); dlsym(h, "SSL_read"); }'
+        path1 = _write_temp(code1, '.c')
+        path2 = _write_temp(code2, '.c')
+        query_builds = 0
+        original_query = tree_sitter.Query
 
-    def test_dlsym_openssl_symbol(self):
-        """dlsym(handle, "SSL_CTX_new") should be detected."""
-        code = '''
-void load_ssl(void *handle) {
-    void *fn = dlsym(handle, "SSL_CTX_new");
-}
-'''
-        path = _write_temp(code, '.c')
+        def counting_query(*args, **kwargs):
+            nonlocal query_builds
+            query_builds += 1
+            return original_query(*args, **kwargs)
+
+        monkeypatch.setattr(tree_sitter, 'Query', counting_query)
+        if hasattr(source_analyzer, '_LANG_RUNTIME_CACHE'):
+            source_analyzer._LANG_RUNTIME_CACHE.clear()
+
+        try:
+            sites1, err1 = _scan_file_ast(path1, 'c', OSSL_SYMBOLS,
+                                          SYMBOL_CATEGORIES)
+            sites2, err2 = _scan_file_ast(path2, 'c', OSSL_SYMBOLS,
+                                          SYMBOL_CATEGORIES)
+            assert err1 is None
+            assert err2 is None
+            assert len(sites1) == 1
+            assert len(sites2) == 1
+            assert query_builds == 1
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
+
+
+class TestNonUtf8TextSources:
+    def test_non_utf8_comment_is_still_scanned(self):
+        src = (
+            b"/* Moritz R\xf6hrich */\n"
+            b"int main(void) {\n"
+            b"    SSL_free(ssl);\n"
+            b"    return 0;\n"
+            b"}\n"
+        )
+        path = _write_temp_bytes(src, '.c')
         try:
             sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
-                                         SYMBOL_CATEGORIES)
+                                        SYMBOL_CATEGORIES)
             assert err is None
             assert len(sites) == 1
-            assert sites[0].ossl_symbol == 'SSL_CTX_new'
-            assert sites[0].detection_method == 'dlopen'
-            assert 'dlsym' in sites[0].call_args
+            assert sites[0].ossl_symbol == 'SSL_free'
         finally:
             os.unlink(path)
 
-    def test_dlsym_non_openssl_filtered(self):
-        """dlsym(handle, "printf") should not be reported."""
+    def test_generated_text_with_extended_bytes_is_not_rejected(self):
+        src = (
+            b"#define FLAGS \"abc\"\n"
+            b"/* extended bytes: \xff\xa1\xfe */\n"
+            b"void use_tls(void) {\n"
+            b"    SSL_CTX_new(0);\n"
+            b"}\n"
+        )
+        path = _write_temp_bytes(src, '.h')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                        SYMBOL_CATEGORIES)
+            assert err is None
+            assert len(sites) == 1
+            assert sites[0].ossl_symbol == 'SSL_CTX_new'
+        finally:
+            os.unlink(path)
+
+    def test_source_dlsym_string_is_not_reported(self):
         code = '''
 void load_lib(void *handle) {
-    void *fn = dlsym(handle, "printf");
+    void *fn = dlsym(handle, "SSL_CTX_new");
 }
 '''
         path = _write_temp(code, '.c')
@@ -296,40 +473,7 @@ void load_lib(void *handle) {
         finally:
             os.unlink(path)
 
-    def test_dlsym_detection_method_field(self):
-        """detection_method should be "dlopen" for dlsym calls."""
-        code = '''
-void init(void *h) {
-    void *f1 = dlsym(h, "EVP_sha256");
-}
-'''
-        path = _write_temp(code, '.c')
-        try:
-            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
-                                         SYMBOL_CATEGORIES)
-            assert len(sites) == 1
-            assert sites[0].detection_method == 'dlopen'
-        finally:
-            os.unlink(path)
-
-    def test_dlsym_category_assigned(self):
-        """Correct category should be assigned for dlsym-detected symbols."""
-        code = '''
-void init(void *h) {
-    dlsym(h, "EVP_DigestInit_ex");
-}
-'''
-        path = _write_temp(code, '.c')
-        try:
-            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
-                                         SYMBOL_CATEGORIES)
-            assert len(sites) == 1
-            assert sites[0].category == 'crypto_evp'
-        finally:
-            os.unlink(path)
-
-    def test_mixed_direct_and_dlsym(self):
-        """Both direct calls and dlsym calls in one file."""
+    def test_mixed_direct_and_dlsym_reports_only_direct_call(self):
         code = '''
 void setup(void *h) {
     SSL_CTX_new(TLS_method());
@@ -340,34 +484,48 @@ void setup(void *h) {
         try:
             sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
                                          SYMBOL_CATEGORIES)
-            assert len(sites) == 2
-            direct = [s for s in sites if s.detection_method == 'dynamic-link']
-            dlsym = [s for s in sites if s.detection_method == 'dlopen']
-            assert len(direct) == 1
-            assert len(dlsym) == 1
-            assert direct[0].ossl_symbol == 'SSL_CTX_new'
-            assert dlsym[0].ossl_symbol == 'EVP_sha256'
+            assert err is None
+            assert [site.ossl_symbol for site in sites] == ['SSL_CTX_new']
         finally:
             os.unlink(path)
 
-    def test_multiple_dlsym_calls(self):
-        """Multiple dlsym calls should all be detected."""
+
+class TestLocalFunctionFiltering:
+    def test_local_openssl_named_function_definition_is_not_reported(self):
         code = '''
-void init(void *h) {
-    dlsym(h, "SSL_connect");
-    dlsym(h, "SSL_read");
-    dlsym(h, "SSL_write");
+int SSL_read(void *ssl, void *buf, int len) {
+    return len;
+}
+
+void use_ssl(void *ssl) {
+    SSL_write(ssl, "x", 1);
 }
 '''
         path = _write_temp(code, '.c')
         try:
             sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
-                                         SYMBOL_CATEGORIES)
-            syms = {s.ossl_symbol for s in sites}
-            assert 'SSL_connect' in syms
-            assert 'SSL_read' in syms
-            assert 'SSL_write' in syms
-            assert all(s.detection_method == 'dlopen' for s in sites)
+                                        SYMBOL_CATEGORIES)
+            assert err is None
+            assert [site.ossl_symbol for site in sites] == ['SSL_write']
+        finally:
+            os.unlink(path)
+
+    def test_local_openssl_named_function_call_is_filtered(self):
+        code = '''
+int SSL_read(void *ssl, void *buf, int len) {
+    return len;
+}
+
+void use_local(void *ssl) {
+    SSL_read(ssl, 0, 0);
+}
+'''
+        path = _write_temp(code, '.c')
+        try:
+            sites, err = _scan_file_ast(path, 'c', OSSL_SYMBOLS,
+                                        SYMBOL_CATEGORIES)
+            assert err is None
+            assert sites == []
         finally:
             os.unlink(path)
 

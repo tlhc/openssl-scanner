@@ -46,6 +46,9 @@ cd openssl-scanner
 # 扫描源代码（tree-sitter）
 ./scan source /path/to/src -o report.xlsx
 
+# 从源码 JSON 报告生成仓级汇总
+./scan source-summary /path/to/source_reports -o summary.xlsx
+
 # 聚合多个报告
 ./scan aggregate /path/to/reports/ -o aggregated.json
 
@@ -72,6 +75,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | `scan` | ELF 二进制符号分析 | ELF 文件/目录 | JSON/HTML/Excel |
 | `source` | 源码 API 调用点分析 | C/C++/Rust 源文件/目录 | XLSX/JSON |
 | `source-probe` | 快速探测目录中的 OpenSSL 使用 | 根目录 | 项目列表 |
+| `source-summary` | 从源码 JSON 报告生成仓级汇总 | JSON 报告目录/文件 | XLSX/TSV |
 | `source-merge` | 合并多个源码扫描报告 | 多个 XLSX | 合并 XLSX |
 | `combo-scan` | 一键探测+扫描+合并 | 根目录 | 合并 XLSX/JSON |
 | `source-diff` | 比较两次源码扫描报告 | 两个 JSON 报告 | 控制台/JSON/XLSX |
@@ -111,6 +115,12 @@ openssl-scanner scan /path/to/binary -o report.json
 
 # 多项目扫描（每个项目生成独立报告）
 ./scan source /path/to/nginx /path/to/curl -o /tmp/reports/
+
+# 从 JSON 报告生成仓级汇总
+./scan source-summary /tmp/reports -o summary.xlsx \
+  --nonzero-index repos_with_openssl_usage.tsv \
+  --source-root /path/to/oh-source \
+  --manifest /path/to/oh-source/.repo/manifest.xml
 
 # 合并多个报告（含跨项目 Symbol Summary）
 ./scan source-merge /tmp/reports/*.xlsx -o combined.xlsx

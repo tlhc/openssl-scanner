@@ -77,6 +77,22 @@ def analyzer():
     return a
 
 
+def _write_parser_recovery_source(path):
+    path.write_text(
+        "#include <openssl/err.h>\n"
+        "void f(unsigned long code) {\n"
+        "    ERR_error_string(\n"
+        "#if OPENSSL_IS_BORINGSSL\n"
+        "        (uint32_t)\n"
+        "#else\n"
+        "        (unsigned long)\n"
+        "#endif\n"
+        "        code);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
 # _is_data_blob tests
 # ---------------------------------------------------------------------------
@@ -283,6 +299,94 @@ class TestSourceCLI:
         assert out.exists()
         assert out.stat().st_size > 0
 
+    def test_source_hitls_compat_xlsx_oh_source_shape(self, tmp_path):
+        import subprocess
+
+        from openpyxl import load_workbook
+
+        oh_source = tmp_path / "oh-source"
+        project = oh_source / "base" / "security" / "crypto_framework"
+        project.mkdir(parents=True)
+        (project / "crypto_adapter.c").write_text(
+            '#include <openssl/ssl.h>\n'
+            '#include <openssl/evp.h>\n'
+            'void use_crypto(void *ssl) {\n'
+            '    SSL_read(ssl, 0, 0);\n'
+            '    SSL_CTX_new(0);\n'
+            '    EVP_sha256();\n'
+            '}\n',
+            encoding="utf-8",
+        )
+        hitls_map = tmp_path / "hitls_map.json"
+        hitls_map.write_text(
+            json.dumps({
+                "version": "test",
+                "mapping": {
+                    "SSL_read": {
+                        "status": "partial",
+                        "hitls": "HITLS_Read",
+                        "notes": "",
+                    },
+                    "SSL_CTX_new": {
+                        "status": "not_available",
+                        "hitls": None,
+                        "notes": "",
+                    },
+                    "EVP_sha256": {
+                        "status": "available",
+                        "hitls": "CRYPT_MD_SHA256",
+                        "notes": "",
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        out = tmp_path / "oh_source_hitls.xlsx"
+
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(project), "-o", str(out),
+                "--hitls-compat", "--hitls-map", str(hitls_map),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0, r.stderr
+
+        json_out = out.with_suffix(".json")
+        data = json.loads(json_out.read_text())
+        assert data["summary"]["hitls_coverage"] == {
+            "available": 1,
+            "partial": 1,
+            "not_available": 1,
+            "unknown": 0,
+        }
+        assert data["summary"]["hitls_direct_replace_ratio"] == 33.33
+        assert data["summary"]["hitls_direct_or_partial_replace_ratio"] == 66.67
+        by_symbol = {cs["ossl_symbol"]: cs for cs in data["call_sites"]}
+        assert by_symbol["SSL_read"]["hitls_replacement"] == "HITLS_Read"
+        assert "detection_method" not in by_symbol["SSL_read"]
+
+        wb = load_workbook(out, read_only=True, data_only=True)
+        ws = wb["OpenSSL Call Sites"]
+        headers = [cell.value for cell in ws[1]]
+        assert "Detection" not in headers
+        assert "HiTLS Status" in headers
+        assert "HiTLS Replacement" in headers
+
+        coverage_ws = wb["HiTLS Coverage"]
+        coverage = {
+            row[0]: row[1]
+            for row in coverage_ws.iter_rows(min_row=2, values_only=True)
+            if row[0]
+        }
+        assert coverage["Available"] == 1
+        assert coverage["Partial"] == 1
+        assert coverage["Not Available"] == 1
+        assert coverage["Direct Replace Ratio (%)"] == 33.33
+        assert coverage["Direct+Partial Replace Ratio (%)"] == 66.67
+        wb.close()
+
     def test_source_json_output(self, test_root, tmp_path):
         import subprocess
         out = tmp_path / "report.json"
@@ -388,6 +492,81 @@ class TestSourceCLI:
         assert r.returncode == 0
         assert "INFO" in r.stderr
 
+    def test_source_vvvv_shows_worker_parser_diagnostics(self, tmp_path):
+        import subprocess
+
+        src = tmp_path / "bad_sources"
+        src.mkdir()
+        for idx in range(2):
+            (src / f"bad_{idx}.c").write_text(
+                "#include <openssl/ssl.h>\n"
+                "void broken(void) {\n"
+                "    SSL_read(ssl, 0, 0)\n",
+                encoding="utf-8",
+            )
+        out = tmp_path / "parser_diagnostics.json"
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(out), "--json-only", "-j", "2", "-vvvv",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "DEBUG" in r.stderr
+        assert "Parser diagnostics in" in r.stderr
+        assert "error" not in r.stderr.lower()
+
+    def test_source_recover_parser_diagnostics_is_gated(self, tmp_path):
+        import subprocess
+
+        from openpyxl import load_workbook
+
+        src = tmp_path / "recover_parser"
+        src.mkdir()
+        _write_parser_recovery_source(src / "recover.c")
+
+        default_out = tmp_path / "default.xlsx"
+        default_run = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(default_out),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert default_run.returncode == 0, default_run.stderr
+        default_json = json.loads(default_out.with_suffix(".json").read_text())
+        assert default_json["summary"]["total_call_sites"] == 0
+        wb = load_workbook(default_out, read_only=True)
+        headers = [cell.value for cell in wb["OpenSSL Call Sites"][1]]
+        assert "Extraction Source" not in headers
+        wb.close()
+
+        recovered_out = tmp_path / "recovered.xlsx"
+        recovered_run = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(recovered_out),
+                "--recover-parser-diagnostics",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert recovered_run.returncode == 0, recovered_run.stderr
+        recovered_json = json.loads(recovered_out.with_suffix(".json").read_text())
+        assert recovered_json["summary"]["fallback_call_sites"] == 1
+        call_site = recovered_json["call_sites"][0]
+        assert call_site["ossl_symbol"] == "ERR_error_string"
+        assert call_site["extraction_source"] == "parser-diagnostic-text"
+        assert call_site["confidence"] == "fallback"
+        assert call_site["parser_diagnostic_class"] == "preprocessor-fragment"
+
+        wb = load_workbook(recovered_out, read_only=True)
+        headers = [cell.value for cell in wb["OpenSSL Call Sites"][1]]
+        assert "Extraction Source" in headers
+        assert "Confidence" in headers
+        assert "Parser Diagnostic Class" in headers
+        wb.close()
+
     def test_source_nonexistent_target(self, tmp_path):
         import subprocess
         out = tmp_path / "noexist.json"
@@ -396,6 +575,20 @@ class TestSourceCLI:
              "/nonexistent/path", "-o", str(out), "--json-only"],
             capture_output=True, text=True, timeout=30)
         assert r.returncode != 0
+
+    def test_scan_launcher_does_not_eval_arguments(self, tmp_path):
+        import subprocess
+
+        marker = tmp_path / "eval_injected"
+        launcher = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "scan")
+        )
+        r = subprocess.run(
+            [launcher, f"$(touch {marker})", "--version"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode != 0
+        assert not marker.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +640,44 @@ class TestSourceMergeCLI:
              str(a_xlsx), "-o", str(merged), "-v"],
             capture_output=True, text=True, timeout=30)
         assert r.returncode == 0, r.stderr
+
+    def test_merge_preserves_parser_recovery_columns(self, tmp_path):
+        import subprocess
+
+        from openpyxl import load_workbook
+
+        src = tmp_path / "recover_src"
+        src.mkdir()
+        _write_parser_recovery_source(src / "recover.c")
+        report = tmp_path / "recover.xlsx"
+        subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(report), "--recover-parser-diagnostics",
+            ],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+
+        merged = tmp_path / "merged.xlsx"
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source-merge",
+                str(report), "-o", str(merged),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0, r.stderr
+
+        wb = load_workbook(merged, read_only=True, data_only=True)
+        ws = wb["recover"]
+        headers = [cell.value for cell in ws[1]]
+        row = [cell.value for cell in ws[2]]
+        assert "Extraction Source" in headers
+        assert "Confidence" in headers
+        assert "Parser Diagnostic Class" in headers
+        assert row[headers.index("Extraction Source")] == "parser-diagnostic-text"
+        assert row[headers.index("Confidence")] == "fallback"
+        wb.close()
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +927,64 @@ class TestComboScanCLI:
             capture_output=True, text=True, timeout=60)
         assert r.returncode == 0
         assert "INFO" in r.stderr
+
+    def test_combo_vvvv_forwards_source_parser_diagnostics(self, tmp_path):
+        import subprocess
+
+        root = tmp_path / "combo_parser_diagnostics"
+        proj = root / "proj_bad"
+        proj.mkdir(parents=True)
+        (proj / "bad.c").write_text(
+            "#include <openssl/ssl.h>\n"
+            "void broken(void) {\n"
+            "    SSL_read(ssl, 0, 0)\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "combo_parser_diagnostics.json"
+        log_file = tmp_path / "combo_parser_diagnostics.log"
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "combo-scan",
+                str(root), "-o", str(out), "--json-only", "-j", "2",
+                "-vvvv", "--log-file", str(log_file),
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+        assert "DEBUG" in r.stderr
+        assert "Parser diagnostics in" in r.stderr
+        assert "Parse errors" not in r.stderr
+        assert "Parser diagnostics in" in log_file.read_text(encoding="utf-8")
+
+    def test_combo_xlsx_preserves_parser_recovery_columns(self, tmp_path):
+        import subprocess
+
+        from openpyxl import load_workbook
+
+        root = tmp_path / "combo_recover"
+        proj = root / "proj"
+        proj.mkdir(parents=True)
+        _write_parser_recovery_source(proj / "recover.c")
+        out = tmp_path / "combo_recover.xlsx"
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "combo-scan",
+                str(root), "-o", str(out), "--recover-parser-diagnostics",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
+
+        wb = load_workbook(out, read_only=True, data_only=True)
+        ws = wb["proj"]
+        headers = [cell.value for cell in ws[1]]
+        row = [cell.value for cell in ws[2]]
+        assert "Extraction Source" in headers
+        assert "Confidence" in headers
+        assert "Parser Diagnostic Class" in headers
+        assert row[headers.index("Extraction Source")] == "parser-diagnostic-text"
+        assert row[headers.index("Confidence")] == "fallback"
+        wb.close()
 
     def test_combo_empty_dir(self, tmp_path):
         import subprocess

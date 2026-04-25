@@ -1,0 +1,195 @@
+# openHiTLS Compatibility Validation Batch 243
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `EVP` symmetric cipher residual family lacking `analysis_doc`:
+  - supported cipher factories:
+    - residual `EVP_aes_*`
+    - residual `EVP_sm4_*`
+    - `EVP_chacha20_poly1305`
+  - generic symmetric ctx operations:
+    - `EVP_CipherInit*`
+    - `EVP_CipherUpdate`
+    - `EVP_CipherFinal*`
+    - `EVP_EncryptInit*`
+    - `EVP_EncryptFinal`
+    - `EVP_DecryptInit*`
+    - `EVP_DecryptFinal`
+  - unsupported residuals:
+    - `EVP_aes_*_cbc_hmac_*`
+    - `EVP_aes_*_cfb1`
+    - `EVP_aes_*_cfb8`
+    - `EVP_aes_*_ocb`
+    - `EVP_chacha20`
+    - `EVP_Cipher`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes:
+  - direct cipher-factory functions in `evp.h`
+  - generic symmetric operation entrypoints:
+    - `EVP_CipherInit`
+    - `EVP_CipherUpdate`
+    - `EVP_CipherFinal`
+    - `EVP_EncryptInit`
+    - `EVP_EncryptFinal`
+    - `EVP_DecryptInit`
+    - `EVP_DecryptFinal`
+- openHiTLS public installed tree exposes:
+  - cipher algorithm IDs:
+    - `CRYPT_CIPHER_AES*`
+    - `CRYPT_CIPHER_SM4*`
+    - `CRYPT_CIPHER_CHACHA20_POLY1305`
+  - symmetric ctx API:
+    - `CRYPT_EAL_CipherNewCtx`
+    - `CRYPT_EAL_ProviderCipherNewCtx`
+    - `CRYPT_EAL_CipherInit`
+    - `CRYPT_EAL_CipherUpdate`
+    - `CRYPT_EAL_CipherFinal`
+    - `CRYPT_EAL_CipherCtrl`
+- openHiTLS public installed tree does not expose:
+  - `ARIA`
+  - `CAMELLIA`
+  - `DES/3DES`
+  - `RC2/RC4`
+  - `BF`
+  - `CAST5`
+  - `IDEA`
+  - `SEED`
+  - plain `CHACHA20`
+  - `AES CBC-HMAC`
+  - `AES OCB`
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 47`
+- adjust to `not_available = 8`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path via installed cipher IDs and `CRYPT_EAL_Cipher*`:
+  - supported cipher factories:
+    - `EVP_aes_128_ccm`
+    - `EVP_aes_128_cfb1`
+    - `EVP_aes_128_cfb128`
+    - `EVP_aes_128_cfb8`
+    - `EVP_aes_128_ecb`
+    - `EVP_aes_128_ofb`
+    - `EVP_aes_128_wrap`
+    - `EVP_aes_128_wrap_pad`
+    - `EVP_aes_128_xts`
+    - `EVP_aes_192_cbc`
+    - `EVP_aes_192_ccm`
+    - `EVP_aes_192_cfb1`
+    - `EVP_aes_192_cfb128`
+    - `EVP_aes_192_cfb8`
+    - `EVP_aes_192_ecb`
+    - `EVP_aes_192_ofb`
+    - `EVP_aes_192_wrap`
+    - `EVP_aes_192_wrap_pad`
+    - `EVP_aes_256_ccm`
+    - `EVP_aes_256_cfb1`
+    - `EVP_aes_256_cfb128`
+    - `EVP_aes_256_cfb8`
+    - `EVP_aes_256_ctr`
+    - `EVP_aes_256_ecb`
+    - `EVP_aes_256_ofb`
+    - `EVP_aes_256_wrap`
+    - `EVP_aes_256_wrap_pad`
+    - `EVP_aes_256_xts`
+    - `EVP_sm4_cbc`
+    - `EVP_sm4_cfb128`
+    - `EVP_sm4_ctr`
+    - `EVP_sm4_ecb`
+    - `EVP_sm4_ofb`
+    - `EVP_chacha20_poly1305`
+  - generic ctx operations:
+    - `EVP_Cipher`
+    - `EVP_CipherInit`
+    - `EVP_CipherInit_ex`
+    - `EVP_CipherInit_ex2`
+    - `EVP_CipherUpdate`
+    - `EVP_CipherFinal`
+    - `EVP_CipherFinal_ex`
+    - `EVP_EncryptInit`
+    - `EVP_EncryptInit_ex2`
+    - `EVP_EncryptFinal`
+    - `EVP_DecryptInit`
+    - `EVP_DecryptInit_ex2`
+    - `EVP_DecryptFinal`
+- These remain `partial` because:
+  - openHiTLS uses algorithm IDs plus `CRYPT_EAL_CipherCtx`, not `const EVP_CIPHER *`
+  - parameter order and contract differ on the init/update/final APIs
+  - AEAD tag handling sits on `CRYPT_EAL_CipherCtrl`, not OpenSSL’s same-call conventions
+  - the OpenSSL provider/impl/params and one-shot convenience contracts are not preserved
+- `not_available` remains correct for:
+  - `EVP_aes_128_cbc_hmac_sha1`
+  - `EVP_aes_128_cbc_hmac_sha256`
+  - `EVP_aes_128_ocb`
+  - `EVP_aes_192_ocb`
+  - `EVP_aes_256_cbc_hmac_sha1`
+  - `EVP_aes_256_cbc_hmac_sha256`
+  - `EVP_aes_256_ocb`
+  - `EVP_chacha20`
+- Those interfaces lack a matching public installed algorithm surface or a practically substitutable one-call contract.
+- AES `CFB1/CFB8` move to `partial` because openHiTLS public cipher IDs plus public feedback-size control can realize those modes with a different contract.
+- `EVP_Cipher` moves to `partial` because OpenSSL implements it as a ctx-level wrapper over update/final, and openHiTLS exposes the same public ctx-level path through `CRYPT_EAL_CipherUpdate` and `CRYPT_EAL_CipherFinal`.
+
+Representative evidence:
+- OpenSSL declarations:
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L599)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L681)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L692)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L696)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L699)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L717)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L971)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L1002)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L1081)
+  - [evp.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/evp.h#L1096)
+- OpenSSL implementation evidence:
+  - [evp_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_lib.c#L372)
+  - [evp_enc.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_enc.c#L400)
+  - [evp_enc.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_enc.c#L477)
+  - [evp_enc.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_enc.c#L529)
+  - [evp_enc.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_enc.c#L570)
+  - [evp_enc.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/evp_enc.c#L592)
+  - [e_aes.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/e_aes.c#L21)
+  - [e_sm4.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/e_sm4.c#L23)
+  - [e_chacha20_poly1305.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/evp/e_chacha20_poly1305.c#L26)
+- openHiTLS public declarations:
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L57)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L69)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L102)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L166)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L189)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L194)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L150)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L162)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L173)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L180)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L183)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L188)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L192)
+- openHiTLS implementation/install-surface evidence:
+  - [eal_cipher.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher.c#L90)
+  - [eal_cipher.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher.c#L117)
+  - [eal_cipher.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher.c#L230)
+  - [eal_cipher.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher.c#L269)
+  - [modes_cfb.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/modes/src/modes_cfb.c#L332)
+  - [eal_cipher_method.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher_method.c#L283)
+  - [eal_cipher_method.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher_method.c#L322)
+  - [eal_cipher_method.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher_method.c#L331)
+  - [eal_cipher_method.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/eal/src/eal_cipher_method.c#L350)
+  - [cmvp_iso19790.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/provider/src/cmvp/iso_prov/cmvp_iso19790.c#L417)
+  - [crypt_iso_provider.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/provider/src/cmvp/iso_prov/crypt_iso_provider.c#L151)
+
+Batch 243 inventory:
+- total interfaces: `55`
+- `partial = 47`
+- `not_available = 8`

@@ -1,0 +1,263 @@
+# openHiTLS Compatibility Validation Batch 250
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `DH_*` and `DSA_*` family lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a large legacy low-level `DH` / `DSA` family across:
+  - object lifecycle:
+    - `DH_new`
+    - `DSA_new`
+    - `DSA_free`
+  - parameter/key getters and setters:
+    - `DH_get0_*`
+    - `DH_set0_*`
+    - `DSA_get0_*`
+    - `DSA_set0_*`
+  - generation / compute / sign / verify:
+    - `DH_generate_key`
+    - `DH_compute_key*`
+    - `DSA_generate_key`
+    - `DSA_generate_parameters_ex`
+    - `DSA_sign`
+    - `DSA_verify`
+  - metadata / lifecycle / printing / ext-data:
+    - `DH_bits`
+    - `DH_size`
+    - `DH_security_bits`
+    - `DH_up_ref`
+    - `DSA_bits`
+    - `DSA_size`
+    - `DSA_security_bits`
+    - `DSA_up_ref`
+    - `DH_get_ex_data`
+    - `DSA_set_ex_data`
+    - `DSA_print*`
+  - legacy low-level families:
+    - `DH_check*`
+    - `DH_get_*` builtin groups
+    - `DH_METHOD` / `DSA_METHOD`
+    - `DSA_SIG_*`
+    - `DSA_do_sign`
+    - `DSA_do_verify`
+- openHiTLS public installed surface exposes a practical replacement path through generic Pkey APIs and public parameter/key structs:
+  - generic Pkey lifecycle and metadata:
+    - `CRYPT_EAL_PkeyNewCtx`
+    - `CRYPT_EAL_PkeyUpRef`
+    - `CRYPT_EAL_PkeyGetKeyBits`
+    - `CRYPT_EAL_PkeyGetSecurityBits`
+    - `CRYPT_EAL_PkeyGetKeyLen`
+  - parameter and key data:
+    - `CRYPT_EAL_PkeySetPara`
+    - `CRYPT_EAL_PkeyGetPara`
+    - `CRYPT_EAL_PkeySetParaById`
+    - `CRYPT_EAL_PkeySetPub`
+    - `CRYPT_EAL_PkeySetPrv`
+    - `CRYPT_EAL_PkeyGetPub`
+    - `CRYPT_EAL_PkeyGetPrv`
+  - operations:
+    - `CRYPT_EAL_PkeyGen`
+    - `CRYPT_EAL_PkeyComputeShareKey`
+    - `CRYPT_EAL_PkeySignData`
+    - `CRYPT_EAL_PkeyVerifyData`
+  - ext-data and printing:
+    - `CRYPT_EAL_PkeySetExtData`
+    - `CRYPT_EAL_PkeyGetExtData`
+    - `CRYPT_EAL_PrintPubkey`
+    - `CRYPT_EAL_PrintPrikey`
+    - `BSL_UIO_FileMethod`
+  - public structs and controls:
+    - `CRYPT_DhPara`
+    - `CRYPT_DhPub`
+    - `CRYPT_DhPrv`
+    - `CRYPT_DsaPara`
+    - `CRYPT_DsaPub`
+    - `CRYPT_DsaPrv`
+    - `CRYPT_DH_NO_PADZERO`
+    - `CRYPT_CTRL_SET_DH_FLAG`
+    - `CRYPT_CTRL_GEN_PARA`
+  - named DH parameter IDs:
+    - `CRYPT_DH_RFC2409_1024`
+    - `CRYPT_DH_RFC3526_2048`
+    - `CRYPT_DH_RFC7919_2048` ... `8192`
+- openHiTLS public installed tree does not expose:
+  - standalone DH parameter/public-key validation helpers
+  - `DH_METHOD` / `DSA_METHOD` customization
+  - `DSA_SIG` object family
+  - `DSA_do_sign` / `DSA_do_verify`
+  - exact public replacements for `DH_get_1024_160` / `2048_224` / `2048_256`
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 46`
+- adjust to `not_available = 40`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path through generic `PkeyCtx` APIs:
+  - DH:
+    - `DH_new`
+    - `DH_new_by_nid`
+    - `DH_bits`
+    - `DH_size`
+    - `DH_security_bits`
+    - `DH_generate_key`
+    - `DH_generate_parameters_ex`
+    - `DH_compute_key`
+    - `DH_compute_key_padded`
+    - `DH_get0_pqg`
+    - `DH_get0_key`
+    - `DH_get0_p`
+    - `DH_get0_q`
+    - `DH_get0_g`
+    - `DH_get0_pub_key`
+    - `DH_get0_priv_key`
+    - `DH_set0_pqg`
+    - `DH_set0_key`
+    - `DH_get_ex_data`
+    - `DH_set_ex_data`
+    - `DH_set_flags`
+    - `DH_get_nid`
+    - `DH_up_ref`
+  - DSA:
+    - `DSA_new`
+    - `DSA_free`
+    - `DSA_bits`
+    - `DSA_size`
+    - `DSA_security_bits`
+    - `DSA_generate_key`
+    - `DSA_generate_parameters_ex`
+    - `DSA_get0_pqg`
+    - `DSA_get0_key`
+    - `DSA_get0_p`
+    - `DSA_get0_q`
+    - `DSA_get0_g`
+    - `DSA_get0_pub_key`
+    - `DSA_get0_priv_key`
+    - `DSA_set0_pqg`
+    - `DSA_set0_key`
+    - `DSA_get_ex_data`
+    - `DSA_set_ex_data`
+    - `DSA_print`
+    - `DSA_print_fp`
+    - `DSA_sign`
+    - `DSA_verify`
+    - `DSA_up_ref`
+- These remain `partial` because:
+  - openHiTLS works on `CRYPT_EAL_PkeyCtx *` plus public parameter/key structs, not `DH *` / `DSA *` plus borrowed `BIGNUM *` pointers
+  - getters and setters transfer data through public structs, not OpenSSL `get0/set0` ownership semantics
+  - `DH_compute_key_padded` requires public flag/config composition through `CRYPT_DH_NO_PADZERO`
+  - printing is available through `BSL_UIO`, not `BIO *` / `FILE *`
+  - named-group coverage through `CRYPT_PKEY_ParaId` is subset-based
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - DH validation helpers:
+    - `DH_check`
+    - `DH_check_ex`
+    - `DH_check_params`
+    - `DH_check_params_ex`
+    - `DH_check_pub_key`
+    - `DH_check_pub_key_ex`
+  - exact builtin-group helpers:
+    - `DH_get_1024_160`
+    - `DH_get_2048_224`
+    - `DH_get_2048_256`
+  - DH method/engine helpers:
+    - `DH_OpenSSL`
+    - `DH_get_default_method`
+    - `DH_new_method`
+    - `DH_set_method`
+    - `DH_set_default_method`
+    - `DH_get0_engine`
+  - DH misc helpers with no public peer:
+    - `DH_KDF_X9_42`
+    - `DH_generate_parameters`
+    - `DH_get_length`
+    - `DH_test_flags`
+    - `DH_clear_flags`
+  - DSA low-level signature object family:
+    - `DSA_SIG_new`
+    - `DSA_SIG_free`
+    - `DSA_SIG_get0`
+    - `DSA_SIG_set0`
+    - `DSA_do_sign`
+    - `DSA_do_verify`
+    - `DSA_sign_setup`
+  - DSA method/engine helpers:
+    - `DSA_OpenSSL`
+    - `DSA_get_default_method`
+    - `DSA_get_method`
+    - `DSA_new_method`
+    - `DSA_set_default_method`
+    - `DSA_set_method`
+    - `DSA_get0_engine`
+  - DSA misc unsupported helpers:
+    - `DSA_dup_DH`
+    - `DSA_generate_parameters`
+    - `DSA_clear_flags`
+    - `DSA_set_flags`
+    - `DSA_test_flags`
+
+Important boundary calls:
+- `DH_check*` stays `not_available`
+  - OpenSSL exposes standalone parameter/public-key validation helpers
+  - openHiTLS public DH surface provides key generation and shared-secret computation, but no equivalent public validation helper family
+- `DH_get_1024_160/2048_224/2048_256` stays `not_available`
+  - openHiTLS public named-group IDs cover RFC2409/RFC3526/RFC7919 groups
+  - these exact helper contracts are outside that public set
+- `DSA_SIG_*` and `DSA_do_sign/do_verify` stay `not_available`
+  - openHiTLS public DSA path is `PkeyCtx`-based
+  - there is no public standalone `DSA_SIG` object family
+
+Representative evidence:
+- OpenSSL declarations and docs:
+  - [dh.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dh.h#L213)
+  - [dh.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dh.h#L223)
+  - [dh.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dh.h#L234)
+  - [dh.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dh.h#L249)
+  - [dh.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dh.h#L264)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L134)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L140)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L149)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L171)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L181)
+  - [dsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/dsa.h#L205)
+  - [DH_generate_key.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DH_generate_key.pod#L28)
+  - [DH_generate_parameters.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DH_generate_parameters.pod#L96)
+  - [DH_get0_pqg.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DH_get0_pqg.pod#L66)
+  - [DSA_get0_pqg.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DSA_get0_pqg.pod#L54)
+  - [DSA_sign.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DSA_sign.pod#L29)
+  - [DSA_size.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/DSA_size.pod#L27)
+- openHiTLS public declarations:
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L192)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L216)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L228)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L251)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L278)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L537)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L663)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L675)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L686)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L110)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L407)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L435)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L481)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L495)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L645)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L209)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L217)
+  - [crypt_codecskey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/codecskey/include/crypt_codecskey.h#L92)
+  - [crypt_codecskey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/codecskey/include/crypt_codecskey.h#L94)
+- openHiTLS implementation evidence:
+  - [bsl_uio.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_uio.h#L304)
+
+Batch 250 inventory:
+- total interfaces: `86`
+- `partial = 46`
+- `not_available = 40`

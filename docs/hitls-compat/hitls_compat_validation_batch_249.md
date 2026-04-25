@@ -1,0 +1,241 @@
+# openHiTLS Compatibility Validation Batch 249
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `RSA_*` family lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a mixed legacy `RSA_*` family across:
+  - wrapper parameter objects:
+    - `RSA_OAEP_PARAMS_*`
+    - `RSA_PSS_PARAMS_*`
+  - low-level encrypt/decrypt/sign/verify primitives:
+    - `RSA_public_encrypt`
+    - `RSA_private_decrypt`
+    - `RSA_private_encrypt`
+    - `RSA_public_decrypt`
+    - `RSA_sign`
+    - `RSA_verify`
+  - low-level buffer padding helpers:
+    - `RSA_padding_add_*`
+    - `RSA_padding_check_*`
+    - `RSA_verify_PKCS1_PSS*`
+  - key component accessors/mutators:
+    - `RSA_get0_*`
+    - `RSA_set0_*`
+  - method / engine / flags / blinding helpers
+  - printing and legacy generation helpers
+- openHiTLS public RSA surface is centered on `CRYPT_EAL_PkeyCtx` plus public RSA structs and ctrl knobs:
+  - key create/set/get/generate:
+    - `CRYPT_EAL_PkeyNewCtx`
+    - `CRYPT_EAL_PkeySetPara`
+    - `CRYPT_EAL_PkeyGen`
+    - `CRYPT_EAL_PkeyGetPub`
+    - `CRYPT_EAL_PkeyGetPrv`
+  - operations:
+    - `CRYPT_EAL_PkeyEncrypt`
+    - `CRYPT_EAL_PkeyDecrypt`
+    - `CRYPT_EAL_PkeySign`
+    - `CRYPT_EAL_PkeyVerify`
+    - `CRYPT_EAL_PkeySignData`
+    - `CRYPT_EAL_PkeyVerifyRecover`
+  - metadata / checks / lifecycle:
+    - `CRYPT_EAL_PkeyPrvCheck`
+    - `CRYPT_EAL_PkeyGetKeyBits`
+    - `CRYPT_EAL_PkeyGetSecurityBits`
+    - `CRYPT_EAL_PkeyUpRef`
+    - `CRYPT_EAL_PkeyCtrl`
+    - `CRYPT_EAL_PkeySetExtData`
+    - `CRYPT_EAL_PkeyGetExtData`
+  - RSA-specific public parameter/control types:
+    - `CRYPT_RsaPara`
+    - `CRYPT_RSA_PssPara`
+    - `CRYPT_RSA_OaepPara`
+    - `CRYPT_CTRL_SET_RSA_EMSA_PSS`
+    - `CRYPT_CTRL_SET_RSA_RSAES_OAEP`
+    - `CRYPT_CTRL_SET_RSA_PADDING`
+    - `CRYPT_CTRL_SET_RSA_FLAG`
+    - `CRYPT_CTRL_CLR_RSA_FLAG`
+    - `CRYPT_EAL_GetRsaPssPara`
+  - printing:
+    - `CRYPT_EAL_PrintPrikey`
+    - `CRYPT_EAL_PrintPubkey`
+    - `BSL_UIO_FileMethod`
+- openHiTLS public installed tree does not expose:
+  - `RSA_METHOD` / ENGINE customization
+  - standalone `RSA_*PARAMS` wrapper objects / ASN1 item helpers
+  - standalone RSA buffer-padding helpers
+  - multi-prime RSA public support
+  - `BN_BLINDING *` object lifecycle
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 35`
+- adjust to `not_available = 45`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path through generic Pkey APIs:
+  - key metadata / lifecycle:
+    - `RSA_bits`
+    - `RSA_security_bits`
+    - `RSA_check_key`
+    - `RSA_check_key_ex`
+    - `RSA_up_ref`
+    - `RSA_generate_key`
+  - key component accessors:
+    - `RSA_get0_key`
+    - `RSA_get0_n`
+    - `RSA_get0_e`
+    - `RSA_get0_d`
+    - `RSA_get0_p`
+    - `RSA_get0_q`
+    - `RSA_get0_dmp1`
+    - `RSA_get0_dmq1`
+    - `RSA_get0_iqmp`
+    - `RSA_get0_factors`
+    - `RSA_get0_crt_params`
+    - `RSA_get0_pss_params`
+  - key component mutators:
+    - `RSA_set0_factors`
+    - `RSA_set0_crt_params`
+  - ext-data / ctrl:
+    - `RSA_get_ex_data`
+    - `RSA_set_ex_data`
+    - `RSA_pkey_ctx_ctrl`
+  - flag / blinding controls:
+    - `RSA_blinding_on`
+    - `RSA_blinding_off`
+    - `RSA_clear_flags`
+    - `RSA_set_flags`
+  - key printing:
+    - `RSA_print`
+    - `RSA_print_fp`
+  - crypto operations:
+    - `RSA_public_encrypt`
+    - `RSA_private_decrypt`
+    - `RSA_private_encrypt`
+    - `RSA_public_decrypt`
+    - `RSA_sign`
+    - `RSA_verify`
+- These remain `partial` because:
+  - openHiTLS works on `CRYPT_EAL_PkeyCtx *` plus public buffer structs, not `RSA *` plus borrowed `BIGNUM *` pointers
+  - setters/getters operate on full public structs, not OpenSSL’s `set0/get0` ownership model
+  - low-level sign/recover/encrypt/decrypt semantics are compositionally available, but the object model and per-call contracts differ
+  - flag and blinding control is public, but the API shape is `PkeyCtrl`, not direct `RSA *` manipulation
+  - printing is via `BSL_UIO`, not `BIO *` / `FILE *`
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - wrapper parameter objects:
+    - `RSA_OAEP_PARAMS_*`
+    - `RSA_PSS_PARAMS_*`
+  - method / engine family:
+    - `RSA_PKCS1_OpenSSL`
+    - `RSA_get_default_method`
+    - `RSA_get_method`
+    - `RSA_new_method`
+    - `RSA_null_method`
+    - `RSA_set_default_method`
+    - `RSA_set_method`
+    - `RSA_get0_engine`
+  - multi-prime RSA:
+    - `RSA_generate_multi_prime_key`
+    - `RSA_get0_multi_prime_*`
+    - `RSA_set0_multi_prime_params`
+    - `RSA_get_multi_prime_extra_count`
+  - standalone padding / encoded-message helpers:
+    - `RSA_padding_add_*`
+    - `RSA_padding_check_*`
+    - `RSA_verify_PKCS1_PSS`
+    - `RSA_verify_PKCS1_PSS_mgf1`
+  - X9.31 family:
+    - `RSA_X931_*`
+  - flag getter / blinding object helpers:
+    - `RSA_flags`
+    - `RSA_test_flags`
+    - `RSA_setup_blinding`
+  - specific ASN.1 OCTET STRING helpers:
+    - `RSA_sign_ASN1_OCTET_STRING`
+    - `RSA_verify_ASN1_OCTET_STRING`
+  - misc:
+    - `RSA_get_version`
+
+Important boundary calls:
+- `RSA_padding_*` stays `not_available`
+  - OpenSSL exposes standalone raw-buffer padding add/check helpers
+  - openHiTLS public RSA APIs only configure padding for later `Pkey` operations
+- `RSA_verify_PKCS1_PSS*` stays `not_available`
+  - OpenSSL verifies an already-produced encoded message block `EM`
+  - openHiTLS public RSA APIs verify signatures through `PkeyCtx`, not raw encoded-message blocks
+- `RSA_get0_pss_params` is `partial`
+  - openHiTLS has public `CRYPT_EAL_GetRsaPssPara`
+  - it returns `CRYPT_RSA_PssPara`, not an `RSA_PSS_PARAMS *` wrapper object
+
+Representative evidence:
+- OpenSSL declarations and docs:
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L213)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L214)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L219)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L228)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L251)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L291)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L300)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L322)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L348)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L380)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L388)
+  - [rsa.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/rsa.h#L433)
+  - [RSA_get0_key.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/RSA_get0_key.pod#L109)
+  - [RSA_padding_add_PKCS1_type_1.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/RSA_padding_add_PKCS1_type_1.pod#L61)
+  - [RSA_blinding_on.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/RSA_blinding_on.pod#L27)
+- OpenSSL implementation evidence:
+  - [rsa_pss.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_pss.c#L31)
+  - [rsa_pss.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_pss.c#L45)
+  - [rsa_oaep.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_oaep.c#L39)
+  - [rsa_crpt.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_crpt.c#L33)
+  - [rsa_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_lib.c#L540)
+  - [rsa_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_lib.c#L580)
+  - [rsa_lib.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/rsa/rsa_lib.c#L660)
+- openHiTLS public declarations:
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L239)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L278)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L305)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L332)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L365)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L382)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L402)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L436)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L453)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L469)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L522)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L560)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L571)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L596)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L675)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L686)
+  - [crypt_eal_pkey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_pkey.h#L697)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L92)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L98)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L103)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L470)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L664)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L676)
+  - [crypt_codecskey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/codecskey/include/crypt_codecskey.h#L78)
+  - [crypt_codecskey.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/codecskey/include/crypt_codecskey.h#L92)
+  - [bsl_uio.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_uio.h#L304)
+- openHiTLS implementation evidence:
+  - [rsa_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/rsa/src/rsa_ctrl.c#L474)
+  - [rsa_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/rsa/src/rsa_ctrl.c#L487)
+  - [rsa_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/rsa/src/rsa_ctrl.c#L489)
+  - [rsa_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/rsa/src/rsa_ctrl.c#L591)
+  - [rsa_ctrl.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/crypto/rsa/src/rsa_ctrl.c#L604)
+
+Batch 249 inventory:
+- total interfaces: `80`
+- `partial = 35`
+- `not_available = 45`

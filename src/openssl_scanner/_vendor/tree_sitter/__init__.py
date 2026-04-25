@@ -14,13 +14,11 @@ from typing import Protocol as _Protocol
 
 from ._binding import (
     Language,
-    LogType,
     LookaheadIterator,
     Node,
     Parser,
     Point,
     Query,
-    QueryCursor,
     QueryError,
     Range,
     Tree,
@@ -29,7 +27,18 @@ from ._binding import (
     MIN_COMPATIBLE_LANGUAGE_VERSION,
 )
 
-LogType.__doc__ = "The type of a log message."
+try:
+    from ._binding import LogType
+except ImportError:
+    LogType = None
+
+try:
+    from ._binding import QueryCursor
+except ImportError:
+    QueryCursor = None
+
+if LogType is not None:
+    LogType.__doc__ = "The type of a log message."
 
 Point.__doc__ = "A position in a multi-line text document, in terms of rows and columns."
 Point.row.__doc__ = "The zero-based row of the document."
@@ -64,13 +73,11 @@ class QueryPredicate(_Protocol):
 
 __all__ = [
     "Language",
-    "LogType",
     "LookaheadIterator",
     "Node",
     "Parser",
     "Point",
     "Query",
-    "QueryCursor",
     "QueryError",
     "QueryPredicate",
     "Range",
@@ -79,3 +86,8 @@ __all__ = [
     "LANGUAGE_VERSION",
     "MIN_COMPATIBLE_LANGUAGE_VERSION",
 ]
+
+if LogType is not None:
+    __all__.append("LogType")
+if QueryCursor is not None:
+    __all__.append("QueryCursor")

@@ -1,23 +1,23 @@
 """Tests for source scan exporters (XLSX and JSON)."""
 
+# ruff: noqa: I001
+
 import json
 import os
 import tempfile
 
-import pytest
-
-tree_sitter = pytest.importorskip("tree_sitter")
-
 from openssl_scanner.source_analyzer import CallSite, SourceScanResult
 from openssl_scanner.source_exporter import (
-    SourceExcelExporter, SourceJsonExporter, COLUMNS,
+    COLUMNS,
+    SourceExcelExporter,
+    SourceJsonExporter,
 )
 
 
 def _make_result(call_sites=None):
     if call_sites is None:
         call_sites = []
-    unique = sorted(set(cs.ossl_symbol for cs in call_sites))
+    unique = sorted({cs.ossl_symbol for cs in call_sites})
     return SourceScanResult(
         target="/tmp/test",
         scan_time="2026-01-01T00:00:00",
@@ -41,7 +41,7 @@ def _make_sites(n):
             caller_function=f"func{i}",
             line_number=i + 1,
             column=4,
-            ossl_symbol=f"SSL_connect",
+            ossl_symbol="SSL_connect",
             category="ssl_core",
             call_args=f"(arg{i})",
             language="c",

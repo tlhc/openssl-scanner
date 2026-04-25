@@ -1,0 +1,238 @@
+# openHiTLS Compatibility Validation Batch 247
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `CRYPTO_*` family lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a mixed low-level `CRYPTO_*` helper surface across:
+  - thread and thread-local helpers:
+    - `CRYPTO_THREAD_*`
+  - allocator and memory-control helpers:
+    - `CRYPTO_malloc`
+    - `CRYPTO_realloc`
+    - `CRYPTO_clear_free`
+    - `CRYPTO_set_mem_functions`
+    - `CRYPTO_secure_*`
+  - `ex_data` infrastructure:
+    - `CRYPTO_set_ex_data`
+    - `CRYPTO_get_ex_data`
+    - `CRYPTO_*_ex_data`
+  - low-level block/mode helpers:
+    - `CRYPTO_cbc128_*`
+    - `CRYPTO_ctr128_*`
+    - `CRYPTO_cfb128_*`
+    - `CRYPTO_ofb128_*`
+    - `CRYPTO_gcm128_*`
+    - `CRYPTO_ccm128_*`
+    - `CRYPTO_xts128_encrypt`
+    - `CRYPTO_128_wrap*`
+    - `CRYPTO_cts128_*`
+    - `CRYPTO_nistcts128_*`
+    - `CRYPTO_ocb128_*`
+- openHiTLS public installed surface exposes only two adjacent families here:
+  - SAL thread and memory primitives:
+    - `BSL_SAL_Malloc`
+    - `BSL_SAL_Calloc`
+    - `BSL_SAL_Dump`
+    - `BSL_SAL_Free`
+    - `BSL_SAL_Realloc`
+    - `BSL_SAL_ClearFree`
+    - `BSL_SAL_ThreadLockNew`
+    - `BSL_SAL_ThreadReadLock`
+    - `BSL_SAL_ThreadWriteLock`
+    - `BSL_SAL_ThreadUnlock`
+    - `BSL_SAL_ThreadLockFree`
+    - `BSL_SAL_ThreadGetId`
+    - `BSL_SAL_ThreadRunOnce`
+  - generic cipher ctx APIs:
+    - `CRYPT_EAL_CipherNewCtx`
+    - `CRYPT_EAL_CipherInit`
+    - `CRYPT_EAL_CipherUpdate`
+    - `CRYPT_EAL_CipherFinal`
+    - `CRYPT_EAL_CipherCtrl`
+  - installed public cipher IDs cover:
+    - `AES/SM4 CBC`
+    - `AES/SM4 CTR`
+    - `AES/SM4 CFB`
+    - `AES/SM4 OFB`
+    - `AES/SM4 XTS`
+    - `AES/SM4 CCM`
+    - `AES/SM4 GCM`
+    - `AES WRAP {_NOPAD,_PAD}`
+- openHiTLS public installed headers do not expose:
+  - thread-local storage helpers
+  - OpenSSL-style `ex_data`
+  - secure-heap lifecycle or secure allocators
+  - public generic atomic helper APIs
+  - public CTS or OCB cipher surface
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 49`
+- adjust to `not_available = 50`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a practical public replacement path through SAL or generic cipher ctx APIs:
+  - thread / lock:
+    - `CRYPTO_THREAD_compare_id`
+    - `CRYPTO_THREAD_get_current_id`
+    - `CRYPTO_THREAD_lock_free`
+    - `CRYPTO_THREAD_lock_new`
+    - `CRYPTO_THREAD_read_lock`
+    - `CRYPTO_THREAD_run_once`
+    - `CRYPTO_THREAD_unlock`
+    - `CRYPTO_THREAD_write_lock`
+  - allocator / memory:
+    - `CRYPTO_malloc`
+    - `CRYPTO_zalloc`
+    - `CRYPTO_realloc`
+    - `CRYPTO_clear_free`
+    - `CRYPTO_clear_realloc`
+    - `CRYPTO_free`
+    - `CRYPTO_memdup`
+    - `CRYPTO_strdup`
+    - `CRYPTO_strndup`
+  - generic cipher replacement path:
+    - `CRYPTO_128_wrap`
+    - `CRYPTO_128_unwrap`
+    - `CRYPTO_128_wrap_pad`
+    - `CRYPTO_128_unwrap_pad`
+    - `CRYPTO_cbc128_encrypt`
+    - `CRYPTO_cbc128_decrypt`
+    - `CRYPTO_ctr128_encrypt`
+    - `CRYPTO_ctr128_encrypt_ctr32`
+    - `CRYPTO_cfb128_encrypt`
+    - `CRYPTO_cfb128_8_encrypt`
+    - `CRYPTO_cfb128_1_encrypt`
+    - `CRYPTO_ofb128_encrypt`
+    - `CRYPTO_ccm128_init`
+    - `CRYPTO_ccm128_setiv`
+    - `CRYPTO_ccm128_aad`
+    - `CRYPTO_ccm128_encrypt`
+    - `CRYPTO_ccm128_decrypt`
+    - `CRYPTO_ccm128_encrypt_ccm64`
+    - `CRYPTO_ccm128_decrypt_ccm64`
+    - `CRYPTO_ccm128_tag`
+    - `CRYPTO_gcm128_new`
+    - `CRYPTO_gcm128_init`
+    - `CRYPTO_gcm128_setiv`
+    - `CRYPTO_gcm128_aad`
+    - `CRYPTO_gcm128_encrypt`
+    - `CRYPTO_gcm128_decrypt`
+    - `CRYPTO_gcm128_encrypt_ctr32`
+    - `CRYPTO_gcm128_decrypt_ctr32`
+    - `CRYPTO_gcm128_finish`
+    - `CRYPTO_gcm128_tag`
+    - `CRYPTO_gcm128_release`
+    - `CRYPTO_xts128_encrypt`
+- These remain `partial` because:
+  - SAL thread/memory APIs use different signatures and object models than OpenSSL
+  - `CRYPTO_THREAD_compare_id` degrades to comparing plain thread IDs returned by `BSL_SAL_ThreadGetId`
+  - allocator helpers lose OpenSSL file/line provenance and some helpers require small wrapper composition
+  - cipher replacement is at the high-level `CRYPT_EAL_CipherCtx + algId + ctrl` layer, not OpenSSL low-level mode contexts and callback-based helper contracts
+  - mode coverage is still subset-based:
+    - replacement path exists for installed AES/SM4 families
+    - it does not preserve OpenSSL’s algorithm-generic raw helper model
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - thread-local storage:
+    - `CRYPTO_THREAD_init_local`
+    - `CRYPTO_THREAD_get_local`
+    - `CRYPTO_THREAD_set_local`
+    - `CRYPTO_THREAD_cleanup_local`
+  - `ex_data` family:
+    - `CRYPTO_alloc_ex_data`
+    - `CRYPTO_dup_ex_data`
+    - `CRYPTO_free_ex_data`
+    - `CRYPTO_free_ex_index`
+    - `CRYPTO_get_ex_data`
+    - `CRYPTO_get_ex_new_index`
+    - `CRYPTO_new_ex_data`
+    - `CRYPTO_set_ex_data`
+  - memory-control / aligned-allocation:
+    - `CRYPTO_aligned_alloc`
+    - `CRYPTO_set_mem_functions`
+    - `CRYPTO_get_mem_functions`
+  - secure heap:
+    - `CRYPTO_secure_*`
+  - generic atomic helpers:
+    - `CRYPTO_atomic_*`
+  - unsupported mode families:
+    - `CRYPTO_cts128_*`
+    - `CRYPTO_nistcts128_*`
+    - `CRYPTO_ocb128_*`
+
+Representative evidence:
+- OpenSSL declarations:
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L84)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L90)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L283)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L353)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L360)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L385)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L571)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L573)
+  - [crypto.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/crypto.h.in#L578)
+- OpenSSL low-level mode declarations:
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L45)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L52)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L64)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L69)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L82)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L97)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L116)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L141)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L162)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L167)
+  - [modes.h](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/modes.h#L193)
+- openHiTLS public declarations:
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L214)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L228)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L239)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L250)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L265)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L283)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L318)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L332)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L346)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L360)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L371)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L382)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L409)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L992)
+  - [bsl_sal.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_sal.h#L1851)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L612)
+  - [crypt_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_types.h#L613)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L57)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L102)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L166)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L189)
+  - [crypt_eal_cipher.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_eal_cipher.h#L220)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L150)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L154)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L162)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L165)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L169)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L173)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L182)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L188)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L192)
+  - [crypt_algid.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/crypto/crypt_algid.h#L195)
+- openHiTLS implementation evidence:
+  - [sal_mem.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/sal/src/sal_mem.c#L28)
+  - [sal_mem.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/sal/src/sal_mem.c#L56)
+  - [sal_mem.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/sal/src/sal_mem.c#L87)
+  - [sal_mem.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/sal/src/sal_mem.c#L101)
+  - [sal_mem.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/bsl/sal/src/sal_mem.c#L227)
+
+Batch 247 inventory:
+- total interfaces: `99`
+- `partial = 49`
+- `not_available = 50`

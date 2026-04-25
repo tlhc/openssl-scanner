@@ -1,0 +1,213 @@
+# openHiTLS Compatibility Validation Batch 246
+
+Validated against:
+- scanner data file: [hitls_compat.json](oh/scanner/src/openssl_scanner/data/hitls_compat.json)
+- openHiTLS source tree: [openhitls-upstream](openhitls-upstream)
+- OpenSSL reference tree: [openssl](openssl)
+
+Scope:
+- remaining `PKCS12_*` family lacking `analysis_doc`
+
+Status:
+- completed
+
+Initial evidence:
+- OpenSSL exposes a broad `PKCS12` family across:
+  - whole-container helpers:
+    - `PKCS12_new`
+    - `PKCS12_init`
+    - `PKCS12_create*`
+    - `PKCS12_parse`
+    - `PKCS12_newpass`
+  - safeBag object helpers:
+    - `PKCS12_SAFEBAG_new/free`
+    - `PKCS12_SAFEBAG_create_*`
+    - `PKCS12_SAFEBAG_get*`
+    - attribute helpers such as `PKCS12_add_friendlyname_*`
+  - standalone authsafe / PKCS7 pack-unpack helpers:
+    - `PKCS12_add_safe*`
+    - `PKCS12_add_safes*`
+    - `PKCS12_pack_*`
+    - `PKCS12_unpack_*`
+  - standalone PKCS12 crypto helpers:
+    - `PKCS12_key_gen_*`
+    - `PKCS12_PBE_keyivgen*`
+    - `PKCS12_pbe_crypt*`
+    - `PKCS12_gen_mac`
+    - `PKCS12_set_pbmac1_pbkdf2`
+- openHiTLS public installed PKCS12 surface is much narrower:
+  - whole container:
+    - `HITLS_PKCS12_New`
+    - `HITLS_PKCS12_Free`
+    - `HITLS_PKCS12_ParseBuff`
+    - `HITLS_PKCS12_ParseFile`
+    - `HITLS_PKCS12_GenBuff`
+    - `HITLS_PKCS12_GenFile`
+    - `HITLS_PKCS12_Ctrl`
+  - bag object:
+    - `HITLS_PKCS12_BagNew`
+    - `HITLS_PKCS12_BagFree`
+    - `HITLS_PKCS12_BagCtrl`
+  - bag attributes:
+    - `HITLS_PKCS12_BAG_ADD_ATTR`
+    - `HITLS_PKCS12_BAG_GET_ATTR`
+    - only `friendlyName` / `localKeyId`
+- openHiTLS implementation confirms two important public-boundary limits:
+  - `BagGetValue` exposes key / cert / secret bag values only; `CRLBAG` has no public getter path.
+  - `HITLS_PKCS12_EncodeMacData` accepts `BSL_CID_PKCS12KDF` only; PBMAC1/PBKDF2 is outside the public encode contract.
+
+Verdict:
+- keep `available = 0`
+- adjust to `partial = 38`
+- adjust to `not_available = 55`
+
+Reasoning boundary:
+- `partial` is justified where openHiTLS has a real public replacement path through whole-container or bag-object APIs:
+  - whole container:
+    - `PKCS12_new`
+    - `PKCS12_free`
+    - `PKCS12_init`
+    - `PKCS12_init_ex`
+    - `PKCS12_create`
+    - `PKCS12_create_ex`
+    - `PKCS12_create_ex2`
+    - `PKCS12_parse`
+    - `PKCS12_newpass`
+    - `PKCS12_set_mac`
+    - `PKCS12_setup_mac`
+    - `PKCS12_verify_mac`
+  - bag lifecycle / construction:
+    - `PKCS12_SAFEBAG_new`
+    - `PKCS12_SAFEBAG_free`
+    - `PKCS12_SAFEBAG_create_cert`
+    - `PKCS12_SAFEBAG_create_crl`
+    - `PKCS12_SAFEBAG_create_secret`
+  - bag value / metadata:
+    - `PKCS12_SAFEBAG_get1_cert`
+    - `PKCS12_SAFEBAG_get1_cert_ex`
+    - `PKCS12_SAFEBAG_get0_type`
+    - `PKCS12_SAFEBAG_get_nid`
+    - `PKCS12_SAFEBAG_get0_bag_type`
+    - `PKCS12_SAFEBAG_get_bag_nid`
+    - `PKCS12_SAFEBAG_get0_bag_obj`
+  - bag attributes:
+    - `PKCS12_get_attr`
+    - `PKCS12_SAFEBAG_get0_attr`
+    - `PKCS12_get_friendlyname`
+    - `PKCS12_SAFEBAG_set0_attrs`
+    - `PKCS12_add1_attr_by_NID`
+    - `PKCS12_add1_attr_by_txt`
+    - `PKCS12_add_friendlyname_asc`
+    - `PKCS12_add_friendlyname_uni`
+    - `PKCS12_add_friendlyname_utf8`
+    - `PKCS12_add_localkeyid`
+  - bag add helpers:
+    - `PKCS12_add_cert`
+    - `PKCS12_add_key`
+    - `PKCS12_add_key_ex`
+    - `PKCS12_add_secret`
+- These remain `partial` because the public replacement path still has meaningful boundary gaps:
+  - openHiTLS uses `HITLS_PKCS12 *`, `HITLS_PKCS12_Bag *`, `CRYPT_EAL_PkeyCtx *`, `HITLS_X509_Cert *`, and `BSL_Buffer`, not OpenSSL wrapper types and `STACK_OF(...)` contracts
+  - attribute operations cover only `friendlyName` and `localKeyId`
+  - metadata getters return CIDs through ctrl calls, not `ASN1_OBJECT *` / `NID` wrapper contracts
+  - MAC setup is supplied through `HITLS_PKCS12_EncodeParam`, not by mutating a `PKCS12` object in-place
+  - `PKCS12_newpass` is a parse-plus-regenerate workflow, not an in-place helper
+- `not_available` remains correct for the rest because openHiTLS public APIs do not provide a practical public replacement path for:
+  - ASN.1 item / wrapper families:
+    - `PKCS12_AUTHSAFES_it`
+    - `PKCS12_BAGS_new/free/it`
+    - `PKCS12_MAC_DATA_new/free/it`
+    - `PKCS12_SAFEBAGS_it`
+    - `PKCS12_SAFEBAG_it`
+    - `PKCS12_it`
+  - authsafe / PKCS7 helpers:
+    - `PKCS12_add_safe*`
+    - `PKCS12_add_safes*`
+    - `PKCS12_pack_*`
+    - `PKCS12_unpack_*`
+  - standalone PKCS12 crypto helpers:
+    - `PKCS12_PBE_add`
+    - `PKCS12_PBE_keyivgen*`
+    - `PKCS12_key_gen_*`
+    - `PKCS12_pbe_crypt*`
+    - `PKCS12_gen_mac`
+    - `PKCS12_set_pbmac1_pbkdf2`
+  - raw or nested wrapper getters:
+    - `PKCS12_get0_mac`
+    - `PKCS12_mac_present`
+    - `PKCS12_get_attr_gen`
+    - `PKCS12_SAFEBAG_get0_attrs`
+    - `PKCS12_SAFEBAG_get0_p8inf`
+    - `PKCS12_SAFEBAG_get0_pkcs8`
+    - `PKCS12_SAFEBAG_get0_safes`
+    - `PKCS12_SAFEBAG_get1_crl`
+    - `PKCS12_SAFEBAG_get1_crl_ex`
+  - generic / PKCS8 wrapper helpers:
+    - `PKCS12_SAFEBAG_create0_p8inf`
+    - `PKCS12_SAFEBAG_create0_pkcs8`
+    - `PKCS12_SAFEBAG_create_pkcs8_encrypt*`
+    - `PKCS12_item_pack_safebag`
+    - `PKCS12_decrypt_skey*`
+    - `PKCS12_item_decrypt_d2i*`
+    - `PKCS12_item_i2d_encrypt*`
+  - unsupported bag attribute helper:
+    - `PKCS12_add_CSPName_asc`
+
+Representative evidence:
+- OpenSSL declarations:
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L104)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L116)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L153)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L178)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L191)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L194)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L209)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L215)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L247)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L276)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L282)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L319)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L330)
+  - [pkcs12.h.in](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/include/openssl/pkcs12.h.in#L336)
+- OpenSSL implementation / manpage evidence:
+  - [p12_crt.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_crt.c#L218)
+  - [p12_crt.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_crt.c#L299)
+  - [p12_key.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_key.c#L49)
+  - [p12_mutl.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_mutl.c#L304)
+  - [p12_mutl.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_mutl.c#L454)
+  - [p12_add.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_add.c#L20)
+  - [p12_add.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_add.c#L170)
+  - [p12_attr.c](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/crypto/pkcs12/p12_attr.c#L102)
+  - [PKCS12_add_safe.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/PKCS12_add_safe.pod#L24)
+  - [PKCS12_key_gen_utf8_ex.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/PKCS12_key_gen_utf8_ex.pod#L75)
+  - [PKCS12_gen_mac.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/PKCS12_gen_mac.pod#L34)
+  - [PKCS12_get_friendlyname.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/PKCS12_get_friendlyname.pod#L15)
+  - [PKCS12_decrypt_skey.pod](https://github.com/openssl/openssl/blob/6115286faeb8fb023d79660e973a3252b142f6c1/doc/man3/PKCS12_decrypt_skey.pod#L21)
+- openHiTLS public declarations:
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L46)
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L77)
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L99)
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L119)
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L138)
+  - [hitls_pki_pkcs12.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_pkcs12.h#L209)
+  - [hitls_pki_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_types.h#L440)
+  - [hitls_pki_types.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/pki/hitls_pki_types.h#L462)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L313)
+  - [bsl_obj.h](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/include/bsl/bsl_obj.h#L314)
+- openHiTLS implementation evidence:
+  - [hitls_pkcs12_util.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_util.c#L103)
+  - [hitls_pkcs12_util.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_util.c#L246)
+  - [hitls_pkcs12_bags.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_bags.c#L39)
+  - [hitls_pkcs12_bags.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_bags.c#L121)
+  - [hitls_pkcs12_bags.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_bags.c#L151)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L396)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L428)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L948)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L1319)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L1696)
+  - [hitls_pkcs12_common.c](https://gitcode.com/openHiTLS/openhitls/blob/d9cc8577/pki/pkcs12/src/hitls_pkcs12_common.c#L1997)
+
+Batch 246 inventory:
+- total interfaces: `93`
+- `partial = 38`
+- `not_available = 55`
