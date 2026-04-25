@@ -200,6 +200,9 @@ mount -o loop system.img /mnt/oh
 | `--json-only` | 仅输出 JSON，不打印控制台摘要 |
 | `-v, --verbose` | 详细日志 |
 | `--log-file FILE` | 日志写入文件 |
+| `--hitls-compat` | 在源码扫描报告中追加 openHiTLS 兼容性列和覆盖率统计 |
+| `--hitls-map FILE` | 使用自定义 HiTLS 映射 JSON（默认使用内置 `data/hitls_compat.json`） |
+| `--recover-parser-diagnostics` | 对 tree-sitter 诊断区域做二次文本补漏，结果标记为 fallback |
 
 ### 支持的语言
 
@@ -229,6 +232,15 @@ mount -o loop system.img /mnt/oh
 
 # 详细日志输出
 ./scan source /path/to/src -o report.xlsx -v --log-file scan.log
+
+# 生成 openHiTLS 兼容性报告
+./scan source /path/to/src -o report.xlsx --hitls-compat
+
+# 自定义 HiTLS 映射表
+./scan source /path/to/src -o report.xlsx --hitls-compat --hitls-map map.json
+
+# parser diagnostic 补漏
+./scan source /path/to/src -o report.xlsx --recover-parser-diagnostics
 ```
 
 ### `-o` 输出路径自动识别
@@ -300,6 +312,13 @@ mount -o loop system.img /mnt/oh
 | Category | 功能分类 | ssl_core |
 | Call Arguments | 调用参数 | (TLS_client_method()) |
 
+可选列：
+
+| 条件 | 追加列 |
+|------|--------|
+| `--hitls-compat` | HiTLS Status, HiTLS Replacement |
+| `--recover-parser-diagnostics` 命中补漏 | Extraction Source, Confidence, Parser Diagnostic Class |
+
 **"Symbol Summary"** - 去重后的符号统计，每个符号一行：
 
 | 列 | 说明 | 示例 |
@@ -309,6 +328,8 @@ mount -o loop system.img /mnt/oh
 | Calls | 调用次数 | 3 |
 | Files | 使用文件数 | 2 |
 | File List | 使用文件列表 | tls.c, ssl_lib.c |
+
+启用 `--hitls-compat` 后，额外生成 **"HiTLS Coverage"** 工作表，统计 `available`、`partial`、`not_available`、`unknown` 和替换比例。
 
 ### JSON 输出格式
 
@@ -348,6 +369,32 @@ mount -o loop system.img /mnt/oh
 }
 ```
 
+可选 JSON 字段：
+
+| 条件 | 位置 | 字段 |
+|------|------|------|
+| `--hitls-compat` | `call_sites[]` | `hitls_status`, `hitls_equiv`, `hitls_replacement` |
+| `--hitls-compat` | `summary` | `hitls_coverage`, `hitls_direct_replace_ratio`, `hitls_direct_or_partial_replace_ratio` |
+| `--recover-parser-diagnostics` 命中补漏 | `call_sites[]` | `extraction_source`, `confidence`, `parser_diagnostic_class` |
+| `--recover-parser-diagnostics` 命中补漏 | `summary` | `fallback_call_sites`, `files_with_fallback_call_sites` |
+
+源码扫描报告不包含二进制运行时的 `Detection` / `dynamic-link` / `dlopen` 列。
+
+### openHiTLS 兼容性
+
+| 状态 | 含义 | 处理建议 |
+|------|------|----------|
+| available | 已有直接替换接口 | 可进入直接替换清单 |
+| partial | 有部分替换或语义差异 | 需要逐调用点复核参数和行为 |
+| not_available | 当前无等价 HiTLS 接口 | 进入缺口清单 |
+| unknown | 映射表未覆盖该符号 | 补充映射或标注待确认 |
+
+`unknown = 0` 表示报告内符号都已被映射表覆盖。替换可行性看 `available` / `partial` / `not_available` 分布。
+
+### Parser diagnostic 补漏
+
+默认只使用 AST `call_expression`。`--recover-parser-diagnostics` 会对 parser diagnostic 区域前后 3 行做文本补漏，补出的调用点标记为 `Extraction Source=parser-diagnostic-text`、`Confidence=fallback`，建议作为 review 候选单独看。
+
 ### 符号覆盖说明
 
 源码扫描使用两个内置数据集的并集：
@@ -382,6 +429,8 @@ mount -o loop system.img /mnt/oh
 | `-o, --output FILE` | 输出合并 XLSX 文件（必需） |
 | `-v, --verbose` | 详细日志 |
 | `--log-file FILE` | 日志写入文件 |
+| `--hitls-compat` | 在合并报告中追加 openHiTLS 兼容性列和覆盖率统计 |
+| `--hitls-map FILE` | 使用自定义 HiTLS 映射 JSON |
 
 ### 示例
 
@@ -391,6 +440,9 @@ mount -o loop system.img /mnt/oh
 
 # 合并目录下所有报告（Shell 通配符展开）
 ./scan source-merge /tmp/reports/*.xlsx -o combined.xlsx
+
+# 合并时追加 openHiTLS 兼容性列
+./scan source-merge /tmp/reports/*.xlsx -o combined_hitls.xlsx --hitls-compat
 ```
 
 ### 输出工作簿结构
@@ -400,6 +452,7 @@ mount -o loop system.img /mnt/oh
 | **Summary** | 每项目统计（文件数、调用点、唯一符号、Top 分类）+ TOTAL 行 |
 | **\<项目名\>** | 每个项目的完整调用点数据（与单项目报告格式相同） |
 | **Symbol Summary** | 跨项目去重后的符号统计 |
+| **HiTLS Coverage** | 启用 `--hitls-compat` 后生成，统计跨项目 HiTLS 替换覆盖率 |
 
 **Symbol Summary 列：**
 
@@ -414,6 +467,8 @@ mount -o loop system.img /mnt/oh
 | Project List | 项目名称列表 | curl, spdm-emu, wolfssl |
 
 > Symbol Summary 中的 Projects/Project List 列仅在 merge 报告中出现，单项目 XLSX 的 Symbol Summary 不包含这两列。
+
+如果输入报告包含 `Extraction Source` / `Confidence` / `Parser Diagnostic Class`，合并后的项目工作表会保留这些列。这样 `--recover-parser-diagnostics` 补出的 fallback 调用点在 `source-merge` 和 `combo-scan` 的合并 XLSX 中仍可追溯。
 
 ---
 
@@ -452,6 +507,9 @@ mount -o loop system.img /mnt/oh
 | `--json-only` | 输出合并 JSON 而非 XLSX，抑制控制台摘要 |
 | `-v, --verbose` | 详细日志 |
 | `--log-file FILE` | 日志写入文件 |
+| `--hitls-compat` | 在合并报告中追加 openHiTLS 兼容性列和覆盖率统计 |
+| `--hitls-map FILE` | 使用自定义 HiTLS 映射 JSON |
+| `--recover-parser-diagnostics` | 透传给内部 `source` 子命令，启用 parser diagnostic 补漏 |
 
 ### 示例
 
@@ -473,6 +531,13 @@ mount -o loop system.img /mnt/oh
 
 # 限制每项目并行度
 ./scan combo-scan /path/to/opensource -o report.xlsx -j 4
+
+# 一键生成 openHiTLS 兼容性合并报告
+./scan combo-scan /path/to/opensource -o report.xlsx --hitls-compat
+
+# HiTLS 兼容性 + parser diagnostic 补漏
+./scan combo-scan /path/to/opensource -o report.xlsx \
+    --hitls-compat --recover-parser-diagnostics
 ```
 
 ### `-o` 输出路径详解
@@ -642,6 +707,9 @@ $TMPDIR/                               系统临时目录
 | **Summary** | 每项目统计（文件数、调用点、唯一符号、Top 分类）+ TOTAL 行 |
 | **\<项目名\>** | 每个项目的完整调用点数据 |
 | **Symbol Summary** | 跨项目去重后的符号统计（含 Projects/Project List 列） |
+| **HiTLS Coverage** | 启用 `--hitls-compat` 后生成，统计全量唯一符号的 HiTLS 替换覆盖率 |
+
+`combo-scan --recover-parser-diagnostics` 的合并 XLSX 会保留 fallback 追踪列：Extraction Source、Confidence、Parser Diagnostic Class。
 
 ### JSON 输出格式（--json-only）
 
