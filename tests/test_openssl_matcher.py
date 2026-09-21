@@ -204,6 +204,57 @@ class TestOpenSSLMatcherStrict:
         assert len(exports) == len(self.matcher._openssl_exports)
         assert "SSL_connect" in exports
 
+    def test_load_additional_symbols_merges_exact_names(self, tmp_path):
+        symbol_file = tmp_path / "interfaces.txt"
+        symbol_file.write_text(
+            "\ufeff# project-specific APIs\n"
+            "\n"
+            "VENDOR_crypto_init\n"
+            "SSL_connect\n"
+            "VENDOR_crypto_init\n",
+            encoding="utf-8",
+        )
+
+        original = self.matcher.get_all_exports()
+        count = self.matcher.load_additional_symbols(str(symbol_file))
+
+        assert count == 2
+        assert original <= self.matcher.get_all_exports()
+        assert self.matcher.is_openssl_symbol("VENDOR_crypto_init")
+        assert self.matcher.is_openssl_symbol("SSL_connect")
+        assert self.matcher.categorize_symbol("VENDOR_crypto_init") == "COSTOM"
+        assert self.matcher.categorize_symbol("SSL_connect") == "COSTOM"
+        assert self.matcher.categorize_symbols([
+            "VENDOR_crypto_init", "SSL_connect",
+        ]) == {"COSTOM": ["VENDOR_crypto_init", "SSL_connect"]}
+        stats = self.matcher.get_stats()
+        assert stats["additional_symbols_loaded"] == 2
+        assert stats["additional_symbol_files"] == [str(symbol_file)]
+
+    def test_additional_symbols_survive_builtin_reload(self, tmp_path):
+        symbol_file = tmp_path / "interfaces.txt"
+        symbol_file.write_text("VENDOR_crypto_init\n", encoding="utf-8")
+
+        matcher = OpenSSLMatcher()
+        matcher.load_additional_symbols(str(symbol_file))
+        matcher.load_builtin_symbols()
+
+        assert matcher.is_openssl_symbol("VENDOR_crypto_init")
+        assert matcher.is_openssl_symbol("SSL_connect")
+
+    def test_load_additional_symbols_rejects_empty_list(self, tmp_path):
+        symbol_file = tmp_path / "interfaces.txt"
+        symbol_file.write_text("\n# comments only\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="contains no interface names"):
+            self.matcher.load_additional_symbols(str(symbol_file))
+
+    def test_load_additional_symbols_rejects_missing_file(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="not found"):
+            self.matcher.load_additional_symbols(
+                str(tmp_path / "missing.txt")
+            )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

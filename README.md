@@ -110,6 +110,10 @@ openssl-scanner scan /path/to/binary -o report.json
 # 扫描单个文件，输出 JSON
 ./scan source /path/to/openssl_client.c -o report.json
 
+# 使用 OpenSSL 全量接口 + 自定义接口扫描
+# interfaces.txt 每行一个接口名
+./scan source /path/to/src -o report.json --add interfaces.txt
+
 # 控制并行度
 ./scan source /path/to/src -o report.xlsx -j 4
 
@@ -184,6 +188,7 @@ XLSX 单工作表，含自动筛选：
 | `--exclude NAME` | 排除匹配的项目目录（子串匹配） | - |
 | `--json-only` | 输出合并 JSON 而非 XLSX | - |
 | `--no-recursive` | 不递归子目录 | - |
+| `--add FILE` | 在 OpenSSL 全量接口基础上追加自定义接口（TXT 每行一个） | - |
 
 ### 使用示例
 
@@ -193,6 +198,9 @@ XLSX 单工作表，含自动筛选：
 
 # JSON 输出（无需 openpyxl 依赖）
 ./scan combo-scan /path/to/opensource -o report.json --json-only
+
+# 探测和扫描 OpenSSL 全量接口 + 自定义接口
+./scan combo-scan /path/to/opensource -o report.xlsx --add interfaces.txt
 ```
 
 ### `-o` 自动识别
@@ -254,12 +262,12 @@ Phase 3: 合并 (source-merge)
 
 ### 符号覆盖
 
-源码扫描使用内置的 **9544 个 OpenSSL 标识符**（ELF 导出符号 + 头文件宏）：
+源码扫描使用内置的 **10375 个 OpenSSL 标识符**（ELF 导出符号 + 头文件宏，去重后）：
 
 | 数据集 | 数量 | 来源 | 示例 |
 |--------|------|------|------|
-| ELF 导出符号 | 6248 | libcrypto.so + libssl.so | SSL_CTX_ctrl, EVP_DigestInit_ex |
-| 头文件宏 | 3298 | include/openssl/*.h | SSL_CTX_set_mode, OPENSSL_free, sk_X509_num |
+| ELF 导出符号 | 6485 | libcrypto.so + libssl.so | SSL_CTX_ctrl, EVP_DigestInit_ex |
+| 头文件宏 | 3892 | include/openssl/*.h | SSL_CTX_set_mode, OPENSSL_free, sk_X509_num |
 
 宏在编译时展开，不出现在 ELF 符号表中，但在源码中是真实的 API 调用点。
 
@@ -270,7 +278,7 @@ Phase 3: 合并 (source-merge)
 ./scan update-data \
     --openssl-lib /path/to/libcrypto.so \
     --header-dir /path/to/openssl/include/openssl \
-    --ossl-version 3.0.9
+    --ossl-version 3.5.9-dev
 
 # 仅更新符号
 ./scan update-data --openssl-lib /path/to/libcrypto.so

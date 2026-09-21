@@ -40,6 +40,34 @@ SOURCE_EXTS = {'.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.rs'}
 SOURCE_GLOBS = ['*.c', '*.h', '*.cpp', '*.hpp', '*.cc', '*.cxx', '*.hxx', '*.rs']
 
 
+def _add_custom_interface_argument(parser) -> None:
+    """Add the shared custom-interface list option to a scan parser."""
+    parser.add_argument(
+        '--add',
+        metavar='FILE',
+        help='Add custom interfaces from a UTF-8 text file (one name per line)',
+    )
+
+
+def _load_custom_interfaces(args, matcher: OpenSSLMatcher, logger) -> bool:
+    """Merge the optional --add file into a loaded matcher."""
+    symbol_file = getattr(args, 'add', None)
+    if not symbol_file:
+        return True
+
+    try:
+        count = matcher.load_additional_symbols(symbol_file)
+    except (OSError, UnicodeError, ValueError) as exc:
+        logger.error("Failed to load custom interfaces: %s", exc)
+        return False
+
+    logger.info(
+        "Merged %d custom interfaces; scanning %d total interface names",
+        count, len(matcher.get_combined_set()),
+    )
+    return True
+
+
 def _load_hitls_compat(args):
     """Create HiTLSCompat from CLI args if --hitls-compat is set.
 
@@ -161,6 +189,8 @@ Examples:
         help='Path to libssl.so (optional)',
     )
 
+    _add_custom_interface_argument(scan_parser)
+
     scan_parser.add_argument(
         '-o', '--output',
         default='openssl_deps_report.json',
@@ -262,6 +292,8 @@ Examples:
         dest='openssl_ssl',
         help='Path to libssl.so (optional)',
     )
+
+    _add_custom_interface_argument(proc_parser)
 
     proc_parser.add_argument(
         '-o', '--output',
@@ -380,6 +412,8 @@ Examples:
         dest='openssl_ssl',
         help='Path to external libssl.so (optional)',
     )
+
+    _add_custom_interface_argument(hap_parser)
 
     hap_parser.add_argument(
         '-o', '--output',
@@ -504,6 +538,8 @@ Examples:
         '-f', '--from-file',
         help='Read target paths from file (one path per line)',
     )
+
+    _add_custom_interface_argument(src_parser)
 
     src_parser.add_argument(
         '-o', '--output',
@@ -712,6 +748,8 @@ parent contain OpenSSL usage, the parent is reported instead.
         'root',
         help='Root directory to probe for OpenSSL usage',
     )
+
+    _add_custom_interface_argument(parser)
 
     parser.add_argument(
         '-v', '--verbose',
@@ -944,6 +982,9 @@ def cmd_scan(args) -> int:
         count = matcher.load_builtin_symbols()
         logger.info(f"Loaded {count} built-in OpenSSL symbols")
 
+    if not _load_custom_interfaces(args, matcher, logger):
+        return 1
+
     scanner = Scanner(
         search_paths=search_paths,
         workers=args.jobs,
@@ -1082,6 +1123,9 @@ def cmd_proc(args) -> int:
         count = matcher.load_builtin_symbols()
         logger.info("Loaded %d built-in OpenSSL symbols", count)
 
+    if not _load_custom_interfaces(args, matcher, logger):
+        return 1
+
     scanner = Scanner(
         search_paths=search_paths,
         workers=args.jobs,
@@ -1151,6 +1195,13 @@ def cmd_hap(args) -> int:
     if not pkg_plan:
         logger.error("No scannable packages found")
         return 1
+
+    # Validate --add before starting package extraction or worker processes.
+    if getattr(args, 'add', None):
+        validator = OpenSSLMatcher()
+        if not _load_custom_interfaces(args, validator, logger):
+            return 1
+        args.add = os.path.abspath(args.add)
 
     from .custom_matcher import CustomMatcher
     custom_matcher = CustomMatcher()
@@ -1504,6 +1555,9 @@ def _scan_one_hap(entry, extractor, custom_matcher, args, reporter,
             count = matcher.load_builtin_symbols()
             logger.info("Loaded %d built-in OpenSSL symbols", count)
 
+        if not _load_custom_interfaces(args, matcher, logger):
+            raise ValueError("Could not load --add interface file")
+
         removed = 0
         removed_libs = []
         for dirpath, _dirnames, filenames in os.walk(extract_result.extract_dir):
@@ -1820,12 +1874,14 @@ def cmd_source(args) -> int:
         )
         return 1
 
+    if not _load_custom_interfaces(args, matcher, logger):
+        return 1
+
     symbols = matcher.get_combined_set()
     macros = matcher._openssl_macros or set()
-    from .constants import SYMBOL_CATEGORIES
     analyzer = SourceAnalyzer(
         symbols,
-        SYMBOL_CATEGORIES,
+        matcher.get_categories(),
         macro_symbols=macros,
         recover_parser_diagnostics=getattr(
             args, 'recover_parser_diagnostics', False,
@@ -2215,14 +2271,18 @@ def cmd_source_probe(args) -> int:
     matcher = OpenSSLMatcher()
     try:
         matcher.load_combined_symbols()
-        ossl_set = matcher.get_combined_set()
-        logger.info("Loaded %d OpenSSL identifiers for probe", len(ossl_set))
     except FileNotFoundError as e:
         logger.error(
             "Built-in symbol data not found: %s\n"
             "Run 'openssl-scanner update-data' to generate.", e
         )
         return 1
+
+    if not _load_custom_interfaces(args, matcher, logger):
+        return 1
+
+    ossl_set = matcher.get_combined_set()
+    logger.info("Loaded %d interface identifiers for probe", len(ossl_set))
 
     start_time = time.time()
 
@@ -2488,6 +2548,8 @@ Pipeline:
         help='Root directory to probe and scan',
     )
 
+    _add_custom_interface_argument(parser)
+
     parser.add_argument(
         '-o', '--output',
         required=True,
@@ -2573,6 +2635,9 @@ def cmd_combo_scan(args) -> int:
             "Built-in symbol data not found: %s\n"
             "Run 'openssl-scanner update-data' to generate.", e
         )
+        return 1
+
+    if not _load_custom_interfaces(args, matcher, logger):
         return 1
 
     ossl_set = matcher.get_combined_set()
@@ -2668,6 +2733,8 @@ def cmd_combo_scan(args) -> int:
                 cmd.append('--no-recursive')
             if getattr(args, 'recover_parser_diagnostics', False):
                 cmd.append('--recover-parser-diagnostics')
+            if getattr(args, 'add', None):
+                cmd.extend(['--add', os.path.abspath(args.add)])
             if args.verbose:
                 cmd.append('-' + 'v' * int(args.verbose))
             if getattr(args, 'log_file', None):

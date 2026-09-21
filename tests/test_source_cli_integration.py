@@ -413,6 +413,72 @@ class TestSourceCLI:
         syms = set(data["summary"]["unique_symbols"])
         assert syms == {"SSL_connect", "SSL_read", "SSL_write"}
 
+    def test_source_add_merges_custom_and_builtin_interfaces(self, tmp_path):
+        import subprocess
+
+        src = tmp_path / "custom_source"
+        src.mkdir()
+        (src / "client.c").write_text(
+            "void use_apis(void) {\n"
+            "    VENDOR_crypto_init();\n"
+            "    SSL_connect(0);\n"
+            "    NOT_in_interface_list();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        interfaces = tmp_path / "interfaces.txt"
+        interfaces.write_text(
+            "# one interface per line\n"
+            "VENDOR_crypto_init\n"
+            "SSL_connect\n"
+            "VENDOR_crypto_init\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "custom.json"
+
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(out), "--json-only",
+                "--add", str(interfaces),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        assert r.returncode == 0, r.stderr
+        data = json.loads(out.read_text())
+        by_symbol = {
+            site["ossl_symbol"]: site for site in data["call_sites"]
+        }
+        assert set(by_symbol) == {"VENDOR_crypto_init", "SSL_connect"}
+        assert by_symbol["VENDOR_crypto_init"]["category"] == "COSTOM"
+        assert by_symbol["SSL_connect"]["category"] == "COSTOM"
+
+    def test_source_add_missing_file_fails_cleanly(self, tmp_path):
+        import subprocess
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "client.c").write_text(
+            "void f(void) { VENDOR_crypto_init(); }\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "custom.json"
+        missing = tmp_path / "missing.txt"
+
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source",
+                str(src), "-o", str(out), "--json-only",
+                "--add", str(missing),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        assert r.returncode == 1
+        assert "Additional interface file not found" in r.stderr
+        assert not out.exists()
+
     def test_source_no_recursive(self, test_root, tmp_path):
         import subprocess
         out = tmp_path / "norec.json"
@@ -730,6 +796,34 @@ class TestSourceProbeCLI:
                       if l and not l.startswith('#')]
         assert len(path_lines) == 0
 
+    def test_probe_add_finds_custom_only_project(self, tmp_path):
+        import subprocess
+
+        root = tmp_path / "root"
+        project = root / "vendor_project"
+        project.mkdir(parents=True)
+        (project / "client.c").write_text(
+            "void f(void) { VENDOR_crypto_init(); }\n",
+            encoding="utf-8",
+        )
+        interfaces = tmp_path / "interfaces.txt"
+        interfaces.write_text("VENDOR_crypto_init\n", encoding="utf-8")
+
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "source-probe",
+                str(root), "--add", str(interfaces),
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        assert r.returncode == 0, r.stderr
+        path_lines = [
+            line for line in r.stdout.splitlines()
+            if line and not line.startswith("#")
+        ]
+        assert path_lines == [str(project)]
+
 
 # ---------------------------------------------------------------------------
 # source-diff CLI integration
@@ -882,6 +976,40 @@ class TestComboScanCLI:
         assert data["meta"]["report_type"] == "combo_scan"
         assert data["meta"]["total_projects"] >= 2
         assert len(data["projects"]) >= 2
+
+    def test_combo_add_probes_and_scans_custom_interfaces(self, tmp_path):
+        import subprocess
+
+        root = tmp_path / "custom_root"
+        project = root / "vendor_project"
+        project.mkdir(parents=True)
+        (project / "client.c").write_text(
+            "void f(void) { VENDOR_crypto_init(); }\n",
+            encoding="utf-8",
+        )
+        interfaces = tmp_path / "interfaces.txt"
+        interfaces.write_text("VENDOR_crypto_init\n", encoding="utf-8")
+        out = tmp_path / "combo_custom.json"
+
+        r = subprocess.run(
+            [
+                sys.executable, "-m", "openssl_scanner", "combo-scan",
+                str(root), "-o", str(out), "--json-only",
+                "--add", str(interfaces),
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+
+        assert r.returncode == 0, r.stderr
+        data = json.loads(out.read_text())
+        assert data["meta"]["total_projects"] == 1
+        symbols = {
+            site["ossl_symbol"]
+            for project_data in data["projects"]
+            for site in project_data["call_sites"]
+        }
+        assert symbols == {"VENDOR_crypto_init"}
+        assert data["projects"][0]["call_sites"][0]["category"] == "COSTOM"
 
     def test_combo_exclude(self, test_root, tmp_path):
         import subprocess

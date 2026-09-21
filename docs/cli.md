@@ -84,6 +84,7 @@ Commands:
 | `target` | 扫描目标（文件或目录） |
 | `--openssl-lib PATH` | 指定 libcrypto.so 路径（默认自动检测） |
 | `--openssl-ssl PATH` | 指定 libssl.so 路径 |
+| `--add FILE` | 在 OpenSSL 全量接口基础上追加自定义接口（UTF-8 TXT，每行一个） |
 | `-o, --output FILE` | 输出文件（默认: openssl_deps_report.xlsx） |
 | `-L, --lib-path PATH` | 额外库搜索路径（可多次使用） |
 | `--sysroot PATH` | 根文件系统路径（自动发现所有库目录） |
@@ -194,6 +195,7 @@ mount -o loop system.img /mnt/oh
 |------|------|
 | `target` | 源文件或目录（可多个） |
 | `-f, --from-file FILE` | 从文件读取目标路径列表（每行一个路径） |
+| `--add FILE` | 在 OpenSSL 全量接口基础上追加自定义接口（UTF-8 TXT，每行一个） |
 | `-o, --output FILE` | 输出文件（.xlsx 或 .json，必需） |
 | `-j, --jobs N` | 并行工作数（默认: CPU 核心数） |
 | `--no-recursive` | 不递归子目录 |
@@ -224,6 +226,9 @@ mount -o loop system.img /mnt/oh
 # JSON 输出
 ./scan source /path/to/src -o report.json
 
+# OpenSSL 全量接口 + 自定义接口
+./scan source /path/to/src -o report.json --add interfaces.txt
+
 # 控制并行度
 ./scan source /path/to/src -o report.xlsx -j 4
 
@@ -241,6 +246,24 @@ mount -o loop system.img /mnt/oh
 
 # parser diagnostic 补漏
 ./scan source /path/to/src -o report.xlsx --recover-parser-diagnostics
+```
+
+### 追加自定义接口
+
+`--add` 接收 UTF-8 文本文件，每个非空行是一个需要精确匹配的接口名。重复行以及以 `#` 开头的注释行会忽略。自定义接口与内置 OpenSSL 导出符号、宏做并集，不会替换内置集合；这些接口在报告中归为 `COSTOM`。
+
+```text
+# interfaces.txt
+VENDOR_crypto_init
+VENDOR_TLS_connect
+```
+
+```bash
+# 直接源码扫描
+./scan source /path/to/src -o report.xlsx --add interfaces.txt
+
+# 仅探测包含 OpenSSL 或自定义接口的项目
+./scan source-probe /path/to/root --add interfaces.txt
 ```
 
 ### `-o` 输出路径自动识别
@@ -501,6 +524,7 @@ mount -o loop system.img /mnt/oh
 |------|------|
 | `root` | 根目录（必需） |
 | `-o, --output PATH` | 输出路径：文件(.xlsx/.json)仅合并结果，目录则含全部结果(合并+每项目 XLSX+JSON) |
+| `--add FILE` | 追加自定义接口；同时用于 probe 和后续 source 扫描 |
 | `-j, --jobs N` | 每项目并行工作数（默认: CPU 核心数） |
 | `--no-recursive` | 扫描项目时不递归子目录 |
 | `--exclude NAME [NAME ...]` | 排除匹配的项目目录，子串匹配 |
@@ -525,6 +549,9 @@ mount -o loop system.img /mnt/oh
 
 # JSON 输出（无需 openpyxl 依赖）
 ./scan combo-scan /path/to/opensource -o report.json --json-only
+
+# OpenSSL 全量接口 + 自定义接口（probe 和 scan 使用同一并集）
+./scan combo-scan /path/to/opensource -o report.xlsx --add interfaces.txt
 
 # 详细日志 + 日志文件
 ./scan combo-scan /path/to/opensource -o report.xlsx -v --log-file scan.log
@@ -957,6 +984,7 @@ Layer 4: 调用点差异 (CallSiteDelta)
 | `--name NAME` | 按进程名搜索 |
 | `--openssl-lib PATH` | 指定 libcrypto.so 路径 |
 | `--openssl-ssl PATH` | 指定 libssl.so 路径 |
+| `--add FILE` | 追加自定义接口（UTF-8 TXT，每行一个） |
 | `-o, --output FILE` | 输出文件 |
 | `-L, --lib-path PATH` | 额外库搜索路径（可多次使用） |
 | `-j, --jobs N` | 并行线程数 |
@@ -1016,6 +1044,7 @@ OpenHarmony 应用包本质是 ZIP 压缩文件，native 库位于 `libs/<abi>/`
 | `--abi ABI` | 指定目标 ABI（默认自动选择，优先 arm64-v8a） |
 | `--openssl-lib PATH` | 指定外部 libcrypto.so（包未内置 OpenSSL 时使用） |
 | `--openssl-ssl PATH` | 指定外部 libssl.so（可选） |
+| `--add FILE` | 追加自定义接口（UTF-8 TXT，每行一个） |
 | `-o, --output PATH` | 输出文件(.xlsx/.html/.json)或目录（逐包独立报告）（默认: openssl_deps_report.xlsx） |
 | `-j, --jobs N` | 并行线程数（默认: CPU 核心数） |
 | `--json-only` | 仅输出 JSON |

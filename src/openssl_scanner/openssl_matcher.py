@@ -19,7 +19,11 @@ def categorize_symbol(symbol: str,
     """Categorize an OpenSSL symbol by prefix matching against SYMBOL_CATEGORIES."""
     if categories is None:
         categories = SYMBOL_CATEGORIES
+    if symbol in categories.get("COSTOM", []):
+        return "COSTOM"
     for category, prefixes in categories.items():
+        if category == "COSTOM":
+            continue
         for prefix in prefixes:
             if symbol.startswith(prefix):
                 return category
@@ -38,10 +42,12 @@ class OpenSSLMatcher:
     def __init__(self) -> None:
         self._openssl_exports: Set[str] = set()
         self._openssl_macros: Set[str] = set()
+        self._additional_symbols: Set[str] = set()
+        self._additional_symbol_files: List[str] = []
         self._libcrypto_path: Optional[str] = None
         self._libssl_path: Optional[str] = None
         self._lib_patterns = OPENSSL_LIBRARY_PATTERNS
-        self._categories = SYMBOL_CATEGORIES
+        self._categories = dict(SYMBOL_CATEGORIES)
 
     def load_openssl_symbols(self, libcrypto_path: str,
                               libssl_path: Optional[str] = None) -> int:
@@ -81,11 +87,11 @@ class OpenSSLMatcher:
         if not exports:
             raise ValueError(f"No symbols extracted from {libcrypto_path}")
 
-        self._openssl_exports = exports
+        self._openssl_exports = exports | self._additional_symbols
         self._libcrypto_path = libcrypto_path
         self._libssl_path = libssl_path
 
-        return len(exports)
+        return len(self._openssl_exports)
 
     def load_builtin_symbols(self) -> int:
         """
@@ -109,10 +115,60 @@ class OpenSSLMatcher:
             data = json.load(f)
 
         symbols = data.get('symbols', [])
-        self._openssl_exports = set(symbols)
+        self._openssl_exports = set(symbols) | self._additional_symbols
         logger.info(
             "Loaded %d built-in OpenSSL symbols (version: %s)",
             len(symbols), data.get('openssl_version', 'unknown')
+        )
+        return len(self._openssl_exports)
+
+    def load_additional_symbols(self, symbol_file: str) -> int:
+        """Add interface names from a UTF-8 text file to the match set.
+
+        Each non-empty line is treated as one exact interface name. Lines
+        whose first non-whitespace character is ``#`` are ignored, allowing
+        small annotated lists. Loading is additive: built-in or live OpenSSL
+        symbols already present in the matcher are preserved.
+
+        Args:
+            symbol_file: Text file containing one interface name per line.
+
+        Returns:
+            Number of unique interface names read from the file.
+
+        Raises:
+            FileNotFoundError: If ``symbol_file`` is not a regular file.
+            ValueError: If the file contains no interface names.
+            UnicodeError: If the file is not valid UTF-8 text.
+        """
+        path = os.path.abspath(symbol_file)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"Additional interface file not found: {path}"
+            )
+
+        symbols: Set[str] = set()
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                symbol = line.strip()
+                if not symbol or symbol.startswith('#'):
+                    continue
+                symbols.add(symbol)
+
+        if not symbols:
+            raise ValueError(
+                f"Additional interface file contains no interface names: {path}"
+            )
+
+        self._additional_symbols.update(symbols)
+        self._openssl_exports.update(symbols)
+        self._categories["COSTOM"] = sorted(self._additional_symbols)
+        if path not in self._additional_symbol_files:
+            self._additional_symbol_files.append(path)
+
+        logger.info(
+            "Added %d custom interface names from %s",
+            len(symbols), path,
         )
         return len(symbols)
 
@@ -238,10 +294,16 @@ class OpenSSLMatcher:
         """Return OpenSSL exports set (for parallel processing)."""
         return self._openssl_exports
 
+    def get_categories(self) -> Dict[str, List[str]]:
+        """Return categories, including custom interfaces."""
+        return self._categories.copy()
+
     def get_stats(self) -> Dict[str, any]:
         """Return matcher statistics."""
         return {
             'symbols_loaded': len(self._openssl_exports),
+            'additional_symbols_loaded': len(self._additional_symbols),
+            'additional_symbol_files': list(self._additional_symbol_files),
             'libcrypto_path': self._libcrypto_path,
             'libssl_path': self._libssl_path,
         }
