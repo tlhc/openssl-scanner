@@ -84,6 +84,43 @@ def _load_hitls_compat(args):
     return compat
 
 
+def _add_cca_arguments(parser) -> None:
+    parser.add_argument('--hidden', action='store_true',
+                        help='Use conclusion codes stored in cca_compat.json')
+
+
+def _check_cca_output(output) -> None:
+    from .cca_compat import DEFAULT_CCA_PATH
+
+    if os.path.realpath(DEFAULT_CCA_PATH) == os.path.realpath(output):
+        raise ValueError(f'Output would overwrite CCA mapping JSON: {output}')
+
+
+def _load_cca_compat(args):
+    from .cca_compat import CCACompat, DEFAULT_CCA_PATH
+
+    path = DEFAULT_CCA_PATH
+    hidden = getattr(args, 'hidden', False)
+    output = os.path.abspath(args.output)
+    _check_cca_output(output)
+    fmt = getattr(args, 'format', None) or os.path.splitext(output)[1].lower().lstrip('.')
+    is_xlsx = (args.command in ('source-merge', 'combo-scan')
+               or not fmt or fmt == 'xlsx' or os.path.isdir(output))
+    if getattr(args, 'json_only', False) or not is_xlsx:
+        if hidden:
+            raise ValueError('--hidden requires XLSX output')
+        return None
+    if not os.path.isfile(path):
+        if args.command == 'cca-compat' or hidden:
+            raise FileNotFoundError(f'CCA JSON not found: {path}; run python3 import_cca.py first')
+        else:
+            logging.getLogger(__name__).info('CCA JSON not found; skipped: %s', path)
+            return None
+    compat = CCACompat(hidden=hidden)
+    compat.load(path)
+    return compat
+
+
 def setup_logging(verbose, log_file: Optional[str] = None) -> None:
     """Configure logging handlers.
 
@@ -149,6 +186,9 @@ def create_parser() -> argparse.ArgumentParser:
     create_aggregate_parser(subparsers)
     create_export_parser(subparsers)
     create_source_diff_parser(subparsers)
+    create_cca_compat_parser(subparsers)
+    for name in ('source', 'source-merge', 'combo-scan', 'export', 'cca-compat'):
+        _add_cca_arguments(subparsers.choices[name])
 
     return parser
 
@@ -1781,13 +1821,16 @@ def _scan_single_target(analyzer, target, args, workers_override=None):
         )
 
 
-def _export_result(result, output_path, hitls_compat=None):
+def _export_result(result, output_path, hitls_compat=None, cca_compat=None):
     """Export scan result based on file extension.
 
     XLSX output automatically generates a companion JSON file with the
     same base name, since JSON contains meta/errors not present in XLSX.
     """
     from .source_exporter import SourceExcelExporter, SourceJsonExporter
+
+    _check_cca_output(output_path)
+    _check_cca_output(os.path.splitext(output_path)[0] + '.json')
 
     parent = os.path.dirname(output_path)
     if parent:
@@ -1799,7 +1842,8 @@ def _export_result(result, output_path, hitls_compat=None):
                                     hitls_compat=hitls_compat)
     else:
         SourceExcelExporter().export(result, output_path,
-                                     hitls_compat=hitls_compat)
+                                     hitls_compat=hitls_compat,
+                                     cca_compat=cca_compat)
         json_path = os.path.splitext(output_path)[0] + '.json'
         SourceJsonExporter().export(result, json_path,
                                     hitls_compat=hitls_compat)
@@ -1922,7 +1966,8 @@ def cmd_source(args) -> int:
                 output_path = os.path.join(raw_out, base + fmt_ext)
             else:
                 output_path = raw_out
-            _export_result(result, output_path, hitls_compat=hitls_compat)
+            _export_result(result, output_path, hitls_compat=hitls_compat,
+                           cca_compat=getattr(args, 'cca_compat', None))
 
             if not args.json_only:
                 _print_source_summary(result, output_path, elapsed)
@@ -1942,7 +1987,8 @@ def cmd_source(args) -> int:
                     analyzer, target, args,
                     workers_override=per_target_jobs)
                 output_path = output_map[target]
-                _export_result(result, output_path, hitls_compat=hitls_compat)
+                _export_result(result, output_path, hitls_compat=hitls_compat,
+                               cca_compat=getattr(args, 'cca_compat', None))
                 elapsed = time.time() - start
                 return target, result, output_path, elapsed
 
@@ -2357,7 +2403,8 @@ def cmd_source_merge(args) -> int:
     try:
         merger = SourceMergeExporter()
         result = merger.merge(input_paths, output_path,
-                              hitls_compat=hitls_compat)
+                              hitls_compat=hitls_compat,
+                              cca_compat=getattr(args, 'cca_compat', None))
 
         stats = result['sheets']
         total_calls = sum(s['call_sites'] for s in stats)
@@ -2704,6 +2751,14 @@ def cmd_combo_scan(args) -> int:
         output_path = raw_output
         out_dir = None
 
+    if out_dir:
+        try:
+            for name in names:
+                _check_cca_output(os.path.join(out_dir, name + '.json'))
+        except ValueError as exc:
+            logger.error('%s', exc)
+            return 1
+
     tmp_dir = tempfile.mkdtemp(prefix='combo_scan_')
     json_files = []
     want_xlsx = out_dir and not args.json_only
@@ -2735,6 +2790,8 @@ def cmd_combo_scan(args) -> int:
                 cmd.append('--recover-parser-diagnostics')
             if getattr(args, 'add', None):
                 cmd.extend(['--add', os.path.abspath(args.add)])
+            if want_xlsx and getattr(args, 'hidden', False):
+                cmd.append('--hidden')
             if args.verbose:
                 cmd.append('-' + 'v' * int(args.verbose))
             if getattr(args, 'log_file', None):
@@ -2803,7 +2860,12 @@ def cmd_combo_scan(args) -> int:
             if out_dir:
                 shutil.copy2(tmp_json, os.path.join(out_dir, names[i] + '.json'))
                 if want_xlsx:
-                    shutil.copy2(tmp_out, os.path.join(out_dir, names[i] + '.xlsx'))
+                    from .cca_compat import codebook_path
+                    project_output = os.path.join(out_dir, names[i] + '.xlsx')
+                    shutil.copy2(tmp_out, project_output)
+                    tmp_codes = codebook_path(tmp_out)
+                    if os.path.isfile(tmp_codes):
+                        shutil.copy2(tmp_codes, codebook_path(project_output))
 
             if not args.json_only:
                 with open(tmp_json, 'r', encoding='utf-8') as f:
@@ -2828,7 +2890,8 @@ def cmd_combo_scan(args) -> int:
             from .source_exporter import SourceMergeExporter
             merger = SourceMergeExporter()
             merge_stats = merger.merge_from_json(json_files, output_path,
-                                                 hitls_compat=hitls_compat)
+                                                 hitls_compat=hitls_compat,
+                                                 cca_compat=getattr(args, 'cca_compat', None))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -3451,7 +3514,8 @@ def cmd_export(args) -> int:
 
     try:
         exporter = Exporter()
-        exporter.export(report_path, output_path, format=args.format)
+        exporter.export(report_path, output_path, format=args.format,
+                        cca_compat=getattr(args, 'cca_compat', None))
 
         elapsed = time.time() - start_time
         print(f"Export completed: {output_path}")
@@ -3472,6 +3536,26 @@ def cmd_export(args) -> int:
         return 1
 
 
+def create_cca_compat_parser(subparsers) -> None:
+    parser = subparsers.add_parser('cca-compat', help='Append a CCA compatibility sheet to Excel')
+    parser.add_argument('report', help='Input XLSX; matches cca_compat.json beside scan')
+    parser.add_argument('-o', '--output', required=True, help='Output XLSX file')
+    parser.add_argument('-v', '--verbose', action='count', default=0)
+    parser.add_argument('--log-file', help='Write logs to file')
+
+
+def cmd_cca_compat(args) -> int:
+    from .cca_compat import annotate_workbook
+
+    try:
+        count = annotate_workbook(args.report, args.output, args.cca_compat)
+        print(f'CCA compatibility: {count} interfaces -> {args.output}')
+        return 0
+    except Exception as exc:
+        logging.getLogger(__name__).error('CCA export failed: %s', exc)
+        return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     parser = create_parser()
@@ -3483,7 +3567,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 0
 
-    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-summary', 'source-merge', 'source-diff', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', '-h', '--help', '--version']:
+    if argv and argv[0] not in ['scan', 'proc', 'hap', 'hap-summary', 'source', 'source-summary', 'source-merge', 'source-diff', 'source-probe', 'combo-scan', 'vendor-rg', 'update-data', 'vendor-tree-sitter', 'aggregate', 'export', 'cca-compat', '-h', '--help', '--version']:
         argv = ['scan'] + argv
 
     args = parser.parse_args(argv)
@@ -3491,6 +3575,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     if hasattr(args, 'verbose'):
         log_file = getattr(args, 'log_file', None)
         setup_logging(args.verbose, log_file)
+
+    if hasattr(args, 'hidden'):
+        try:
+            args.cca_compat = _load_cca_compat(args)
+        except Exception as exc:
+            logging.getLogger(__name__).error('CCA mapping failed: %s', exc)
+            return 1
 
     if args.command == 'scan':
         return cmd_scan(args)
@@ -3522,6 +3613,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_export(args)
     elif args.command == 'source-diff':
         return cmd_source_diff(args)
+    elif args.command == 'cca-compat':
+        return cmd_cca_compat(args)
     else:
         parser.print_help()
         return 0

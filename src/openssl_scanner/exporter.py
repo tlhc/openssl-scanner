@@ -12,6 +12,8 @@ import logging
 from typing import Dict, List, Any, Optional
 from importlib import resources
 
+from .cca_compat import is_custom_category
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +35,7 @@ class ExcelExporter:
     8. Errors       - Scan errors and warnings
     """
 
-    def export(self, report_path: str, output_path: str) -> None:
+    def export(self, report_path: str, output_path: str, cca_compat=None) -> None:
         """
         Export JSON report to Excel file.
 
@@ -66,7 +68,19 @@ class ExcelExporter:
 
         del wb['Sheet']
 
+        if cca_compat is not None:
+            symbols = data.get('openssl_symbols', {})
+            excluded_symbols = {
+                symbol
+                for category, entry in symbols.get('by_category', {}).items()
+                if is_custom_category(category)
+                for symbol in entry.get('symbols', [])
+            }
+            cca_compat.write_sheet(wb, symbols.get('all_unique', []),
+                                   excluded_symbols=excluded_symbols)
         wb.save(output_path)
+        if cca_compat is not None:
+            cca_compat.export_codes(output_path)
         logger.info(f"Excel report saved to: {output_path}")
 
     def _style_header(self, ws, row: int, num_cols: int) -> None:
@@ -3578,7 +3592,7 @@ class Exporter:
         self._html_exporter = HTMLExporter()
 
     def export(self, report_path: str, output_path: str,
-               format: Optional[str] = None) -> None:
+               format: Optional[str] = None, cca_compat=None) -> None:
         """
         Export report to specified format.
 
@@ -3595,8 +3609,10 @@ class Exporter:
             format = ext[1:] if ext else 'xlsx'
 
         if format == 'xlsx':
-            self._excel_exporter.export(report_path, output_path)
+            self._excel_exporter.export(report_path, output_path, cca_compat=cca_compat)
         elif format in ('html', 'htm'):
+            if cca_compat is not None:
+                raise ValueError("--cca-map requires XLSX output")
             self._html_exporter.export(report_path, output_path)
         else:
             raise ValueError(f"Unsupported format: {format}")

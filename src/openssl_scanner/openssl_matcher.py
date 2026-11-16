@@ -19,10 +19,10 @@ def categorize_symbol(symbol: str,
     """Categorize an OpenSSL symbol by prefix matching against SYMBOL_CATEGORIES."""
     if categories is None:
         categories = SYMBOL_CATEGORIES
-    if symbol in categories.get("COSTOM", []):
-        return "COSTOM"
+    if symbol in categories.get("CUSTOM", []):
+        return "CUSTOM"
     for category, prefixes in categories.items():
-        if category == "COSTOM":
+        if category == "CUSTOM":
             continue
         for prefix in prefixes:
             if symbol.startswith(prefix):
@@ -162,7 +162,7 @@ class OpenSSLMatcher:
 
         self._additional_symbols.update(symbols)
         self._openssl_exports.update(symbols)
-        self._categories["COSTOM"] = sorted(self._additional_symbols)
+        self._categories["CUSTOM"] = sorted(self._additional_symbols)
         if path not in self._additional_symbol_files:
             self._additional_symbol_files.append(path)
 

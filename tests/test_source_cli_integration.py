@@ -451,8 +451,8 @@ class TestSourceCLI:
             site["ossl_symbol"]: site for site in data["call_sites"]
         }
         assert set(by_symbol) == {"VENDOR_crypto_init", "SSL_connect"}
-        assert by_symbol["VENDOR_crypto_init"]["category"] == "COSTOM"
-        assert by_symbol["SSL_connect"]["category"] == "COSTOM"
+        assert by_symbol["VENDOR_crypto_init"]["category"] == "CUSTOM"
+        assert by_symbol["SSL_connect"]["category"] == "CUSTOM"
 
     def test_source_add_missing_file_fails_cleanly(self, tmp_path):
         import subprocess
@@ -1009,7 +1009,7 @@ class TestComboScanCLI:
             for site in project_data["call_sites"]
         }
         assert symbols == {"VENDOR_crypto_init"}
-        assert data["projects"][0]["call_sites"][0]["category"] == "COSTOM"
+        assert data["projects"][0]["call_sites"][0]["category"] == "CUSTOM"
 
     def test_combo_exclude(self, test_root, tmp_path):
         import subprocess

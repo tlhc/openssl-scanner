@@ -79,6 +79,7 @@ openssl-scanner scan /path/to/binary -o report.json
 | `source-merge` | 合并多个源码扫描报告 | 多个 XLSX | 合并 XLSX |
 | `combo-scan` | 一键探测+扫描+合并 | 根目录 | 合并 XLSX/JSON |
 | `source-diff` | 比较两次源码扫描报告 | 两个 JSON 报告 | 控制台/JSON/XLSX |
+| `cca-compat` | 按接口追加 CCA 兼容性页 | XLSX 对照表/报告 | XLSX |
 | `proc` | 运行中进程分析 | PID 或进程名 | JSON |
 | `hap` | OpenHarmony 包分析 | HAP/HAR/HSP/APP/ZIP | XLSX/HTML/JSON |
 | `hap-summary` | 从已有报告生成汇总 | JSON 报告目录/文件 | XLSX |
@@ -133,6 +134,71 @@ openssl-scanner scan /path/to/binary -o report.json
 ./scan source-diff old_report.json new_report.json
 ./scan source-diff old.json new.json -o diff.xlsx
 ```
+
+### CCA 兼容性
+
+将兼容性表 `cca_compat.xlsx` 放在 `scan` 同级目录，先运行导入脚本。
+脚本遍历所有 sheet，提取接口、CCA兼容性情况、使用产品、使用场景，生成 `cca_compat.json`。
+扫描工具自动读取同目录的 JSON，向 XLSX 输出追加 `CCA Compatibility` 页，无需指定映射参数。
+
+```bash
+# 默认读取工具目录的 cca_compat.xlsx，生成同目录的 cca_compat.json
+python3 import_cca.py
+
+# 也可导入指定表格，仍默认写入工具目录
+python3 import_cca.py /path/to/compatibility.xlsx
+
+# 扫描后自动匹配兼容性结论
+./scan source /path/to/src -o report.xlsx
+
+# 将已有 Excel 报告中的接口与对照表匹配
+./scan cca-compat report.xlsx -o report_cca.xlsx
+
+# 新增页中的结论编码为数字
+./scan source /path/to/src -o report.xlsx --hidden
+```
+
+导入支持表头前有标题行、重复表头及一个单元格内多个接口。接口列识别
+`OpenSSL接口`、`OpenSSL API`、`OpenSSL Symbol` 等名称；兼容性列识别
+`CCA兼容性情况`、`兼容性结论`、`CCA兼容性`、`结论` 等名称。
+使用产品、使用场景允许缺列或留空，保存为 `null`，不推断内容。
+公式读取 Excel 保存的缓存值；修改公式后应先用 Excel 重算并保存。
+
+JSON 格式如下；同一接口在不同来源的记录分别保留：
+
+```json
+{
+  "schema_version": 1,
+  "source_file": "cca_compat.xlsx",
+  "conclusions": [{"code": 1, "text": "接口一致无感知"}],
+  "interfaces": [{
+    "symbol": "SSL_new",
+    "compatibility": "接口一致无感知",
+    "products": "产品A",
+    "scenarios": "建立TLS连接",
+    "sheet": "TLS",
+    "row": 2
+  }]
+}
+```
+
+`compatibility`、`products`、`scenarios` 对应三项属性，值为文本或 `null`。
+导入时按结论首次出现顺序分配 1、2、3…，不限制数量，并将编码存入 `conclusions`。
+`--hidden` 使用 JSON 中的编码，只替换新增页的兼容性情况；使用产品、使用场景保持原文。
+调整 JSON 接口顺序或扫描接口子集不会改变编号；重新导入 Excel 会重新生成编码。
+修改 Excel 后需重新运行导入脚本，扫描过程不再读取 Excel 对照表。
+生成兼容性页时，同时在报告目录生成 `<报告名>_cca_codes.txt`，保存本次完整的“数字 → 结论”对应关系。
+例如 `report/report.xlsx` 对应 `report/report_cca_codes.txt`，可直接用文本编辑器查看。
+每份报告独立保存对照 TXT，使用生成该报告时的映射；空对照表生成仅含表头的 TXT。
+
+新增页保留来源 sheet 和行号，标记未匹配、空结论和冲突结论。
+排除 `CUSTOM`、`SELF` 类别（忽略大小写及首尾空格），自定义接口保留在原报告中。
+`cca-compat` 处理已有报告时也执行该过滤，并将旧的中文兼容性页替换为 `CCA Compatibility`。
+`source-merge`、`combo-scan` 和 `export` 的 XLSX 输出也会自动追加该页，并支持 `--hidden`。
+ELF 扫描先生成 JSON，再用 `export report.json -o report.xlsx` 追加该页。
+未放置 JSON 时保持原扫描流程；`cca-compat` 或 `--hidden` 找不到 JSON 时会提示先导入。
+JSON 格式、字段或编码无效时会报错，不输出兼容性报告。
+仓库提供只有表头的占位 Excel 和空 JSON。空数据不阻断扫描，接口显示为“未匹配”。
 
 ### `-o` 自动识别
 
