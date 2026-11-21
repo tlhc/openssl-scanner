@@ -13,9 +13,11 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from .cca_compat import is_custom_category
 from .source_analyzer import SourceScanResult
 
 if TYPE_CHECKING:
+    from .cca_compat import CCACompat
     from .hitls_compat import HiTLSCompat
 
 logger = logging.getLogger(__name__)
@@ -126,7 +128,8 @@ class SourceExcelExporter:
     """Export SourceScanResult to XLSX with call sites and symbol summary."""
 
     def export(self, result: SourceScanResult, output_path: str,
-               hitls_compat: Optional['HiTLSCompat'] = None) -> None:
+               hitls_compat: Optional['HiTLSCompat'] = None,
+               cca_compat: Optional['CCACompat'] = None) -> None:
         from . import _vendor  # noqa: F401
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
@@ -210,7 +213,14 @@ class SourceExcelExporter:
                 wb, set(result.unique_symbols), header_font, hitls_compat,
             )
 
+        if cca_compat is not None:
+            excluded_symbols = {cs.ossl_symbol for cs in result.call_sites
+                                if is_custom_category(cs.category)}
+            cca_compat.write_sheet(wb, result.unique_symbols,
+                                   excluded_symbols=excluded_symbols)
         wb.save(output_path)
+        if cca_compat is not None:
+            cca_compat.export_codes(output_path)
         logger.info("XLSX report saved to: %s", output_path)
 
     def _write_symbol_summary(self, wb, result: SourceScanResult,
@@ -363,7 +373,8 @@ class SourceMergeExporter:
     """Merge multiple source scan XLSX reports into one multi-sheet workbook."""
 
     def merge(self, input_paths: List[str], output_path: str,
-              hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+              hitls_compat: Optional['HiTLSCompat'] = None,
+              cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Read XLSX reports and write a merged workbook.
 
         Returns:
@@ -374,11 +385,13 @@ class SourceMergeExporter:
         for pdata, path in zip(project_data, input_paths):
             pdata['source'] = path
         return self._merge_to_workbook(project_data, output_path,
-                                       hitls_compat=hitls_compat)
+                                       hitls_compat=hitls_compat,
+                                       cca_compat=cca_compat)
 
     def merge_from_json(self, input_paths: List[str],
                         output_path: str,
-                        hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+                        hitls_compat: Optional['HiTLSCompat'] = None,
+                        cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Read JSON reports and write a merged XLSX (or JSON) workbook.
 
         Unlike merge() which reads XLSX, this reads the faster JSON format
@@ -386,7 +399,8 @@ class SourceMergeExporter:
         """
         project_data = self._load_projects(input_paths, self._read_json)
         return self._merge_to_workbook(project_data, output_path,
-                                       hitls_compat=hitls_compat)
+                                       hitls_compat=hitls_compat,
+                                       cca_compat=cca_compat)
 
     def _load_projects(self, input_paths, reader):
         """Load project data from input files using the given reader.
@@ -405,7 +419,8 @@ class SourceMergeExporter:
 
     def _merge_to_workbook(self, project_data: List[Dict],
                            output_path: str,
-                           hitls_compat: Optional['HiTLSCompat'] = None) -> Dict:
+                           hitls_compat: Optional['HiTLSCompat'] = None,
+                           cca_compat: Optional['CCACompat'] = None) -> Dict:
         """Shared implementation for all XLSX merge paths.
 
         Args:
@@ -543,7 +558,13 @@ class SourceMergeExporter:
                 wb, all_symbols, header_font, hitls_compat,
             )
 
+        if cca_compat is not None:
+            excluded_symbols = {row[4] for row in all_rows if is_custom_category(row[5])}
+            cca_compat.write_sheet(wb, all_symbols,
+                                   excluded_symbols=excluded_symbols)
         wb.save(output_path)
+        if cca_compat is not None:
+            cca_compat.export_codes(output_path)
         logger.info("Merged XLSX report saved to: %s", output_path)
         return {'sheets': stats, 'total_symbols': len(all_symbols)}
 

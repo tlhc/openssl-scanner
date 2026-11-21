@@ -75,8 +75,10 @@ Thumbs.db
 
 # Project specific
 *.json
+!/cca_compat.json
 !design/sample_output.json
 !src/openssl_scanner/data/*.json
 *.xlsx
+!/cca_compat.xlsx
 *.html
 hap_test_packages/

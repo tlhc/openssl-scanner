@@ -222,11 +222,11 @@ class TestOpenSSLMatcherStrict:
         assert original <= self.matcher.get_all_exports()
         assert self.matcher.is_openssl_symbol("VENDOR_crypto_init")
         assert self.matcher.is_openssl_symbol("SSL_connect")
-        assert self.matcher.categorize_symbol("VENDOR_crypto_init") == "COSTOM"
-        assert self.matcher.categorize_symbol("SSL_connect") == "COSTOM"
+        assert self.matcher.categorize_symbol("VENDOR_crypto_init") == "CUSTOM"
+        assert self.matcher.categorize_symbol("SSL_connect") == "CUSTOM"
         assert self.matcher.categorize_symbols([
             "VENDOR_crypto_init", "SSL_connect",
-        ]) == {"COSTOM": ["VENDOR_crypto_init", "SSL_connect"]}
+        ]) == {"CUSTOM": ["VENDOR_crypto_init", "SSL_connect"]}
         stats = self.matcher.get_stats()
         assert stats["additional_symbols_loaded"] == 2
         assert stats["additional_symbol_files"] == [str(symbol_file)]
